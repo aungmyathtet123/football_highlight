@@ -22,5 +22,6 @@ test("server-renders the Touchline AI upload studio", async () => {
   assert.match(html, /Drop your match footage here/);
   assert.match(html, /Full-video analysis/);
   assert.match(html, /Analyze football video/);
+  assert.match(html, /Logo \/ watermark masking/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Starter Project/i);
 });

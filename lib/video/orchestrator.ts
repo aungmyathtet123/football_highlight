@@ -61,5 +61,5 @@ export function validateSettings(input: Partial<EditSettings>): EditSettings {
   const intensity = input.intensity ?? "dynamic";
   if (!["normal", "reduced", "muted"].includes(originalAudio)) throw new ProviderError("INVALID_AUDIO_MODE", "Original audio mode is not supported.");
   if (!["natural", "dynamic", "high_energy"].includes(intensity)) throw new ProviderError("INVALID_INTENSITY", "Editing intensity is not supported.");
-  return { targetDuration, aspectRatio: "9:16", commentary: input.commentary ?? true, playerHighlight: input.playerHighlight ?? true, captions: input.captions ?? true, originalAudio, intensity };
+  return { targetDuration, aspectRatio: "9:16", commentary: input.commentary ?? true, playerHighlight: input.playerHighlight ?? true, captions: input.captions ?? true, logoMasking: input.logoMasking ?? true, originalAudio, intensity };
 }

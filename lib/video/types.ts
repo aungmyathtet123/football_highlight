@@ -27,6 +27,19 @@ export type EventType =
 
 export type CropPoint = { time: number; x: number; y: number; confidence: number };
 
+export type OverlayMask = {
+  id: string;
+  kind: "logo" | "watermark";
+  /** Normalized 0–1 output-frame coordinates. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  confidence: number;
+  firstSeen: number;
+  lastSeen: number;
+};
+
 export type FootballMoment = {
   id: string;
   startTime: number;
@@ -49,6 +62,7 @@ export type EditSettings = {
   commentary: boolean;
   playerHighlight: boolean;
   captions: boolean;
+  logoMasking: boolean;
   originalAudio: "normal" | "reduced" | "muted";
   intensity: "natural" | "dynamic" | "high_energy";
 };

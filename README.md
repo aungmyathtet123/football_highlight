@@ -6,6 +6,7 @@ Touchline AI turns long football footage into a single short vertical analysis/r
 
 - drag-and-drop MP4, MOV, or WebM selection with local source preview
 - all requested edit controls and a 60/65/70/80 second cap
+- user-controlled masking for detected logos or watermarks the uploader is authorized to alter
 - explicit asynchronous job stages and progress UX
 - weighted event scoring, replay deduplication, and duration-aware timeline packing
 - editable detected-moment review with timestamps, scores, and commentary

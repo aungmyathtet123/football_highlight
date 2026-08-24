@@ -14,7 +14,7 @@ const stages: { key: JobStage; label: string; detail: string }[] = [
   { key: "detecting_moments", label: "Finding key moments", detail: "Goals, chances, saves and skills" },
   { key: "tracking", label: "Tracking players & ball", detail: "Building a dynamic vertical crop" },
   { key: "generating_commentary", label: "Creating commentary", detail: "Writing visible, evidence-based analysis" },
-  { key: "editing", label: "Editing", detail: "Pacing, captions and emphasis" },
+  { key: "editing", label: "Editing", detail: "Pacing, captions, masking and emphasis" },
   { key: "rendering", label: "Rendering", detail: "Composing one 9:16 MP4" },
 ];
 
@@ -28,6 +28,7 @@ export function VideoStudio() {
   const [commentary, setCommentary] = useState(true);
   const [highlight, setHighlight] = useState(true);
   const [captions, setCaptions] = useState(true);
+  const [logoMasking, setLogoMasking] = useState(true);
   const [audio, setAudio] = useState<AudioMode>("reduced");
   const [intensity, setIntensity] = useState<Intensity>("dynamic");
   const [stageIndex, setStageIndex] = useState(0);
@@ -84,7 +85,7 @@ export function VideoStudio() {
 
   function downloadPlan() {
     if (!file) return;
-    const settings: EditSettings = { targetDuration: duration, aspectRatio: "9:16", commentary, playerHighlight: highlight, captions, originalAudio: audio, intensity };
+    const settings: EditSettings = { targetDuration: duration, aspectRatio: "9:16", commentary, playerHighlight: highlight, captions, logoMasking, originalAudio: audio, intensity };
     const blob = new Blob([JSON.stringify({ version: 1, source: { name: file.name, duration: sourceDuration }, settings, moments: selected }, null, 2)], { type: "application/json" });
     const href = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
@@ -102,7 +103,7 @@ export function VideoStudio() {
           <UploadView
             file={file} videoUrl={videoUrl} inputRef={inputRef} chooseFile={chooseFile} setSourceDuration={setSourceDuration}
             duration={duration} setDuration={setDuration} commentary={commentary} setCommentary={setCommentary}
-            highlight={highlight} setHighlight={setHighlight} captions={captions} setCaptions={setCaptions}
+            highlight={highlight} setHighlight={setHighlight} captions={captions} setCaptions={setCaptions} logoMasking={logoMasking} setLogoMasking={setLogoMasking}
             audio={audio} setAudio={setAudio} intensity={intensity} setIntensity={setIntensity} analyze={analyze}
           />
         )}
@@ -134,11 +135,12 @@ type UploadProps = {
   chooseFile: (file: File | undefined) => void; setSourceDuration: (value: number) => void;
   duration: number; setDuration: (value: number) => void; commentary: boolean; setCommentary: (value: boolean) => void;
   highlight: boolean; setHighlight: (value: boolean) => void; captions: boolean; setCaptions: (value: boolean) => void;
+  logoMasking: boolean; setLogoMasking: (value: boolean) => void;
   audio: AudioMode; setAudio: (value: AudioMode) => void; intensity: Intensity; setIntensity: (value: Intensity) => void; analyze: () => void;
 };
 
 function UploadView(props: UploadProps) {
-  const { file, videoUrl, inputRef, chooseFile, setSourceDuration, duration, setDuration, commentary, setCommentary, highlight, setHighlight, captions, setCaptions, audio, setAudio, intensity, setIntensity, analyze } = props;
+  const { file, videoUrl, inputRef, chooseFile, setSourceDuration, duration, setDuration, commentary, setCommentary, highlight, setHighlight, captions, setCaptions, logoMasking, setLogoMasking, audio, setAudio, intensity, setIntensity, analyze } = props;
   return <>
     <header className="topbar"><div><div className="eyebrow"><span className="pulse-dot" /> AI VIDEO STUDIO</div><h1>Create a football edit</h1></div><div className="step-indicator"><span>1</span> Upload & settings</div></header>
     <div className="content-grid">
@@ -152,10 +154,10 @@ function UploadView(props: UploadProps) {
         <div className="format-preview"><div className="phone-frame"><div className="pitch-lines"><span>9:16</span></div></div><div><span className="mini-label">OUTPUT FORMAT</span><h3>Built for the vertical feed</h3><p>The crop follows the ball and key player to keep every move in frame—without bars or blurred padding.</p><div className="spec-row"><span>1080 × 1920</span><span>60–70 sec</span><span>MP4</span></div></div></div>
       </section>
       <aside className="settings-card" aria-label="Edit settings">
-        <div className="settings-heading"><div><span className="mini-label">YOUR EDIT</span><h2>Settings</h2></div><button className="reset-button" onClick={() => { setDuration(65); setCommentary(true); setHighlight(true); setCaptions(true); setAudio("reduced"); setIntensity("dynamic"); }}>Reset</button></div>
+        <div className="settings-heading"><div><span className="mini-label">YOUR EDIT</span><h2>Settings</h2></div><button className="reset-button" onClick={() => { setDuration(65); setCommentary(true); setHighlight(true); setCaptions(true); setLogoMasking(true); setAudio("reduced"); setIntensity("dynamic"); }}>Reset</button></div>
         <Setting label="Final length" note="Target duration"><div className="segmented four">{[60, 65, 70, 80].map((value) => <button key={value} className={duration === value ? "selected" : ""} onClick={() => setDuration(value)}>{value}s{value === 65 && <small>DEFAULT</small>}</button>)}</div></Setting>
         <Setting label="Aspect ratio" note="Full-screen output"><button className="select-row"><span><b className="ratio-icon" /> 9:16 Vertical</span><span>⌄</span></button></Setting>
-        <div className="toggle-group"><Toggle label="AI commentary" detail="Original analysis narration" checked={commentary} onChange={setCommentary} /><Toggle label="Player highlight" detail="Circle or spotlight key players" checked={highlight} onChange={setHighlight} /><Toggle label="Captions" detail="Burned-in dynamic subtitles" checked={captions} onChange={setCaptions} /></div>
+        <div className="toggle-group"><Toggle label="AI commentary" detail="Original analysis narration" checked={commentary} onChange={setCommentary} /><Toggle label="Player highlight" detail="Circle or spotlight key players" checked={highlight} onChange={setHighlight} /><Toggle label="Captions" detail="Burned-in dynamic subtitles" checked={captions} onChange={setCaptions} /><Toggle label="Logo / watermark masking" detail="Blur authorized persistent overlays" checked={logoMasking} onChange={setLogoMasking} /></div>
         <Setting label="Original audio" note="Match sound level"><div className="segmented three">{(["normal", "reduced", "muted"] as AudioMode[]).map((value) => <button key={value} className={audio === value ? "selected" : ""} onClick={() => setAudio(value)}>{titleCase(value)}</button>)}</div></Setting>
         <Setting label="Editing intensity" note="Pacing and effects"><div className="segmented three">{(["natural", "dynamic", "high_energy"] as Intensity[]).map((value) => <button key={value} className={intensity === value ? "selected" : ""} onClick={() => setIntensity(value)}>{value === "high_energy" ? "High energy" : titleCase(value)}</button>)}</div></Setting>
         <button className="primary-button" disabled={!file} onClick={analyze}>Analyze football video <span>→</span></button>
@@ -186,8 +188,8 @@ function ResultView({ file, videoUrl, selected, allMoments, finalDuration, sourc
     <header className="topbar result-topbar"><div><div className="eyebrow"><span className="pulse-dot" /> EDIT READY</div><h1>Your football story</h1></div><div className="result-actions"><button className="secondary-button" onClick={regenerate}>↻ Regenerate timeline</button><button className="primary-compact" onClick={downloadPlan}>Download edit plan ↓</button></div></header>
     <div className="result-grid">
       <section className="preview-panel">
-        <div className="preview-stage"><div className="vertical-video">{videoUrl ? <video ref={videoRef} src={videoUrl} controls playsInline /> : <div className="video-fallback">Preview unavailable</div>}<div className="analysis-label">WATCH THE SPACE HERE</div><div className="player-ring" /></div></div>
-        <div className="preview-note"><span className="status-pill"><i /> Timeline complete</span><span>This browser preview uses the source file. The render worker applies the final crop, overlays, narration and captions.</span></div>
+        <div className="preview-stage"><div className="vertical-video">{videoUrl ? <video ref={videoRef} src={videoUrl} controls playsInline><track kind="captions" label="Captions are included in the rendered export" /></video> : <div className="video-fallback">Preview unavailable</div>}<div className="analysis-label">WATCH THE SPACE HERE</div><div className="player-ring" /></div></div>
+        <div className="preview-note"><span className="status-pill"><i /> Timeline complete</span><span>This browser preview uses the source file. The render worker applies the final crop, authorized logo masking, narration and captions.</span></div>
       </section>
       <aside className="timeline-panel">
         <div className="timeline-head"><div><span className="mini-label">SELECTED MOMENTS</span><h2>{selected.length} moments · {formatTime(finalDuration)}</h2></div><span className="duration-target">Target 65s</span></div>
@@ -206,7 +208,7 @@ function ResultView({ file, videoUrl, selected, allMoments, finalDuration, sourc
 }
 
 function Setting({ label, note, children }: { label: string; note: string; children: React.ReactNode }) { return <div className="setting"><div className="setting-label"><strong>{label}</strong><span>{note}</span></div>{children}</div>; }
-function Toggle({ label, detail, checked, onChange }: { label: string; detail: string; checked: boolean; onChange: (value: boolean) => void }) { return <label className="toggle-row"><span><strong>{label}</strong><small>{detail}</small></span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><i /></label>; }
+function Toggle({ label, detail, checked, onChange }: { label: string; detail: string; checked: boolean; onChange: (value: boolean) => void }) { return <label className="toggle-row" aria-label={label}><span><strong>{label}</strong><small>{detail}</small></span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><i /></label>; }
 function formatBytes(bytes: number) { if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`; return `${(bytes / 1024 / 1024).toFixed(1)} MB`; }
 function formatTime(seconds: number) { const safe = Number.isFinite(seconds) ? Math.max(0, Math.round(seconds)) : 0; return `${Math.floor(safe / 60)}:${String(safe % 60).padStart(2, "0")}`; }
 function titleCase(value: string) { return value.charAt(0).toUpperCase() + value.slice(1); }
