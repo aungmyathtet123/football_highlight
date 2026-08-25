@@ -7,6 +7,13 @@
   },
   "scripts": {
     "dev": "vinext dev",
+    "processor": "node local-processor/server.mjs",
+    "setup:tracking": "powershell -ExecutionPolicy Bypass -File scripts/setup-tracking.ps1",
+    "test:gemini": "node scripts/test-gemini.mjs",
+    "test:gemini-video": "node scripts/test-gemini-video.mjs",
+    "test:video-intelligence": "node scripts/test-video-intelligence.mjs",
+    "test:tts": "node scripts/test-google-cloud-tts.mjs",
+    "test:connections": "npm run test:gemini && npm run test:gemini-video && npm run test:video-intelligence && npm run test:tts",
     "build": "vinext build",
     "start": "vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",
@@ -14,6 +21,9 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@google-cloud/text-to-speech": "^7.0.0",
+    "@google-cloud/video-intelligence": "^7.0.0",
+    "@google/genai": "^2.18.0",
     "drizzle-orm": "0.45.2",
     "react": "19.2.6",
     "react-dom": "19.2.6"

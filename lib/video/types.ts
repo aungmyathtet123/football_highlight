@@ -7,6 +7,7 @@ export type JobStage =
   | "generating_commentary"
   | "editing"
   | "rendering"
+  | "validating"
   | "completed"
   | "failed";
 
@@ -17,6 +18,9 @@ export type EventType =
   | "big_chance"
   | "shot_on_target"
   | "save"
+  | "foul"
+  | "yellow_card"
+  | "red_card"
   | "free_kick"
   | "var"
   | "skill"
@@ -45,6 +49,29 @@ export type FootballMoment = {
   startTime: number;
   endTime: number;
   eventType: EventType;
+  storyId?: string;
+  storyPhase?: "hook" | "build_up" | "action" | "payoff" | "reaction" | "replay" | "standalone";
+  keepDecision?: "keep" | "support" | "replay" | "reject";
+  sourceImportanceScore?: number;
+  hookScore?: number;
+  flowScore?: number;
+  visualClarity?: number;
+  excitementScore?: number;
+  narrativeCompleteness?: number;
+  rejectReason?: string;
+  isReplay?: boolean;
+  editOrder?: number;
+  role?: string;
+  transitionIn?: "cut" | "crossfade" | "crosszoom" | "whip" | "flash";
+  playerHighlight?: boolean;
+  transitionDuration?: number;
+  effect?: "none" | "punch_zoom" | "slow_motion" | "speed_up" | "replay_treatment";
+  playbackRate?: number;
+  analysisPurpose?: string;
+  onScreenText?: string;
+  eventCallout?: "none" | "amazing" | "goal" | "shot" | "save" | "foul" | "card" | "close" | "pass" | "celebration";
+  colorGrade?: "cool" | "clean" | "warm" | "dramatic" | "goal_gold" | "replay_blue";
+  soundEffect?: "none" | "whoosh" | "impact" | "goal" | "whistle" | "sparkle";
   importanceScore: number;
   description: string;
   confidence: number;

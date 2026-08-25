@@ -41,3 +41,13 @@ yarn-error.log*
 /.wrangler/
 /outputs/
 /work/
+/local-data/
+/tools/ffmpeg/
+/tools/ffmpeg-download/
+/.venv-tracking/
+/tools/tracking/*.pt
+
+# generated local processor artifacts
+__pycache__/
+*.py[cod]
+*.orig
