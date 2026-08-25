@@ -8,7 +8,11 @@
   "scripts": {
     "dev": "vinext dev",
     "processor": "node local-processor/server.mjs",
+    "setup": "powershell -ExecutionPolicy Bypass -File scripts/setup.ps1",
     "setup:tracking": "powershell -ExecutionPolicy Bypass -File scripts/setup-tracking.ps1",
+    "setup:verify": "powershell -ExecutionPolicy Bypass -File scripts/verify-setup.ps1",
+    "local:start": "powershell -ExecutionPolicy Bypass -File scripts/start-local.ps1",
+    "local:stop": "powershell -ExecutionPolicy Bypass -File scripts/stop-local.ps1",
     "test:gemini": "node scripts/test-gemini.mjs",
     "test:gemini-video": "node scripts/test-gemini-video.mjs",
     "test:video-intelligence": "node scripts/test-video-intelligence.mjs",

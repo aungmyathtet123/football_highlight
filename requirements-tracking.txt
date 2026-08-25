@@ -1,0 +1,2 @@
+# PyTorch 2.13.0 and torchvision 0.28.0 are installed from the official CPU wheel index by setup-tracking.ps1.
+ultralytics==8.4.52
