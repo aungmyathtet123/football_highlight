@@ -10,6 +10,7 @@ import { synthesizeGoogleCloudSpeech } from "./google-cloud-tts.mjs";
 import { renderVideoV2 } from "./render-video-v2.mjs";
 import {
   MAX_SCENE_SECONDS,
+  assessPlannedSceneTracking,
   buildContinuousNarration,
   buildWholeVideoDirectorPrompt,
   selectDirectorCandidates,
@@ -146,13 +147,25 @@ async function resumeRender(id) {
   try {
     job = await updateJob(job, "tracking", 48);
     const tracking = await loadOrTrackFootball(job.sourceKey, job.moments, job.media, id);
-    job = await updateJob(job, "generating_commentary", 60, { trackingSummary: tracking.summary });
-    const ttsFiles = job.settings.commentary ? await loadSavedSpeech(job.moments, id) : new Map();
+    const plannedMoments = applyTrackingQuality(job.moments, tracking);
+    if (plannedMoments.filter((moment) => moment.selectedForFinalVideo).length < 2) {
+      throw new Error("The saved editorial plan could not retain two renderable scenes after ball-and-player tracking.");
+    }
+    job = await updateJob(job, "generating_commentary", 60, {
+      moments: plannedMoments,
+      trackingSummary: tracking.summary,
+      editPlan: {
+        ...job.editPlan,
+        selectedCount: plannedMoments.filter((moment) => moment.selectedForFinalVideo).length,
+        narrationScript: buildContinuousNarration(plannedMoments),
+      },
+    });
+    const ttsFiles = job.settings.commentary ? await loadSavedSpeech(plannedMoments, id) : new Map();
     const destination = join(outputRoot, id);
     await mkdir(destination, { recursive: true });
     const outputPath = join(destination, "final.mp4");
     job = await updateJob(job, "rendering", 84);
-    await renderVideoV2(job.sourceKey, outputPath, job.moments, job.settings, job.media, ttsFiles, job.overlayMasks || [], tracking);
+    await renderVideoV2(job.sourceKey, outputPath, plannedMoments, job.settings, job.media, ttsFiles, job.overlayMasks || [], tracking);
     await updateJob(job, "completed", 100, {
       outputKey: outputPath,
       outputUrl: `http://127.0.0.1:${port}/outputs/${id}/final.mp4`,
@@ -227,8 +240,8 @@ async function processJob(id) {
     const tracking = await trackFootball(job.sourceKey, selected, media, id);
     selected = applyTrackingQuality(selected, tracking);
     const frameable = selected.filter((moment) => moment.selectedForFinalVideo);
-    if (frameable.length < 3) {
-      throw new Error("The chosen story did not contain enough full-screen scenes where the football and involved player fit together. Try another source or target duration.");
+    if (frameable.length < 2) {
+      throw new Error("The planned story could not retain two renderable scenes after ball-and-player tracking. Try another source.");
     }
     job = await updateJob(job, "tracking", 56, {
       moments: selected,
@@ -765,21 +778,15 @@ function applyEditPlan(candidates, plan, targetDuration) {
 function applyTrackingQuality(moments, tracking) {
   const approved = new Map();
   for (const moment of moments.filter((item) => item.selectedForFinalVideo)) {
-    if (playerOnlyAllowed(moment)) {
-      approved.set(moment.id, moment);
-      continue;
-    }
     const evidence = tracking?.moments?.[moment.id];
-    const frameable = evidence
-      && evidence.openingJointVisible
-      && Number(evidence.jointVisibilityCoverage || 0) >= 0.42
-      && Number(evidence.jointFitCoverage || 0) >= 0.48;
-    if (frameable) approved.set(moment.id, moment);
+    const assessment = assessPlannedSceneTracking(moment, evidence);
+    if (assessment.usable) approved.set(moment.id, { ...moment, trackingDecision: assessment.mode });
   }
   let order = 0;
   return moments.map((moment) => {
-    if (!approved.has(moment.id)) return { ...moment, selectedForFinalVideo: false };
-    return { ...moment, selectedForFinalVideo: true, editOrder: order++ };
+    const planned = approved.get(moment.id);
+    if (!planned) return { ...moment, selectedForFinalVideo: false, trackingDecision: "rejected_after_plan" };
+    return { ...planned, selectedForFinalVideo: true, editOrder: order++ };
   });
 }
 

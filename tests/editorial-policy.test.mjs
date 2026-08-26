@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   MAX_SCENE_SECONDS,
+  assessPlannedSceneTracking,
   buildContinuousNarration,
   buildWholeVideoDirectorPrompt,
   selectDirectorCandidates,
@@ -73,4 +74,20 @@ test("TTS direction requests a male analyst rather than play-by-play hype", () =
   assert.match(commentaryPrompt, /football analyst/i);
   assert.match(commentaryPrompt, /never shout like live play-by-play/i);
   assert.match(commentaryPrompt, /one consistent performance/i);
+});
+
+test("tracking preserves a planned replay when only its opening frame is weak", () => {
+  const assessment = assessPlannedSceneTracking(
+    { eventType: "goal", storyPhase: "replay", role: "proof" },
+    { openingJointVisible: false, jointVisibilityCoverage: 0.83, jointFitCoverage: 0.5 },
+  );
+  assert.deepEqual(assessment, { usable: true, mode: "recovered_planned_scene" });
+});
+
+test("tracking still rejects a planned gameplay scene with persistently missing joint framing", () => {
+  const assessment = assessPlannedSceneTracking(
+    { eventType: "normal_play", storyPhase: "action", role: "action" },
+    { openingJointVisible: false, jointVisibilityCoverage: 0.31, jointFitCoverage: 0.22 },
+  );
+  assert.equal(assessment.usable, false);
 });

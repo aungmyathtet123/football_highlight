@@ -70,6 +70,28 @@ export function buildContinuousNarration(moments) {
     .join(" ");
 }
 
+export function assessPlannedSceneTracking(moment, evidence) {
+  const reactionOnly = moment.eventType === "celebration"
+    || moment.storyPhase === "reaction"
+    || moment.role === "reaction";
+  if (reactionOnly) return { usable: true, mode: "planned_reaction" };
+  if (!evidence) return { usable: false, mode: "missing_tracking" };
+
+  const jointVisibility = Number(evidence.jointVisibilityCoverage || 0);
+  const jointFit = Number(evidence.jointFitCoverage || 0);
+  const strict = Boolean(evidence.openingJointVisible)
+    && jointVisibility >= 0.42
+    && jointFit >= 0.48;
+  if (strict) return { usable: true, mode: "strict" };
+
+  // Preserve the approved editorial plan when only the opening sample is weak
+  // but the large majority of the planned scene keeps ball and player together.
+  const recoverable = jointVisibility >= 0.68 && jointFit >= 0.48;
+  return recoverable
+    ? { usable: true, mode: "recovered_planned_scene" }
+    : { usable: false, mode: "insufficient_joint_framing" };
+}
+
 export function splitCaptionChunks(value, maximumWords = 4) {
   const words = String(value || "").replace(/[\r\n]+/g, " ").trim().split(/\s+/).filter(Boolean);
   if (words.length === 0) return [];
