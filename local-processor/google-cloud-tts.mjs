@@ -28,13 +28,16 @@ export function getGoogleCloudTtsConfig() {
 
 export async function synthesizeGoogleCloudSpeech(text, outputPath) {
   const config = getGoogleCloudTtsConfig();
+  const generativeVoice = /^gemini-/i.test(config.model);
   const options = { projectId: config.projectId };
   if (config.location !== "global") options.apiEndpoint = `${config.location}-texttospeech.googleapis.com`;
   const client = new TextToSpeechClient(options);
   try {
     const [response] = await client.synthesizeSpeech({
-      input: { text, prompt: commentaryPrompt },
-      voice: { languageCode: config.languageCode, name: config.voice, modelName: config.model },
+      input: generativeVoice ? { text, prompt: commentaryPrompt } : { text },
+      voice: generativeVoice
+        ? { languageCode: config.languageCode, name: config.voice, modelName: config.model }
+        : { languageCode: config.languageCode, name: config.voice },
       audioConfig: { audioEncoding: "LINEAR16" },
     });
     if (!response.audioContent) throw configurationError("Google Cloud Text-to-Speech returned no audio data.");

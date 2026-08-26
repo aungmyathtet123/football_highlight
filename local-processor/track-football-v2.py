@@ -11,7 +11,8 @@ from ultralytics import YOLO
 
 PERSON_CLASS = 0
 SPORTS_BALL_CLASS = 32
-MAX_BALL_GAP_SECONDS = 0.85
+MAX_BALL_GAP_SECONDS = 0.45
+GOAL_BALL_GAP_SECONDS = 0.75
 MAX_TRACK_GAP_SECONDS = 0.75
 CAMERA_DEAD_ZONE = 0.028
 MAX_CAMERA_SPEED = 0.34
@@ -195,7 +196,7 @@ def choose_ball(candidates, predicted):
 def player_score(person, ball, incumbent_id):
     foot = (person["cx"], person["y2"])
     proximity = point_distance(foot, ball, 0.52) if ball is not None else abs(person["cx"] - 0.5) + abs(person["cy"] - 0.57) * 0.25
-    continuity = 0.095 if person.get("trackId") == incumbent_id else 0.0
+    continuity = 0.20 if person.get("trackId") == incumbent_id else 0.0
     maturity = min(0.035, max(0, person.get("trackAge", 1) - 1) * 0.006)
     return proximity - continuity - maturity - person["confidence"] * 0.025
 
@@ -209,9 +210,9 @@ def choose_locked_player(people, ball, incumbent_id, pending_id, pending_count):
         return challenger, challenger["trackId"], None, 0
     if challenger["trackId"] == incumbent_id:
         return incumbent, incumbent_id, None, 0
-    if player_score(challenger, ball, incumbent_id) + 0.055 < player_score(incumbent, ball, incumbent_id):
+    if player_score(challenger, ball, incumbent_id) + 0.11 < player_score(incumbent, ball, incumbent_id):
         count = pending_count + 1 if challenger["trackId"] == pending_id else 1
-        if count >= 3:
+        if count >= 5:
             return challenger, challenger["trackId"], None, 0
         return incumbent, incumbent_id, challenger["trackId"], count
     return incumbent, incumbent_id, None, 0
@@ -222,7 +223,7 @@ def weighted_center(items, fallback):
     return sum(value * weight for value, weight in items) / total if total else fallback
 
 
-def action_target(people, ball, active, velocity, fallback_x, view_width):
+def action_target(people, ball, active, velocity, fallback_x, view_width, goal_mode=False):
     people_x = float(np.median([person["cx"] for person in people])) if people else fallback_x
     people_y = float(np.median([person["cy"] for person in people])) if people else 0.52
     if ball is None:
@@ -233,19 +234,21 @@ def action_target(people, ball, active, velocity, fallback_x, view_width):
     direction = 1 if velocity[0] > 0.025 else -1 if velocity[0] < -0.025 else 0
     ahead = [person for person in people if direction and (person["cx"] - ball[0]) * direction > 0.04]
     destination = min(ahead, key=lambda person: abs(person["cx"] - ball[0] - direction * 0.16) + abs(person["cy"] - ball[1]) * 0.25) if ahead else None
-    x_items, y_items = [(ball[0], 3.2)], [(ball[1], 2.6)]
+    ball_weight = 4.4 if goal_mode else 3.2
+    x_items, y_items = [(ball[0], ball_weight)], [(ball[1], 3.4 if goal_mode else 2.6)]
     if active is not None:
         x_items.append((active["cx"], 2.5))
         y_items.append((active["cy"], 2.0))
     if destination is not None and (active is None or destination["trackId"] != active["trackId"]):
-        x_items.append((destination["cx"], 1.25))
-        y_items.append((destination["cy"], 0.85))
+        x_items.append((destination["cx"], 1.65 if goal_mode else 1.25))
+        y_items.append((destination["cy"], 1.10 if goal_mode else 0.85))
     for person in nearby:
         if active is not None and person["trackId"] == active["trackId"]:
             continue
         x_items.append((person["cx"], 0.38))
         y_items.append((person["cy"], 0.26))
-    target_x = clamp(weighted_center(x_items, fallback_x) + clamp(velocity[0] * 0.24, -0.075, 0.075), 0.0, 1.0)
+    velocity_lookahead = 0.46 if goal_mode else 0.24
+    target_x = clamp(weighted_center(x_items, fallback_x) + clamp(velocity[0] * velocity_lookahead, -0.12 if goal_mode else -0.075, 0.12 if goal_mode else 0.075), 0.0, 1.0)
     target_y = clamp(weighted_center(y_items, 0.5) + clamp(velocity[1] * 0.14, -0.045, 0.045), 0.0, 1.0)
     spread = max(value for value, _ in x_items) - min(value for value, _ in x_items)
     if ball is not None and active is not None:
@@ -335,6 +338,19 @@ def build_keyframes(records, media_width, media_height, fallback_x, output_width
     half_x, half_y = crop_width / media_width / 2, crop_height / media_height / 2
     camera_x = smooth_camera([record["camera_target_x"] for record in records], times, resets, fallback_x, half_x, sample_fps)
     camera_y = smooth_camera([record["camera_target_y"] for record in records], times, resets, 0.5, half_y, sample_fps)
+
+    intro_records = [record for record in records if record["time"] <= 1.2 and record["possession"]]
+    identity_scores = {}
+    for record in intro_records:
+        track_id = record["player_track_id"]
+        if track_id is not None:
+            identity_scores[track_id] = identity_scores.get(track_id, 0.0) + record["subject_confidence"]
+    highlight_track_id = max(identity_scores, key=identity_scores.get) if identity_scores else None
+    opening_identity = next((
+        record for record in records
+        if record["time"] <= 0.35 and record["possession"] and record["player_track_id"] == highlight_track_id
+    ), None)
+
     keyframes = []
     for index, record in enumerate(records):
         crop_left = camera_x[index] * media_width - crop_width / 2
@@ -344,8 +360,13 @@ def build_keyframes(records, media_width, media_height, fallback_x, output_width
         player_top_y = window_top + (record["player_top"] * media_height - crop_top) / crop_height * window_height if record["player_top"] is not None else -320
         ball_center_x = (record["ball_x"] * media_width - crop_left) / crop_width * output_width if record["ball_x"] is not None else -320
         ball_center_y = window_top + (record["ball_y"] * media_height - crop_top) / crop_height * window_height if record["ball_y"] is not None else -320
-        marker_visible = record["joint_visible"] and record["subject_confidence"] >= 0.48
-        ball_marker_visible = marker_visible and record["direct_ball"] and record["ball_confidence"] >= 0.08
+        marker_visible = (
+            highlight_track_id is not None
+            and record["player_track_id"] == highlight_track_id
+            and record["possession"]
+            and record["subject_confidence"] >= 0.55
+        )
+        ball_marker_visible = record["direct_ball"] and record["ball_confidence"] >= 0.12
         keyframes.append({
             "time": round(record["time"], 3), "cameraX": round(camera_x[index], 6), "cameraY": round(camera_y[index], 6),
             "playerCenterX": round(player_center_x, 2), "playerCenterY": round(player_center_y, 2), "playerTopY": round(player_top_y, 2),
@@ -355,18 +376,17 @@ def build_keyframes(records, media_width, media_height, fallback_x, output_width
             "sceneCut": 1 if record["scene_cut"] else 0,
         })
     annotation = {"style": "none", "confidence": 0.0, "duration": 0.0}
-    first_record = records[0]
+    first_record = opening_identity or records[0]
     opening_joint_fit = (
-        first_record["player_track_id"] is not None
+        opening_identity is not None
         and first_record["direct_ball"]
         and first_record["joint_span"] + min(0.09, crop_width / media_width * 0.22) <= crop_width / media_width
     )
-    intro = [first_record] if opening_joint_fit else []
+    intro = [record for record in intro_records if record["player_track_id"] == highlight_track_id] if opening_joint_fit else []
     if intro:
         first = intro[0]
-        same = [record for record in intro if record["player_track_id"] == first["player_track_id"]]
-        continuity = len(same) / max(1, len(intro))
-        confidence = clamp(float(np.median([record["subject_confidence"] for record in same])) * 0.58 + continuity * 0.22 + clamp(first["ball_confidence"] / 0.45, 0.0, 1.0) * 0.20, 0.0, 1.0)
+        continuity = len(intro) / max(1, len([record for record in records if record["time"] <= 1.2]))
+        confidence = clamp(float(np.median([record["subject_confidence"] for record in intro])) * 0.58 + continuity * 0.22 + clamp(first["ball_confidence"] / 0.45, 0.0, 1.0) * 0.20, 0.0, 1.0)
         index = records.index(first)
         crop_left = camera_x[index] * media_width - crop_width / 2
         crop_top = camera_y[index] * media_height - crop_height / 2
@@ -387,11 +407,9 @@ def build_keyframes(records, media_width, media_height, fallback_x, output_width
                     "sourceX": round(first["player_x"], 6),
                     "sourceYTop": round(first["player_top"], 6),
                     "sourceYCenter": round(first["player_y"], 6),
-                    "trackId": first["player_track_id"],
+                    "trackId": highlight_track_id,
                 }
     return keyframes, annotation
-
-
 def track_moment(model, capture, moment, media_width, media_height, source_fps, args):
     start, end = float(moment["startTime"]), float(moment["endTime"])
     fallback_x = clamp(float(moment.get("focusX", 0.5)), 0.0, 1.0)
@@ -405,6 +423,11 @@ def track_moment(model, capture, moment, media_width, media_height, source_fps, 
     pending_count = 0
     previous_histogram = None
     direct_ball_frames = people_frames = sampled_frames = 0
+    current_direct_gap = maximum_direct_gap = 0.0
+    identity_switches = 0
+    previous_subject_id = None
+    goal_mode = moment.get("eventType") == "goal"
+    allowed_ball_gap = GOAL_BALL_GAP_SECONDS if goal_mode else MAX_BALL_GAP_SECONDS
     while True:
         success, frame = capture.read()
         if not success:
@@ -435,9 +458,13 @@ def track_moment(model, capture, moment, media_width, media_height, source_fps, 
             gap = max(0.0, timestamp - last_ball_time)
             predicted = (clamp(last_ball[0] + ball_velocity[0] * gap, 0.0, 1.0), clamp(last_ball[1] + ball_velocity[1] * gap, 0.0, 1.0))
         detected = choose_ball(balls, predicted)
-        direct_ball, ball_confidence = detected is not None, 0.0
+        ball_pixel_diameter = 0.0
         if detected is not None:
-            direct_ball_frames += 1
+            ball_pixel_diameter = max(detected["x2"] - detected["x1"], detected["y2"] - detected["y1"]) / view_width * args.output_width
+        direct_ball = bool(detected is not None and float(detected["confidence"]) >= 0.12 and ball_pixel_diameter >= 5.0)
+        ball_confidence = 0.0
+        if detected is not None:
+            direct_ball_frames += 1 if direct_ball else 0
             measured = (detected["cx"], detected["cy"])
             if last_ball is not None and last_ball_time is not None:
                 gap = max(0.001, timestamp - last_ball_time)
@@ -446,14 +473,20 @@ def track_moment(model, capture, moment, media_width, media_height, source_fps, 
                     clamp(ball_velocity[0] * 0.60 + measured_velocity[0] * 0.40, -1.1, 1.1),
                     clamp(ball_velocity[1] * 0.60 + measured_velocity[1] * 0.40, -1.1, 1.1),
                 )
-            last_ball, last_ball_time, last_direct_ball_time = measured, timestamp, timestamp
+            last_ball, last_ball_time = measured, timestamp
+            if direct_ball:
+                last_direct_ball_time = timestamp
             ball_confidence = float(detected["confidence"])
-        elif predicted is not None and last_direct_ball_time is not None and timestamp - last_direct_ball_time <= MAX_BALL_GAP_SECONDS:
+        elif predicted is not None and last_direct_ball_time is not None and timestamp - last_direct_ball_time <= allowed_ball_gap:
             last_ball, last_ball_time = predicted, timestamp
-            ball_confidence = max(0.04, 0.20 * (1 - (timestamp - last_direct_ball_time) / MAX_BALL_GAP_SECONDS))
+            ball_confidence = max(0.04, 0.20 * (1 - (timestamp - last_direct_ball_time) / allowed_ball_gap))
         else:
             last_ball, ball_velocity = None, (0.0, 0.0)
         active, subject_id, pending_id, pending_count = choose_locked_player(people, last_ball, subject_id, pending_id, pending_count)
+        if previous_subject_id is not None and subject_id is not None and subject_id != previous_subject_id:
+            identity_switches += 1
+        if subject_id is not None:
+            previous_subject_id = subject_id
         if active is not None:
             proximity = point_distance((active["cx"], active["y2"]), last_ball) if last_ball is not None else 0.5
             proximity_score = clamp(1.0 - proximity / 0.20, 0.0, 1.0)
@@ -462,15 +495,19 @@ def track_moment(model, capture, moment, media_width, media_height, source_fps, 
             subject_confidence = clamp(active["confidence"] * 0.30 + proximity_score * 0.28 + maturity * 0.22 + ball_quality * 0.20, 0.0, 1.0)
         else:
             subject_confidence = 0.0
-        target_x, target_y, spread = action_target(people, last_ball, active, ball_velocity, fallback_x, view_width)
-        joint_visible = last_ball is not None and active is not None
+        target_x, target_y, spread = action_target(people, last_ball, active, ball_velocity, fallback_x, view_width, goal_mode)
+        possessing = bool(direct_ball and active is not None and proximity <= 0.135)
+        joint_visible = direct_ball and active is not None
         joint_span = max(last_ball[0], active["x2"]) - min(last_ball[0], active["x1"]) if joint_visible else 1.0
+        current_direct_gap = 0.0 if direct_ball else current_direct_gap + 1.0 / args.sample_fps
+        maximum_direct_gap = max(maximum_direct_gap, current_direct_gap)
         records.append({
             "time": timestamp - start, "camera_target_x": target_x, "camera_target_y": target_y, "action_spread": spread,
             "player_x": active["cx"] if active is not None else None, "player_y": active["cy"] if active is not None else None,
             "player_top": active["y1"] if active is not None else None, "player_track_id": active.get("trackId") if active is not None else None,
             "ball_x": last_ball[0] if last_ball is not None else None, "ball_y": last_ball[1] if last_ball is not None else None,
             "direct_ball": direct_ball, "joint_visible": joint_visible, "joint_span": joint_span,
+            "possession": possessing, "ball_pixel_diameter": ball_pixel_diameter,
             "subject_confidence": subject_confidence, "scene_cut": scene_cut, "ball_confidence": ball_confidence,
         })
     keyframes, annotation = build_keyframes(
@@ -484,6 +521,14 @@ def track_moment(model, capture, moment, media_width, media_height, source_fps, 
     joint_frames = sum(record["joint_visible"] for record in records)
     joint_margin = min(0.09, view_width * 0.22)
     joint_fit_frames = sum(record["joint_visible"] and record["joint_span"] + joint_margin <= view_width for record in records)
+    possession_frames = sum(record["possession"] for record in records)
+    highlight_track_id = annotation.get("trackId")
+    highlight_identity_frames = sum(
+        record["possession"] and record["player_track_id"] == highlight_track_id for record in records
+    ) if highlight_track_id is not None else 0
+    payoff_records = records[max(0, int(len(records) * 0.62)):]
+    goal_payoff_frames = sum(record["direct_ball"] and record["player_track_id"] is not None for record in payoff_records)
+    visible_ball_sizes = [record["ball_pixel_diameter"] for record in records if record["direct_ball"]]
     opening_joint_visible = bool(
         records
         and records[0]["direct_ball"]
@@ -506,6 +551,12 @@ def track_moment(model, capture, moment, media_width, media_height, source_fps, 
         "jointFitCoverage": round(joint_fit_coverage, 4),
         "subjectLockCoverage": round(subject_frames / denominator, 4),
         "highlightCoverage": round(annotation["duration"] / max(0.001, end - start), 4),
+        "maxDirectBallGap": round(maximum_direct_gap, 4),
+        "possessionCoverage": round(possession_frames / denominator, 4),
+        "identitySwitches": identity_switches,
+        "highlightIdentityCoverage": round(highlight_identity_frames / denominator, 4),
+        "goalPayoffCoverage": round(goal_payoff_frames / max(1, len(payoff_records)), 4) if goal_mode else 1.0,
+        "visibleBallPixelMedian": round(float(np.median(visible_ball_sizes)), 2) if visible_ball_sizes else 0.0,
     }
 
 
@@ -551,7 +602,7 @@ def main():
     create_ball_ring(marker_paths["ball"])
     denominator = max(1, totals["samples"])
     payload = {
-        "version": 9, "model": os.path.basename(args.model), "sampleFps": args.sample_fps,
+        "version": 10, "model": os.path.basename(args.model), "sampleFps": args.sample_fps,
         "markerPaths": {key: str(path.resolve()) for key, path in marker_paths.items()}, "moments": tracked,
         "summary": {
             "sampledFrames": totals["samples"], "ballDetectionCoverage": round(totals["ball"] / denominator, 4),

@@ -160,19 +160,32 @@ export function assessPlannedSceneTracking(moment, evidence) {
   if (reactionOnly) return { usable: true, mode: "planned_reaction" };
   if (!evidence) return { usable: false, mode: "missing_tracking" };
 
+  const directBall = Number(evidence.ballDetectionCoverage || 0);
   const jointVisibility = Number(evidence.jointVisibilityCoverage || 0);
   const jointFit = Number(evidence.jointFitCoverage || 0);
+  const maximumBallGap = Number(evidence.maxDirectBallGap ?? Number.POSITIVE_INFINITY);
+  const goalPayoff = Number(evidence.goalPayoffCoverage ?? 0);
+  const goalNeedsPayoff = moment.eventType === "goal";
+  const payoffReady = !goalNeedsPayoff || goalPayoff >= 0.28;
   const strict = Boolean(evidence.openingJointVisible)
-    && jointVisibility >= 0.42
-    && jointFit >= 0.48;
+    && directBall >= 0.54
+    && jointVisibility >= 0.54
+    && jointFit >= 0.42
+    && maximumBallGap <= 0.8
+    && payoffReady;
   if (strict) return { usable: true, mode: "strict" };
 
-  // Preserve the approved editorial plan when only the opening sample is weak
-  // but the large majority of the planned scene keeps ball and player together.
-  const recoverable = jointVisibility >= 0.68 && jointFit >= 0.48;
-  return recoverable
-    ? { usable: true, mode: "recovered_planned_scene" }
-    : { usable: false, mode: "insufficient_joint_framing" };
+  // A weak first sample is recoverable only when the direct detections—not
+  // predictions—keep the ball and the same action context visible afterwards.
+  const recoverable = directBall >= 0.62
+    && jointVisibility >= 0.62
+    && jointFit >= 0.42
+    && maximumBallGap <= 1.0
+    && payoffReady;
+  if (recoverable) return { usable: true, mode: "recovered_planned_scene" };
+  if (goalNeedsPayoff && !payoffReady) return { usable: false, mode: "missing_goal_payoff" };
+  if (directBall < 0.54 || maximumBallGap > 1.0) return { usable: false, mode: "ball_not_visibly_continuous" };
+  return { usable: false, mode: "insufficient_joint_framing" };
 }
 
 const tacticalEvidenceWords = new Set(["assist", "clearance", "cross", "dribble", "header", "offside", "save", "shot", "tackle", "volley"]);

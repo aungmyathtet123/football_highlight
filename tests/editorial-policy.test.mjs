@@ -18,6 +18,7 @@ import {
   strongestStoryCandidates,
 } from "../local-processor/editorial-policy.mjs";
 import { commentaryPrompt } from "../local-processor/google-cloud-tts.mjs";
+import { synchronizationProblems } from "../local-processor/render-video-v2.mjs";
 
 test("whole-video director prompt enforces the requested editorial flow", () => {
   const prompt = buildWholeVideoDirectorPrompt({
@@ -87,7 +88,7 @@ test("TTS direction requests a male analyst rather than play-by-play hype", () =
 test("tracking preserves a planned replay when only its opening frame is weak", () => {
   const assessment = assessPlannedSceneTracking(
     { eventType: "goal", storyPhase: "replay", role: "proof" },
-    { openingJointVisible: false, jointVisibilityCoverage: 0.83, jointFitCoverage: 0.5 },
+    { openingJointVisible: false, ballDetectionCoverage: 0.83, jointVisibilityCoverage: 0.83, jointFitCoverage: 0.64, maxDirectBallGap: 0.33, goalPayoffCoverage: 0.5 },
   );
   assert.deepEqual(assessment, { usable: true, mode: "recovered_planned_scene" });
 });
@@ -95,9 +96,38 @@ test("tracking preserves a planned replay when only its opening frame is weak", 
 test("tracking still rejects a planned gameplay scene with persistently missing joint framing", () => {
   const assessment = assessPlannedSceneTracking(
     { eventType: "normal_play", storyPhase: "action", role: "action" },
-    { openingJointVisible: false, jointVisibilityCoverage: 0.31, jointFitCoverage: 0.22 },
+    { openingJointVisible: false, ballDetectionCoverage: 0.31, jointVisibilityCoverage: 0.31, jointFitCoverage: 0.22, maxDirectBallGap: 1.2 },
   );
   assert.equal(assessment.usable, false);
+});
+
+test("a player-only crop is rejected when direct ball visibility is not recoverable", () => {
+  const assessment = assessPlannedSceneTracking(
+    { eventType: "shot_on_target", storyPhase: "action", role: "evidence" },
+    { openingJointVisible: true, ballDetectionCoverage: 0.53, jointVisibilityCoverage: 0.53, jointFitCoverage: 0.5, maxDirectBallGap: 1.2, goalPayoffCoverage: 1 },
+  );
+  assert.deepEqual(assessment, { usable: false, mode: "ball_not_visibly_continuous" });
+});
+
+test("a goal scene is rejected when its final frames do not show the payoff", () => {
+  const assessment = assessPlannedSceneTracking(
+    { eventType: "goal", storyPhase: "action", role: "hook" },
+    { openingJointVisible: true, ballDetectionCoverage: 0.9, jointVisibilityCoverage: 0.9, jointFitCoverage: 0.85, maxDirectBallGap: 0.3, goalPayoffCoverage: 0.1 },
+  );
+  assert.deepEqual(assessment, { usable: false, mode: "missing_goal_payoff" });
+});
+
+test("narration timing validation binds every spoken beat to its visual", () => {
+  assert.deepEqual(synchronizationProblems([
+    { beatId: "beat-1", momentId: "goal", narration: "The runner opens the lane.", visualStart: 0, visualDuration: 3.2, speechDuration: 3 },
+    { beatId: "support", momentId: "replay", narration: "", visualStart: 3.2, visualDuration: 2.4, speechDuration: 0 },
+  ]), []);
+  assert.deepEqual(synchronizationProblems([
+    { beatId: "beat-1", momentId: "wrong", narration: "The ball reaches the striker.", visualStart: 0, visualDuration: 1.2, speechDuration: 2.1 },
+  ]), ["speech_exceeds_visual:wrong"]);
+  assert.deepEqual(synchronizationProblems([
+    { beatId: "beat-2", momentId: "silent", narration: "The goalkeeper commits early.", visualStart: 0, visualDuration: 3, speechDuration: 0 },
+  ]), ["missing_speech:silent"]);
 });
 test("content is written before timestamps or editing are chosen", () => {
   const prompt = buildContentWritingPrompt({ sourceDuration: 529.1, targetDuration: 60 });
@@ -161,7 +191,12 @@ test("approved content identity survives alignment and hard cuts stay streamable
   assert.doesNotMatch(server, /directive\.commentary \|\| candidate\.commentary/);
   assert.match(server, /restoreContentBeatOrder/);
   assert.match(server, /restoreOriginalPlannedScenes/);
+  assert.match(server, /semanticScore >= 30/);
   assert.match(renderer, /requestedTransition === "cut"/);
+  assert.match(renderer, /spokenBoundary/);
+  assert.match(renderer, /ttsFiles\.durations/);
+  assert.match(renderer, /synchronizationProblems/);
+  assert.match(renderer, /tpad=stop_mode=clone/);
   assert.match(renderer, /concat=n=2:v=1:a=1/);
 });
 test("semantic backups prefer the same incident over a higher-importance unrelated clip", () => {
@@ -194,4 +229,13 @@ test("semantic backups prefer the same incident over a higher-importance unrelat
   assert.ok(semanticBackupScore(planned, unrelatedReaction) < 18);
   assert.ok(semanticBackupScore(planned, sameIncident) > semanticBackupScore(planned, unrelatedGoal));
   assert.equal(rankSemanticBackups([planned], [unrelatedGoal, sameIncident])[0].moment.id, "clearance-replay");
+});
+
+test("tracker requires direct ball evidence and one stable highlight identity", () => {
+  const tracker = readFileSync(new URL("../local-processor/track-football-v2.py", import.meta.url), "utf8");
+  assert.match(tracker, /joint_visible = direct_ball and active is not None/);
+  assert.match(tracker, /record\["player_track_id"\] == highlight_track_id/);
+  assert.match(tracker, /record\["possession"\]/);
+  assert.match(tracker, /"maxDirectBallGap"/);
+  assert.match(tracker, /"version": 10/);
 });

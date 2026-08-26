@@ -162,25 +162,27 @@ async function resumeRender(id) {
       plannedMoments = restoreContentBeatOrder(plannedMoments, job.editPlan?.contentBeats);
       plannedDuration = selectedTimelineDuration(plannedMoments);
     }
-    if (plannedMoments.filter((moment) => moment.selectedForFinalVideo).length < 2 || plannedDuration < job.settings.targetDuration * 0.85) {
+    if (plannedMoments.filter((moment) => moment.selectedForFinalVideo).length < 2 || plannedDuration < job.settings.targetDuration * 0.68) {
       throw new Error(`Tracked primary and backup evidence can render only ${plannedDuration.toFixed(1)} seconds of the saved content plan.`);
-    }    job = await updateJob(job, "generating_commentary", 60, {
+    }
+    job = await updateJob(job, "generating_commentary", 60, {
       moments: plannedMoments,
       trackingSummary: tracking.summary,
       editPlan: {
         ...job.editPlan,
         selectedCount: plannedMoments.filter((moment) => moment.selectedForFinalVideo).length,
         plannedDuration,
-        narrationScript: job.editPlan?.contentScript || buildContinuousNarration(plannedMoments),
+        narrationScript: buildContinuousNarration(plannedMoments),
       },
     });
-    const ttsFiles = job.settings.commentary ? await loadSavedSpeech(plannedMoments, id, job.editPlan?.contentScript) : new Map();
+    const ttsFiles = job.settings.commentary ? await loadSavedSpeech(plannedMoments, id) : new Map();
     const destination = join(outputRoot, id);
     await mkdir(destination, { recursive: true });
     const outputPath = join(destination, "final.mp4");
     job = await updateJob(job, "rendering", 84);
-    await renderVideoV2(job.sourceKey, outputPath, plannedMoments, job.settings, job.media, ttsFiles, job.overlayMasks || [], tracking);
+    const renderResult = await renderVideoV2(job.sourceKey, outputPath, plannedMoments, job.settings, job.media, ttsFiles, job.overlayMasks || [], tracking);
     await updateJob(job, "completed", 100, {
+      editPlan: { ...job.editPlan, synchronization: renderResult.synchronization },
       outputKey: outputPath,
       outputUrl: `http://127.0.0.1:${port}/outputs/${id}/final.mp4`,
       completedAt: new Date().toISOString(),
@@ -191,18 +193,10 @@ async function resumeRender(id) {
     await updateJob(job, "failed", job.progress || 0);
   }
 }
-async function loadSavedSpeech(moments, id, narrationScript) {
-  const path = join(outputRoot, id, "speech", "narration.wav");
-  try {
-    if ((await stat(path)).size > 0) {
-      const files = new Map([["__narration__", path]]);
-      files.narrationDuration = await probeAudioDuration(path);
-      files.narrationScript = narrationScript || buildContinuousNarration(moments);
-      return files;
-    }
-  } catch { /* Regenerate missing narration below. */ }
-  return makeSpeech(moments, id, narrationScript);
+async function loadSavedSpeech(moments, id) {
+  return makeSpeech(moments, id);
 }
+
 async function processJob(id) {
   let job = await readJob(id);
   try {
@@ -263,14 +257,14 @@ async function processJob(id) {
     let selected = applyEditPlan(candidates, editPlan, job.settings.targetDuration);
     selected = restoreContentBeatOrder(selected, contentPlan.contentBeats);
     let selectedDuration = selectedTimelineDuration(selected);
-    if (selectedDuration < job.settings.targetDuration * 0.85) {
+    if (selectedDuration < job.settings.targetDuration * 0.68) {
       job.warnings.push(`The first evidence alignment produced only ${selectedDuration.toFixed(1)} seconds after validation, so it was rebuilt from the approved content before tracking.`);
       editPlan = buildDeterministicEditPlan(candidates, job.settings, contentPlan);
       selected = applyEditPlan(candidates, editPlan, job.settings.targetDuration);
       selected = restoreContentBeatOrder(selected, contentPlan.contentBeats);
       selectedDuration = selectedTimelineDuration(selected);
     }
-    if (selectedDuration < job.settings.targetDuration * 0.85) {
+    if (selectedDuration < job.settings.targetDuration * 0.68) {
       throw new Error(`The approved content could map to only ${selectedDuration.toFixed(1)} seconds of valid footage. The editor will not produce another misleading short result.`);
     }
     job = await updateJob(job, "tracking", 52, {
@@ -293,23 +287,24 @@ async function processJob(id) {
       frameableDuration = selectedTimelineDuration(selected);
     }
     const frameable = selected.filter((moment) => moment.selectedForFinalVideo);
-    if (frameable.length < 2 || frameableDuration < job.settings.targetDuration * 0.85) {
+    if (frameable.length < 2 || frameableDuration < job.settings.targetDuration * 0.68) {
       throw new Error(`Tracked primary and backup evidence could preserve only ${frameableDuration.toFixed(1)} seconds of the approved content plan.`);
-    }    job = await updateJob(job, "tracking", 56, {
+    }
+    job = await updateJob(job, "tracking", 56, {
       moments: selected,
       trackingSummary: tracking.summary,
       editPlan: {
         ...job.editPlan,
         selectedCount: frameable.length,
         plannedDuration: frameableDuration,
-        narrationScript: job.editPlan?.contentScript || buildContinuousNarration(selected),
+        narrationScript: buildContinuousNarration(selected),
       },
     });
     if (tracking.summary.ballDetectionCoverage < 0.08) job.warnings.push("Ball detection was weak; gameplay scenes that failed the full-screen ball-and-player framing gate were rejected.");
     if (Number(tracking.summary.jointFitCoverage || 0) < 0.55) job.warnings.push("Some gameplay scenes could not fit the football and involved player together in full-screen 9:16, so they were removed instead of letterboxed.");
     if (job.settings.logoMasking && overlayMasks.length === 0) job.warnings.push("No persistent logo or watermark region was confidently detected, so no mask was applied.");
     job = await updateJob(job, "generating_commentary", 60);
-    const ttsFiles = job.settings.commentary ? await makeSpeech(selected, id, job.editPlan?.contentScript) : new Map();
+    const ttsFiles = job.settings.commentary ? await makeSpeech(selected, id) : new Map();
     if (job.settings.commentary && ttsFiles.size === 0 && selected.some((moment) => moment.commentary)) {
       job.warnings.push("Google Cloud TTS produced no narration audio; the result contains silence because source audio is muted in commentary mode.");
     }
@@ -319,8 +314,10 @@ async function processJob(id) {
     await mkdir(destination, { recursive: true });
     const outputPath = join(destination, "final.mp4");
     job = await updateJob(job, "rendering", 84);
-    await renderVideoV2(job.sourceKey, outputPath, selected, job.settings, media, ttsFiles, overlayMasks, tracking);
-    job = await updateJob(job, "validating", 96);
+    const renderResult = await renderVideoV2(job.sourceKey, outputPath, selected, job.settings, media, ttsFiles, overlayMasks, tracking);
+    job = await updateJob(job, "validating", 96, {
+      editPlan: { ...job.editPlan, synchronization: renderResult.synchronization },
+    });
     const renderValidation = await validateRenderedVideo(outputPath, job.settings);
     let qualityReview;
     if (process.env.GEMINI_API_KEY) {
@@ -1058,7 +1055,7 @@ function repairPlanWithTrackedBackups(plannedMoments, assessedMoments, tracking,
       .filter((moment) => !moment.commentary && !moment.beatId)
       .map((moment) => ({ moment, semanticScore: semanticBackupScore(rejected, moment) }))
       .sort((a, b) => b.semanticScore - a.semanticScore)
-      .find((item) => item.semanticScore >= 18);
+      .find((item) => item.semanticScore >= 30);
     let next = reusable;
     if (reusable) desired.splice(desired.findIndex((moment) => moment.id === reusable.moment.id), 1);
     else next = backups
@@ -1066,7 +1063,7 @@ function repairPlanWithTrackedBackups(plannedMoments, assessedMoments, tracking,
       .map((item) => ({ ...item, semanticScore: semanticBackupScore(rejected, item.moment) }))
       .sort((a, b) => b.semanticScore - a.semanticScore
         || Number(b.moment.importanceScore || 0) - Number(a.moment.importanceScore || 0))
-      .find((item) => item.semanticScore >= 18);
+      .find((item) => item.semanticScore >= 30);
     if (!next) continue;
     used.add(next.moment.id);
     const backup = next.moment;
@@ -1221,25 +1218,46 @@ async function loadOrTrackFootball(sourcePath, moments, media, id) {
   try {
     const tracking = JSON.parse(await readFile(path, "utf8"));
     const selected = fitSelectedMoments(moments, Number.MAX_SAFE_INTEGER);
-    if (tracking.version === 9 && selected.every((moment) => tracking.moments?.[moment.id]?.keyframes?.length)) return tracking;
+    if (tracking.version === 10 && selected.every((moment) => tracking.moments?.[moment.id]?.keyframes?.length)) return tracking;
   } catch { /* Re-run tracking when cached data is missing or stale. */ }
   return trackFootball(sourcePath, moments, media, id);
 }
-async function makeSpeech(moments, id, narrationScript) {
+async function makeSpeech(moments, id) {
   const provider = (process.env.TTS_PROVIDER || "").toLowerCase();
   if (provider !== "google_cloud") throw new Error("TTS_PROVIDER must be google_cloud. No TTS fallback was selected.");
-  const narration = narrationScript || buildContinuousNarration(moments);
-  if (!narration) return new Map();
+  const narratable = moments
+    .filter((moment) => moment.selectedForFinalVideo && moment.commentary)
+    .sort((a, b) => Number(a.editOrder) - Number(b.editOrder));
+  if (narratable.length === 0) return new Map();
   const speechDir = join(outputRoot, id, "speech");
+  const manifestPath = join(speechDir, "beat-manifest.json");
   await mkdir(speechDir, { recursive: true });
-  const output = join(speechDir, "narration.wav");
-  await synthesizeGoogleCloudSpeech(narration, output);
-  const files = new Map([["__narration__", output]]);
-  files.narrationDuration = await probeAudioDuration(output);
-  files.narrationScript = narration;
+  let previous = {};
+  try { previous = JSON.parse(await readFile(manifestPath, "utf8")); } catch { /* Generate missing or stale beat files. */ }
+  const files = new Map();
+  const durations = new Map();
+  const manifest = {};
+  const voiceSignature = [process.env.TTS_MODEL, process.env.TTS_LANGUAGE, process.env.TTS_VOICE].join(":");
+  for (const moment of narratable) {
+    const key = String(moment.id);
+    const narration = String(moment.commentary).trim();
+    const filename = `${key.replace(/[^a-z0-9_-]/gi, "-")}.wav`;
+    const output = join(speechDir, filename);
+    let reusable = previous[key]?.narration === narration && previous[key]?.voiceSignature === voiceSignature;
+    if (reusable) {
+      try { reusable = (await stat(output)).size > 0; } catch { reusable = false; }
+    }
+    if (!reusable) await synthesizeGoogleCloudSpeech(narration, output);
+    const duration = await probeAudioDuration(output);
+    files.set(key, output);
+    durations.set(key, duration);
+    manifest[key] = { beatId: moment.beatId, narration, filename, duration, voiceSignature };
+  }
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+  files.durations = durations;
+  files.narrationScript = narratable.map((moment) => String(moment.commentary).trim()).join(" ");
   return files;
 }
-
 async function probeAudioDuration(path) {
   const raw = await run(ffprobePath, ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path]);
   const duration = Number(raw.trim());

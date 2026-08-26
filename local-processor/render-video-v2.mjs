@@ -8,10 +8,32 @@ const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const outputWidth = 1080;
 const outputHeight = 1920;
 
+export function synchronizationProblems(beats) {
+  const problems = [];
+  const narratedBeats = new Set();
+  let previousStart = -1;
+  for (const entry of Array.isArray(beats) ? beats : []) {
+    const start = Number(entry?.visualStart);
+    const visualDuration = Number(entry?.visualDuration);
+    const speechDuration = Number(entry?.speechDuration);
+    if (!Number.isFinite(start) || start + 0.001 < previousStart) problems.push("non_monotonic_visual:" + (entry?.momentId || "unknown"));
+    previousStart = Number.isFinite(start) ? start : previousStart;
+    if (!entry?.narration) continue;
+    if (!(speechDuration > 0)) problems.push("missing_speech:" + (entry?.momentId || "unknown"));
+    if (speechDuration > 0 && (!(visualDuration > 0) || visualDuration + 0.03 < speechDuration)) {
+      problems.push("speech_exceeds_visual:" + (entry?.momentId || "unknown"));
+    }
+    const identity = String(entry?.beatId || entry?.momentId || "");
+    if (narratedBeats.has(identity)) problems.push("duplicate_narrated_beat:" + identity);
+    narratedBeats.add(identity);
+  }
+  return problems;
+}
+
 export async function renderVideoV2(sourcePath, outputPath, moments, settings, media, ttsFiles, overlayMasks, tracking) {
-  const selected = fitSelectedMoments(moments, settings.targetDuration);
+  const selected = fitSelectedMoments(moments, settings.targetDuration, ttsFiles, tracking);
   if (selected.length === 0) throw new Error("No moments were selected for the final edit.");
-  const captionCues = settings.captions ? await makeCaptionCueFiles(selected, outputPath, tracking) : new Map();
+  const captionCues = settings.captions ? await makeCaptionCueFiles(selected, outputPath, tracking, ttsFiles) : new Map();
   const calloutFiles = settings.captions ? await makeCalloutFiles(selected, outputPath) : new Map();
   const args = ["-hide_banner", "-y", "-i", sourcePath];
   const globalNarrationPath = ttsFiles.get("__narration__");
@@ -29,24 +51,29 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     }
   }
   const annotationInputs = new Map();
+  const ballInputs = new Map();
   if (settings.playerHighlight) selected.forEach((moment, index) => {
-    const annotation = tracking?.moments?.[moment.id]?.annotation;
+    const trackedMoment = tracking?.moments?.[moment.id];
+    const annotation = trackedMoment?.annotation;
     const markerPath = tracking?.markerPaths?.[annotation?.style];
-    const eligible = moment.playerHighlight !== false
+    const playerEligible = moment.playerHighlight !== false
       && annotation?.style !== "none"
       && Number(annotation?.confidence) >= 0.54
       && markerPath;
-    if (!eligible) return;
-    const inputIndex = inputCount(args);
-    args.push("-loop", "1", "-framerate", "30", "-i", markerPath);
-    let ballInputIndex = null;
-    const useBallRing = Boolean(tracking?.markerPaths?.ball)
-      && (moment.isReplay || ["hook", "evidence", "proof"].includes(moment.role));
-    if (useBallRing) {
-      ballInputIndex = inputCount(args);
-      args.push("-loop", "1", "-framerate", "30", "-i", tracking.markerPaths.ball);
+    if (playerEligible) {
+      const inputIndex = inputCount(args);
+      args.push("-loop", "1", "-framerate", "30", "-i", markerPath);
+      annotationInputs.set(index, { inputIndex, annotation });
     }
-    annotationInputs.set(index, { inputIndex, ballInputIndex, annotation });
+    const reactionOnly = moment.eventType === "celebration" || moment.storyPhase === "reaction" || moment.role === "reaction";
+    const ballEligible = !reactionOnly
+      && Boolean(tracking?.markerPaths?.ball)
+      && trackedMoment?.keyframes?.some((frame) => Number(frame.ballMarkerVisible) > 0);
+    if (ballEligible) {
+      const inputIndex = inputCount(args);
+      args.push("-loop", "1", "-framerate", "30", "-i", tracking.markerPaths.ball);
+      ballInputs.set(index, inputIndex);
+    }
   });
 
   const filters = [];
@@ -55,13 +82,16 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
   const masks = settings.logoMasking ? sourceMaskFilters(overlayMasks, media) : [];
   const masking = masks.length ? `${masks.join(",")},` : "";
   const clipDurations = [];
+  const clipStarts = [0];
 
   selected.forEach((moment, index) => {
     const sourceLength = Math.max(1.2, moment.endTime - moment.startTime);
     const playbackRate = clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
     const annotationInput = annotationInputs.get(index);
     const cueDuration = annotationInput ? clamp(Number(annotationInput.annotation.duration), 0.45, 0.75) : 0;
-    const outputLength = sourceLength / playbackRate + cueDuration;
+    const baseOutputLength = sourceLength / playbackRate + cueDuration;
+    const speechDuration = Number(ttsFiles.durations?.get(moment.id) || 0);
+    const outputLength = Math.max(baseOutputLength, speechDuration > 0 ? speechDuration + 0.16 : 0);
     clipDurations.push(outputLength);
 
     const fallbackX = clamp(moment.recommendedCrop?.[0]?.x ?? 0.5, 0, 1);
@@ -76,7 +106,7 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     filters.push(`${sourcePrefix}${crop},scale=${outputWidth}:${outputHeight}:flags=lanczos,setsar=1${visualEffectFilter(moment, settings.intensity, Boolean(annotationInput))},setpts=PTS/${playbackRate.toFixed(5)},fps=30,settb=AVTB,format=yuv420p[baseclip${index}]`);
 
     if (annotationInput) {
-      const { inputIndex, ballInputIndex, annotation } = annotationInput;
+      const { inputIndex, annotation } = annotationInput;
       const cueX = Number(annotation.x);
       const cueY = Number(annotation.y);
       const spotlight = annotation.style === "spotlight";
@@ -92,25 +122,33 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
       filters.push(`[${inputIndex}:v]format=rgba,split=2[playerAssetFreeze${index}][playerAssetMotion${index}]`);
       filters.push(`[freeze${index}][playerAssetFreeze${index}]overlay=x=${cueX.toFixed(2)}:y=${cueY.toFixed(2)}:eof_action=repeat:shortest=1[freezePlayer${index}]`);
       filters.push(`[motionSource${index}][playerAssetMotion${index}]overlay=x='(${playerCenterX})-${playerAnchorX}':y='(${playerAnchorPositionY})-${playerAnchorY}':enable='between(t,0,${trackDuration.toFixed(3)})*${playerVisible}':eval=frame:eof_action=repeat:shortest=1[motionPlayer${index}]`);
-      if (ballInputIndex !== null) {
-        const first = keyframes[0] || {};
-        const ballX = keyframeExpression(keyframes, "ballCenterX", Number(first.ballCenterX || -320));
-        const ballY = keyframeExpression(keyframes, "ballCenterY", Number(first.ballCenterY || -320));
-        const ballVisible = visibilityExpression(keyframes, "ballMarkerVisible");
-        filters.push(`[${ballInputIndex}:v]format=rgba,split=2[ballAssetFreeze${index}][ballAssetMotion${index}]`);
-        filters.push(`[freezePlayer${index}][ballAssetFreeze${index}]overlay=x='(${ballX})-56':y='(${ballY})-56':enable='${ballVisible}':eval=frame:eof_action=repeat:shortest=1[cue${index}]`);
-        filters.push(`[motionPlayer${index}][ballAssetMotion${index}]overlay=x='(${ballX})-56':y='(${ballY})-56':enable='between(t,0,${trackDuration.toFixed(3)})*${ballVisible}':eval=frame:eof_action=repeat:shortest=1[trackedMotion${index}]`);
-      } else {
-        filters.push(`[freezePlayer${index}]null[cue${index}]`);
-        filters.push(`[motionPlayer${index}]null[trackedMotion${index}]`);
-      }
-      filters.push(`[cue${index}][trackedMotion${index}]concat=n=2:v=1:a=0[clip${index}]`);
+      filters.push(`[freezePlayer${index}][motionPlayer${index}]concat=n=2:v=1:a=0[playerclip${index}]`);
     } else {
-      filters.push(`[baseclip${index}]null[clip${index}]`);
+      filters.push(`[baseclip${index}]null[playerclip${index}]`);
     }
 
-    const cues = captionCues.get(moment.id) || [];
+    const ballInputIndex = ballInputs.get(index);
+    if (ballInputIndex !== undefined) {
+      const first = keyframes[0] || {};
+      const ballTimelineKeyframes = cueDuration > 0 && keyframes.length
+        ? [{ ...first, time: 0 }, ...keyframes.map((frame) => ({ ...frame, time: Number(frame.time) + cueDuration }))]
+        : keyframes;
+      const ballX = keyframeExpression(ballTimelineKeyframes, "ballCenterX", Number(first.ballCenterX || -320));
+      const ballY = keyframeExpression(ballTimelineKeyframes, "ballCenterY", Number(first.ballCenterY || -320));
+      const ballVisible = visibilityExpression(ballTimelineKeyframes, "ballMarkerVisible");
+      filters.push(`[${ballInputIndex}:v]format=rgba[ballAsset${index}]`);
+      filters.push(`[playerclip${index}][ballAsset${index}]overlay=x='(${ballX})-56':y='(${ballY})-56':enable='${ballVisible}':eval=frame:eof_action=repeat:shortest=1[clip${index}]`);
+    } else {
+      filters.push(`[playerclip${index}]null[clip${index}]`);
+    }
+
+    const extensionDuration = Math.max(0, outputLength - baseOutputLength);
     let captionLabel = `clip${index}`;
+    if (extensionDuration > 0.01) {
+      filters.push(`[clip${index}]tpad=stop_mode=clone:stop_duration=${extensionDuration.toFixed(3)},trim=duration=${outputLength.toFixed(3)}[timedclip${index}]`);
+      captionLabel = `timedclip${index}`;
+    }
+    const cues = captionCues.get(moment.id) || [];
     for (const [cueIndex, cue] of cues.entries()) {
       const nextLabel = `caption${index}_${cueIndex}`;
       const captionFont = escapeFilterPath(resolveSetting(process.env.CAPTION_FONT_PATH || "C:/Windows/Fonts/arialbd.ttf"));
@@ -159,12 +197,15 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     let accumulated = clipDurations[0];
     for (let index = 1; index < selected.length; index += 1) {
       const requestedTransition = String(selected[index].transitionIn || "cut");
-      if (requestedTransition === "cut") {
+      const spokenBoundary = Boolean(selected[index - 1].commentary || selected[index].commentary);
+      if (requestedTransition === "cut" || spokenBoundary) {
+        clipStarts[index] = accumulated;
         filters.push(`[${videoLabel}][${audioLabel}][v${index}][a${index}]concat=n=2:v=1:a=1[vx${index}][ax${index}]`);
         accumulated += clipDurations[index];
       } else {
         const transition = transitionFilter(selected[index], clipDurations[index - 1], clipDurations[index]);
         const offset = Math.max(0, accumulated - transition.duration);
+        clipStarts[index] = offset;
         filters.push(`[${videoLabel}][v${index}]xfade=transition=${transition.name}:duration=${transition.duration.toFixed(3)}:offset=${offset.toFixed(3)}[vx${index}]`);
         filters.push(`[${audioLabel}][a${index}]acrossfade=d=${transition.duration.toFixed(3)}:c1=tri:c2=tri[ax${index}]`);
         accumulated += clipDurations[index] - transition.duration;
@@ -185,6 +226,21 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     filters.push("[outaBase]anull[outa]");
   }
 
+  const synchronization = selected.map((moment, index) => ({
+    beatId: moment.beatId || null,
+    momentId: moment.id,
+    narration: moment.commentary || null,
+    visualStart: Number((clipStarts[index] || 0).toFixed(3)),
+    visualDuration: Number(clipDurations[index].toFixed(3)),
+    speechDuration: Number(Number(ttsFiles.durations?.get(moment.id) || 0).toFixed(3)),
+  }));
+  const syncProblems = settings.commentary ? synchronizationProblems(synchronization) : [];
+  if (syncProblems.length) throw new Error(`Narration/visual synchronization validation failed: ${syncProblems.join(", ")}`);
+  await writeFile(resolve(dirname(outputPath), "synchronization.json"), JSON.stringify({
+    version: 1,
+    timelineDuration: Number(timelineDuration.toFixed(3)),
+    beats: synchronization,
+  }, null, 2));
   const filterScriptPath = resolve(dirname(outputPath), "filtergraph-v2.txt");
   await writeFile(filterScriptPath, filters.join(";\n"));
   args.push(
@@ -193,6 +249,7 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     "-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart", outputPath,
   );
   await run(resolveExecutable(process.env.FFMPEG_PATH || "ffmpeg"), args);
+  return { timelineDuration, synchronization };
 }
 
 function inputCount(args) {
@@ -204,19 +261,41 @@ function delayValue(seconds) {
   return `${milliseconds}|${milliseconds}`;
 }
 
-function fitSelectedMoments(moments, targetDuration) {
-  let total = 0;
-  return moments
+function fitSelectedMoments(moments, targetDuration, ttsFiles, tracking) {
+  const ordered = moments
     .filter((item) => item.selectedForFinalVideo && item.endTime - item.startTime >= 1.2)
-    .sort((a, b) => Number(a.editOrder ?? Number.MAX_SAFE_INTEGER) - Number(b.editOrder ?? Number.MAX_SAFE_INTEGER) || a.startTime - b.startTime)
-    .filter((moment) => {
-      const length = (moment.endTime - moment.startTime) / clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
-      if (total + length > targetDuration + 0.5) return false;
+    .sort((a, b) => Number(a.editOrder ?? Number.MAX_SAFE_INTEGER) - Number(b.editOrder ?? Number.MAX_SAFE_INTEGER) || a.startTime - b.startTime);
+  const estimatedDuration = (moment) => {
+    const playbackRate = clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
+    const sourceDuration = (moment.endTime - moment.startTime) / playbackRate;
+    const annotation = tracking?.moments?.[moment.id]?.annotation;
+    const cueDuration = annotation?.style !== "none" ? clamp(Number(annotation?.duration), 0.45, 0.75) : 0;
+    const speechDuration = Number(ttsFiles.durations?.get(moment.id) || 0);
+    return Math.max(sourceDuration + cueDuration, speechDuration > 0 ? speechDuration + 0.16 : 0);
+  };
+  const narrated = ordered.filter((moment) => moment.commentary);
+  const chosen = new Map(narrated.map((moment) => [moment.id, moment]));
+  let total = narrated.reduce((sum, moment) => sum + estimatedDuration(moment), 0);
+  let partialSupportAdded = false;
+  for (const moment of ordered.filter((item) => !item.commentary)) {
+    const length = estimatedDuration(moment);
+    if (total + length <= targetDuration + 1) {
+      chosen.set(moment.id, moment);
       total += length;
-      return true;
-    });
+    } else if (!partialSupportAdded && total < targetDuration - 1.2) {
+      const playbackRate = clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
+      const annotation = tracking?.moments?.[moment.id]?.annotation;
+      const cueDuration = annotation?.style !== "none" ? clamp(Number(annotation?.duration), 0.45, 0.75) : 0;
+      const sourceLength = (targetDuration - total - cueDuration) * playbackRate;
+      if (sourceLength >= 1.2) {
+        chosen.set(moment.id, { ...moment, endTime: Math.min(moment.endTime, moment.startTime + sourceLength) });
+        total = targetDuration;
+        partialSupportAdded = true;
+      }
+    }
+  }
+  return ordered.flatMap((moment) => chosen.has(moment.id) ? [chosen.get(moment.id)] : []);
 }
-
 function retimeKeyframes(keyframes, playbackRate) {
   return keyframes.map((frame) => ({ ...frame, time: Number(frame.time) / playbackRate }));
 }
@@ -287,7 +366,7 @@ function transitionFilter(moment, previousDuration, currentDuration) {
   return { name: names[moment.transitionIn] || "fade", duration: Math.max(0.04, duration) };
 }
 
-async function makeCaptionCueFiles(moments, outputPath, tracking) {
+async function makeCaptionCueFiles(moments, outputPath, tracking, ttsFiles) {
   const files = new Map();
   const captionDir = resolve(dirname(outputPath), "captions");
   await mkdir(captionDir, { recursive: true });
@@ -298,7 +377,9 @@ async function makeCaptionCueFiles(moments, outputPath, tracking) {
     const playbackRate = clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
     const annotation = tracking?.moments?.[moment.id]?.annotation;
     const cueDuration = annotation?.style !== "none" ? clamp(Number(annotation?.duration), 0.45, 0.75) : 0;
-    const outputLength = sourceLength / playbackRate + cueDuration;
+    const baseOutputLength = sourceLength / playbackRate + cueDuration;
+    const speechDuration = Number(ttsFiles.durations?.get(moment.id) || 0);
+    const outputLength = Math.max(baseOutputLength, speechDuration > 0 ? speechDuration + 0.16 : 0);
     const weights = chunks.map((chunk) => Math.max(2, chunk.replace(/\s+/g, "").length));
     const totalWeight = weights.reduce((total, weight) => total + weight, 0);
     const available = Math.max(0.6, outputLength - 0.16);
