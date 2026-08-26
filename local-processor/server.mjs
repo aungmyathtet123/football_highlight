@@ -11,10 +11,15 @@ import { renderVideoV2 } from "./render-video-v2.mjs";
 import {
   MAX_SCENE_SECONDS,
   assessPlannedSceneTracking,
+  buildContentWritingPrompt,
   buildContinuousNarration,
-  buildWholeVideoDirectorPrompt,
+  buildEvidenceAlignmentPrompt,
+  contentPlanProblems,
+  normalizeContentPlan,
+  plannedSegmentDuration,
+  rankSemanticBackups,
   selectDirectorCandidates,
-  strongestStoryCandidates,
+  semanticBackupScore,
 } from "./editorial-policy.mjs";
 import {
   analyzeVideoIntelligenceFile,
@@ -146,21 +151,30 @@ async function resumeRender(id) {
   let job = await readJob(id);
   try {
     job = await updateJob(job, "tracking", 48);
-    const tracking = await loadOrTrackFootball(job.sourceKey, job.moments, job.media, id);
-    const plannedMoments = applyTrackingQuality(job.moments, tracking);
-    if (plannedMoments.filter((moment) => moment.selectedForFinalVideo).length < 2) {
-      throw new Error("The saved editorial plan could not retain two renderable scenes after ball-and-player tracking.");
+    const originalSavedPlan = restoreOriginalPlannedScenes(job.moments, job.editPlan?.contentBeats);
+    const orderedSavedMoments = restoreContentBeatOrder(originalSavedPlan, job.editPlan?.contentBeats);
+    const trackingPool = buildTrackingPool(orderedSavedMoments);
+    const tracking = await loadOrTrackFootball(job.sourceKey, trackingPool, job.media, id);
+    let plannedMoments = applyTrackingQuality(orderedSavedMoments, tracking);
+    let plannedDuration = selectedTimelineDuration(plannedMoments);
+    if (plannedDuration < job.settings.targetDuration * 0.96) {
+      plannedMoments = repairPlanWithTrackedBackups(orderedSavedMoments, plannedMoments, tracking, job.settings.targetDuration, job.settings.intensity);
+      plannedMoments = restoreContentBeatOrder(plannedMoments, job.editPlan?.contentBeats);
+      plannedDuration = selectedTimelineDuration(plannedMoments);
     }
-    job = await updateJob(job, "generating_commentary", 60, {
+    if (plannedMoments.filter((moment) => moment.selectedForFinalVideo).length < 2 || plannedDuration < job.settings.targetDuration * 0.85) {
+      throw new Error(`Tracked primary and backup evidence can render only ${plannedDuration.toFixed(1)} seconds of the saved content plan.`);
+    }    job = await updateJob(job, "generating_commentary", 60, {
       moments: plannedMoments,
       trackingSummary: tracking.summary,
       editPlan: {
         ...job.editPlan,
         selectedCount: plannedMoments.filter((moment) => moment.selectedForFinalVideo).length,
-        narrationScript: buildContinuousNarration(plannedMoments),
+        plannedDuration,
+        narrationScript: job.editPlan?.contentScript || buildContinuousNarration(plannedMoments),
       },
     });
-    const ttsFiles = job.settings.commentary ? await loadSavedSpeech(plannedMoments, id) : new Map();
+    const ttsFiles = job.settings.commentary ? await loadSavedSpeech(plannedMoments, id, job.editPlan?.contentScript) : new Map();
     const destination = join(outputRoot, id);
     await mkdir(destination, { recursive: true });
     const outputPath = join(destination, "final.mp4");
@@ -177,17 +191,17 @@ async function resumeRender(id) {
     await updateJob(job, "failed", job.progress || 0);
   }
 }
-async function loadSavedSpeech(moments, id) {
+async function loadSavedSpeech(moments, id, narrationScript) {
   const path = join(outputRoot, id, "speech", "narration.wav");
   try {
     if ((await stat(path)).size > 0) {
       const files = new Map([["__narration__", path]]);
       files.narrationDuration = await probeAudioDuration(path);
-      files.narrationScript = buildContinuousNarration(moments);
+      files.narrationScript = narrationScript || buildContinuousNarration(moments);
       return files;
     }
   } catch { /* Regenerate missing narration below. */ }
-  return makeSpeech(moments, id);
+  return makeSpeech(moments, id, narrationScript);
 }
 async function processJob(id) {
   let job = await readJob(id);
@@ -215,48 +229,87 @@ async function processJob(id) {
       overlayMasks,
       videoIntelligenceSummary: job.videoIntelligenceSummary,
     });
-    job = await updateJob(job, "ranking", 38);
+    job = await updateJob(job, "writing_content", 36);
+    let contentPlan;
     if (process.env.GEMINI_API_KEY) {
       try {
-        editPlan = await planEditWithGemini(candidates, media, job.settings);
+        contentPlan = await writeAnalysisContentWithGemini(candidates, media, job.settings);
       } catch (error) {
-        job.warnings.push(`The AI edit-director pass failed, so a conservative story-aware plan was used: ${sanitizeProviderError(String(error?.message || error))}`);
-        editPlan = buildDeterministicEditPlan(candidates, job.settings);
+        job.warnings.push(`The AI content-writing pass failed validation, so a conservative evidence-based script was used: ${sanitizeProviderError(String(error?.message || error))}`);
+        contentPlan = buildDeterministicContentPlan(candidates, job.settings);
       }
-    } else editPlan = buildDeterministicEditPlan(candidates, job.settings);
+    } else contentPlan = buildDeterministicContentPlan(candidates, job.settings);
+    job = await updateJob(job, "aligning_content", 44, {
+      editPlan: {
+        title: contentPlan.title,
+        editorialThesis: contentPlan.editorialThesis,
+        contentAngle: contentPlan.contentAngle,
+        storyQuestion: contentPlan.storyQuestion,
+        storyAnswer: contentPlan.storyAnswer,
+        contentBeats: contentPlan.contentBeats,
+        contentScript: contentPlan.contentScript,
+        wordCount: contentPlan.wordCount,
+        candidateCount: candidates.length,
+      },
+    });
+    if (process.env.GEMINI_API_KEY) {
+      try {
+        editPlan = await alignContentToVideoWithGemini(contentPlan, candidates, job.settings);
+      } catch (error) {
+        job.warnings.push(`The AI evidence-alignment pass failed, so the approved content was mapped conservatively: ${sanitizeProviderError(String(error?.message || error))}`);
+        editPlan = buildDeterministicEditPlan(candidates, job.settings, contentPlan);
+      }
+    } else editPlan = buildDeterministicEditPlan(candidates, job.settings, contentPlan);
     let selected = applyEditPlan(candidates, editPlan, job.settings.targetDuration);
-    job = await updateJob(job, "tracking", 46, {
+    selected = restoreContentBeatOrder(selected, contentPlan.contentBeats);
+    let selectedDuration = selectedTimelineDuration(selected);
+    if (selectedDuration < job.settings.targetDuration * 0.85) {
+      job.warnings.push(`The first evidence alignment produced only ${selectedDuration.toFixed(1)} seconds after validation, so it was rebuilt from the approved content before tracking.`);
+      editPlan = buildDeterministicEditPlan(candidates, job.settings, contentPlan);
+      selected = applyEditPlan(candidates, editPlan, job.settings.targetDuration);
+      selected = restoreContentBeatOrder(selected, contentPlan.contentBeats);
+      selectedDuration = selectedTimelineDuration(selected);
+    }
+    if (selectedDuration < job.settings.targetDuration * 0.85) {
+      throw new Error(`The approved content could map to only ${selectedDuration.toFixed(1)} seconds of valid footage. The editor will not produce another misleading short result.`);
+    }
+    job = await updateJob(job, "tracking", 52, {
       moments: selected,
       editPlan: {
-        title: editPlan.title || "Football analysis",
-        editorialThesis: editPlan.editorialThesis || "",
-        storyQuestion: editPlan.storyQuestion || "",
-        storyAnswer: editPlan.storyAnswer || "",
+        ...job.editPlan,
         rationale: editPlan.rationale || "",
-        candidateCount: candidates.length,
+        plannedDuration: selectedDuration,
         selectedCount: selected.filter((moment) => moment.selectedForFinalVideo).length,
       },
     });
-    const tracking = await trackFootball(job.sourceKey, selected, media, id);
-    selected = applyTrackingQuality(selected, tracking);
-    const frameable = selected.filter((moment) => moment.selectedForFinalVideo);
-    if (frameable.length < 2) {
-      throw new Error("The planned story could not retain two renderable scenes after ball-and-player tracking. Try another source.");
+    const plannedMoments = selected;
+    const trackingPool = buildTrackingPool(plannedMoments);
+    const tracking = await trackFootball(job.sourceKey, trackingPool, media, id);
+    selected = applyTrackingQuality(plannedMoments, tracking);
+    let frameableDuration = selectedTimelineDuration(selected);
+    if (frameableDuration < job.settings.targetDuration * 0.96) {
+      selected = repairPlanWithTrackedBackups(plannedMoments, selected, tracking, job.settings.targetDuration, job.settings.intensity);
+      selected = restoreContentBeatOrder(selected, contentPlan.contentBeats);
+      frameableDuration = selectedTimelineDuration(selected);
     }
-    job = await updateJob(job, "tracking", 56, {
+    const frameable = selected.filter((moment) => moment.selectedForFinalVideo);
+    if (frameable.length < 2 || frameableDuration < job.settings.targetDuration * 0.85) {
+      throw new Error(`Tracked primary and backup evidence could preserve only ${frameableDuration.toFixed(1)} seconds of the approved content plan.`);
+    }    job = await updateJob(job, "tracking", 56, {
       moments: selected,
       trackingSummary: tracking.summary,
       editPlan: {
         ...job.editPlan,
         selectedCount: frameable.length,
-        narrationScript: buildContinuousNarration(selected),
+        plannedDuration: frameableDuration,
+        narrationScript: job.editPlan?.contentScript || buildContinuousNarration(selected),
       },
     });
     if (tracking.summary.ballDetectionCoverage < 0.08) job.warnings.push("Ball detection was weak; gameplay scenes that failed the full-screen ball-and-player framing gate were rejected.");
     if (Number(tracking.summary.jointFitCoverage || 0) < 0.55) job.warnings.push("Some gameplay scenes could not fit the football and involved player together in full-screen 9:16, so they were removed instead of letterboxed.");
     if (job.settings.logoMasking && overlayMasks.length === 0) job.warnings.push("No persistent logo or watermark region was confidently detected, so no mask was applied.");
     job = await updateJob(job, "generating_commentary", 60);
-    const ttsFiles = job.settings.commentary ? await makeSpeech(selected, id) : new Map();
+    const ttsFiles = job.settings.commentary ? await makeSpeech(selected, id, job.editPlan?.contentScript) : new Map();
     if (job.settings.commentary && ttsFiles.size === 0 && selected.some((moment) => moment.commentary)) {
       job.warnings.push("Google Cloud TTS produced no narration audio; the result contains silence because source audio is muted in commentary mode.");
     }
@@ -439,10 +492,8 @@ async function createAnalysisProxies(sourcePath, media, id) {
   return excerpts;
 }
 
-async function planEditWithGemini(candidates, media, settings) {
-  const model = process.env.GEMINI_MODEL;
-  const ai = new GoogleGenAI({ vertexai: true, apiKey: process.env.GEMINI_API_KEY });
-  const compactCandidates = selectDirectorCandidates(candidates).map((moment) => ({
+function compactPlanningCandidates(candidates) {
+  return selectDirectorCandidates(candidates).map((moment) => ({
     id: moment.id,
     startTime: moment.startTime,
     endTime: moment.endTime,
@@ -464,27 +515,82 @@ async function planEditWithGemini(candidates, media, settings) {
     analysisPurpose: moment.analysisPurpose || "",
     videoIntelligence: moment.videoIntelligence,
   }));
-  const prompt = buildWholeVideoDirectorPrompt({
-    sourceDuration: media.duration,
-    targetDuration: settings.targetDuration,
-    intensity: settings.intensity,
-    commentary: settings.commentary,
-  });
-  const response = await ai.models.generateContent({
-    model,
-    contents: [
-      { text: prompt },
-      { text: JSON.stringify({ completeObservationTimeline: compactCandidates }) },
-    ],
-    config: { responseMimeType: "application/json", temperature: 0.08 },
-  });
-  const parsed = JSON.parse(response.text || "{}");
-  if (!parsed.editorialThesis || !parsed.storyQuestion || !Array.isArray(parsed.segments) || parsed.segments.length === 0) {
-    throw new Error("Gemini returned no coherent whole-video story plan.");
-  }
-  return parsed;
 }
 
+async function writeAnalysisContentWithGemini(candidates, media, settings) {
+  const ai = new GoogleGenAI({ vertexai: true, apiKey: process.env.GEMINI_API_KEY });
+  const prompt = buildContentWritingPrompt({ sourceDuration: media.duration, targetDuration: settings.targetDuration });
+  const timeline = compactPlanningCandidates(candidates);
+  let response = await ai.models.generateContent({
+    model: process.env.GEMINI_MODEL,
+    contents: [{ text: prompt }, { text: JSON.stringify({ completeObservationTimeline: timeline }) }],
+    config: { responseMimeType: "application/json", temperature: 0.16 },
+  });
+  let content = normalizeContentPlan(JSON.parse(response.text || "{}"), settings.targetDuration);
+  let problems = contentPlanProblems(content, settings.targetDuration);
+  if (problems.length) {
+    response = await ai.models.generateContent({
+      model: process.env.GEMINI_MODEL,
+      contents: [
+        { text: prompt },
+        { text: "Rewrite the content completely. Correct these validation failures: " + problems.join(", ") + ". Return the required JSON only." },
+        { text: JSON.stringify({ completeObservationTimeline: timeline, rejectedDraft: content }) },
+      ],
+      config: { responseMimeType: "application/json", temperature: 0.1 },
+    });
+    content = normalizeContentPlan(JSON.parse(response.text || "{}"), settings.targetDuration);
+    problems = contentPlanProblems(content, settings.targetDuration);
+  }
+  if (problems.length) throw new Error("Gemini content draft failed validation: " + problems.join(", "));
+  return content;
+}
+
+async function alignContentToVideoWithGemini(content, candidates, settings) {
+  const ai = new GoogleGenAI({ vertexai: true, apiKey: process.env.GEMINI_API_KEY });
+  const prompt = buildEvidenceAlignmentPrompt({ targetDuration: settings.targetDuration, intensity: settings.intensity });
+  const timeline = compactPlanningCandidates(candidates);
+  const beatMap = new Map(content.contentBeats.map((beat) => [beat.beatId, beat]));
+  const requestAlignment = async (correction = "") => {
+    const response = await ai.models.generateContent({
+      model: process.env.GEMINI_MODEL,
+      contents: [
+        { text: prompt + (correction ? " " + correction : "") },
+        { text: JSON.stringify({ approvedContent: content, completeObservationTimeline: timeline }) },
+      ],
+      config: { responseMimeType: "application/json", temperature: 0.08 },
+    });
+    const parsed = JSON.parse(response.text || "{}");
+    const seenBeats = new Set();
+    const segments = (Array.isArray(parsed.segments) ? parsed.segments : []).map((segment) => {
+      const beat = beatMap.get(String(segment.beatId));
+      const firstForBeat = beat && !seenBeats.has(beat.beatId);
+      if (beat) seenBeats.add(beat.beatId);
+      return {
+        ...segment,
+        beatId: beat?.beatId || String(segment.beatId || ""),
+        commentary: firstForBeat ? beat.narration : "",
+        onScreenText: segment.onScreenText || beat?.captionText,
+        analysisPurpose: segment.analysisPurpose || beat?.evidenceNeed,
+      };
+    });
+    return { rationale: String(parsed.rationale || "Content-led evidence alignment"), segments };
+  };
+  let alignment = await requestAlignment();
+  let duration = plannedSegmentDuration(alignment.segments);
+  const coveredBeats = new Set(alignment.segments.map((segment) => segment.beatId)).size;
+  if (duration < settings.targetDuration * 0.96 || coveredBeats < content.contentBeats.length) {
+    alignment = await requestAlignment(
+      "The previous alignment was incomplete. Cover every beat exactly once with narration, add supporting evidence clips when needed, and make the visual timeline at least "
+      + settings.targetDuration + " seconds without exceeding " + (settings.targetDuration + 3) + " seconds.",
+    );
+    duration = plannedSegmentDuration(alignment.segments);
+  }
+  const finalCoveredBeats = new Set(alignment.segments.filter((segment) => segment.commentary).map((segment) => segment.beatId)).size;
+  if (duration < settings.targetDuration * 0.96 || finalCoveredBeats < content.contentBeats.length) {
+    throw new Error("Gemini evidence alignment did not cover the complete 60-second content plan.");
+  }
+  return { ...content, rationale: alignment.rationale, plannedDuration: duration, segments: alignment.segments };
+}
 function classifyGeminiError(error, model) {
   const raw = String(error?.message || error);
   if (/api key|unauthenticated|permission_denied|401|403/i.test(raw)) return new Error("Gemini authentication failed. Verify the Agent Platform API key and project access.");
@@ -597,51 +703,103 @@ function buildFallbackMoments(duration, targetDuration) {
   });
 }
 
-function buildDeterministicEditPlan(candidates, settings) {
-  const story = strongestStoryCandidates(candidates)
-    .filter((moment) => moment.confidence >= 0.45 && framingEligible(moment));
-  const hook = [...story].sort((a, b) => Number(b.hookScore || 0) - Number(a.hookScore || 0))[0];
+function buildDeterministicContentPlan(candidates, settings) {
+  const evidence = [...candidates]
+    .filter((moment) => moment.keepDecision !== "reject" && framingEligible(moment))
+    .sort((a, b) => Number(b.importanceScore || 0) - Number(a.importanceScore || 0));
+  const templates = [
+    "Pressure changes the passing angles before the decisive finish becomes possible.",
+    "One defender follows the ball, opening a second route forward.",
+    "The attacker recognizes that space before the defensive line can recover.",
+    "Arriving later would let the covering player close that gap.",
+    "The next touch forces another defender to commit toward the ball.",
+    "That step creates a cleaner lane into the dangerous area.",
+    "Strong control and body position preserve every attacking option.",
+    "The defence works hard, but each reaction arrives slightly late.",
+    "A second angle confirms how quickly the spacing changes during buildup.",
+    "The goalkeeper and nearest defender react instead of controlling events.",
+    "Early recognition, precise timing, and execution combine to decide the outcome.",
+    "The advantage exists before the final touch makes it obvious.",
+  ];
+  const beats = templates.map((narration, index) => {
+    const moment = evidence[index % Math.max(1, evidence.length)];
+    return {
+      beatId: "beat-" + (index + 1),
+      role: index === 0 ? "hook" : index === templates.length - 1 ? "conclusion" : "analysis",
+      narration,
+      evidenceNeed: moment?.description || "Visible evidence of the player, ball, and defensive reaction.",
+      captionText: ["THE REAL CAUSE", "SPACE OPENS", "TIMING MATTERS", "ONE LATE STEP"][index % 4],
+    };
+  });
+  return normalizeContentPlan({
+    title: "Why the move succeeds",
+    editorialThesis: "The decisive outcome is created by connected movement, timing, and defensive reactions before the final action.",
+    contentAngle: "Explain the causal chain rather than announcing visible events.",
+    storyQuestion: "Which decisions create the decisive advantage?",
+    storyAnswer: "Early recognition and coordinated movement force the defence into late reactions.",
+    contentBeats: beats,
+  }, settings.targetDuration);
+}
+
+function buildDeterministicEditPlan(candidates, settings, contentPlan) {
+  const ranked = candidates
+    .filter((moment) => moment.keepDecision !== "reject" && moment.confidence >= 0.4 && framingEligible(moment))
+    .sort((a, b) => Number(b.importanceScore || 0) - Number(a.importanceScore || 0));
+  const hook = [...ranked].sort((a, b) => Number(b.hookScore || 0) - Number(a.hookScore || 0))[0];
   const ordered = [
     ...(hook ? [hook] : []),
-    ...story.filter((moment) => moment.id !== hook?.id).sort((a, b) => a.startTime - b.startTime),
+    ...ranked.filter((moment) => moment.id !== hook?.id).sort((a, b) => a.startTime - b.startTime),
   ];
   let total = 0;
   const selected = [];
   for (const moment of ordered) {
+    if (total >= settings.targetDuration) break;
     const effect = deterministicEffect(moment, settings.intensity);
     const playbackRate = effect === "slow_motion" ? 0.84 : effect === "speed_up" ? 1.12 : 1;
-    const outputLength = Math.min(MAX_SCENE_SECONDS, (moment.endTime - moment.startTime) / playbackRate);
-    if (selected.length && total + outputLength > settings.targetDuration + 1) continue;
+    const sourceLength = Math.min(MAX_SCENE_SECONDS * playbackRate, moment.endTime - moment.startTime);
+    const remaining = settings.targetDuration - total;
+    const desiredOutput = Math.min(sourceLength / playbackRate, remaining + 0.2);
+    if (desiredOutput < 1.2) continue;
+    const beat = contentPlan.contentBeats[selected.length] || null;
     selected.push({
       candidateId: moment.id,
+      beatId: beat?.beatId || "support-" + (selected.length + 1),
       startTime: moment.startTime,
-      endTime: Math.min(moment.endTime, moment.startTime + MAX_SCENE_SECONDS * playbackRate),
+      endTime: Math.min(moment.endTime, moment.startTime + desiredOutput * playbackRate),
       editOrder: selected.length,
-      role: selected.length === 0 ? "hook" : moment.storyPhase || "evidence",
+      role: beat?.role || moment.storyPhase || "evidence",
       transitionIn: selected.length === 0 ? "cut" : moment.isReplay ? "flash" : "cut",
       transitionDuration: selected.length === 0 ? 0.04 : moment.isReplay ? 0.12 : 0.06,
       effect,
       playbackRate,
       playerHighlight: moment.mainPlayerVisible && (moment.ballVisible || playerOnlyAllowed(moment)),
-      commentary: moment.commentary || "",
-      analysisPurpose: moment.analysisPurpose || "Explain how this visible evidence supports the same football story.",
-      onScreenText: moment.onScreenText || eventHeadline(moment),
+      commentary: beat?.narration || "",
+      analysisPurpose: beat?.evidenceNeed || moment.analysisPurpose || "Support the approved football analysis with visible evidence.",
+      onScreenText: beat?.captionText || moment.onScreenText || eventHeadline(moment),
       eventCallout: calloutForEvent(moment),
       colorGrade: gradeForScene(moment),
       soundEffect: soundForEvent(moment),
     });
-    total += outputLength;
+    total += desiredOutput - (selected.length === 1 ? 0 : selected.at(-1).transitionDuration);
   }
   return {
-    title: "Football analysis",
-    editorialThesis: "One evidence-based football incident explained from setup to consequence.",
-    storyQuestion: "Why did this moment happen?",
-    storyAnswer: "The selected visual evidence explains the cause.",
-    rationale: "Single-story local fallback plan",
+    ...contentPlan,
+    rationale: "Content-first conservative evidence alignment",
+    plannedDuration: total,
     segments: selected,
   };
 }
 
+function selectedTimelineDuration(moments) {
+  return moments
+    .filter((moment) => moment.selectedForFinalVideo)
+    .sort((a, b) => Number(a.editOrder) - Number(b.editOrder))
+    .reduce((total, moment, index) => {
+      const rate = clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
+      const transition = index === 0 ? 0 : clamp(Number(moment.transitionDuration || 0.04), 0.04, 0.36);
+      return total + (moment.endTime - moment.startTime) / rate - transition;
+    }, 0);
+}
 function deterministicEffect(moment, intensity) {
   if (intensity === "natural") return moment.isReplay ? "replay_treatment" : "none";
   if (moment.isReplay) return "replay_treatment";
@@ -723,14 +881,13 @@ function applyEditPlan(candidates, plan, targetDuration) {
   const used = new Set();
   const planned = [...(Array.isArray(plan?.segments) ? plan.segments : [])]
     .sort((a, b) => Number(a.editOrder) - Number(b.editOrder));
-  const primaryCandidate = planned.map((directive) => byId.get(String(directive.candidateId))).find(Boolean);
-  const primaryStoryId = primaryCandidate?.storyId;
+
   const edits = [];
   let outputDuration = 0;
   for (const directive of planned) {
     const candidate = byId.get(String(directive.candidateId));
     if (!candidate || used.has(candidate.id) || !framingEligible(candidate)) continue;
-    if (primaryStoryId && candidate.storyId !== primaryStoryId) continue;
+
     let startTime = clamp(Number(directive.startTime), candidate.startTime, candidate.endTime - 1.2);
     let endTime = clamp(Number(directive.endTime), startTime + 1.2, candidate.endTime);
     if (!Number.isFinite(startTime)) startTime = candidate.startTime;
@@ -754,12 +911,13 @@ function applyEditPlan(candidates, plan, targetDuration) {
       selectedForFinalVideo: true,
       editOrder: edits.length,
       role: String(directive.role || candidate.storyPhase || "evidence"),
+      beatId: String(directive.beatId || "") || undefined,
       transitionIn,
       transitionDuration: clamp(Number(directive.transitionDuration || 0.04), 0.04, 0.36),
       effect,
       playbackRate,
       playerHighlight: Boolean(directive.playerHighlight) && candidate.mainPlayerVisible && (candidate.ballVisible || playerOnlyAllowed(candidate)),
-      commentary: String(directive.commentary || candidate.commentary || "").slice(0, 360) || undefined,
+      commentary: String(directive.commentary || "").slice(0, 360) || undefined,
       analysisPurpose: String(directive.analysisPurpose || candidate.analysisPurpose || "").slice(0, 220) || undefined,
       onScreenText: cleanOverlayText(directive.onScreenText || candidate.onScreenText || eventHeadline(candidate), 4),
       eventCallout: normalizeChoice(directive.eventCallout, ["none", "amazing", "goal", "shot", "save", "foul", "card", "close", "pass", "celebration"], "none"),
@@ -775,6 +933,212 @@ function applyEditPlan(candidates, plan, targetDuration) {
   return candidates.map((candidate) => selectedById.get(candidate.id) || { ...candidate, selectedForFinalVideo: false });
 }
 
+function restoreOriginalPlannedScenes(moments, contentBeats) {
+  const replacements = new Map(
+    moments
+      .filter((moment) => moment.selectedForFinalVideo && moment.replacesMomentId)
+      .map((moment) => [moment.replacesMomentId, moment]),
+  );
+  let restored = moments.map((moment) => {
+    const replacement = replacements.get(moment.id);
+    if (replacement) return {
+      ...moment,
+      selectedForFinalVideo: true,
+      editOrder: replacement.editOrder,
+      beatId: replacement.beatId,
+      role: replacement.role,
+      commentary: replacement.commentary,
+      analysisPurpose: replacement.analysisPurpose,
+      onScreenText: replacement.onScreenText,
+    };
+    if (moment.selectedForFinalVideo && moment.replacesMomentId) {
+      return { ...moment, selectedForFinalVideo: false, commentary: undefined };
+    }
+    return moment;
+  });
+  for (const beat of Array.isArray(contentBeats) ? contentBeats : []) {
+    const expected = normalizeBeatText(beat.narration);
+    const represented = restored.some((moment) => moment.selectedForFinalVideo
+      && (String(moment.beatId || "") === String(beat.beatId) || normalizeBeatText(moment.commentary) === expected));
+    if (represented) continue;
+    const candidate = restored
+      .filter((moment) => !moment.selectedForFinalVideo && normalizeBeatText(moment.commentary) === expected)
+      .sort((a, b) => Number(Boolean(a.replacesMomentId)) - Number(Boolean(b.replacesMomentId))
+        || Number(b.importanceScore || 0) - Number(a.importanceScore || 0))[0];
+    if (!candidate) continue;
+    restored = restored.map((moment) => moment.id === candidate.id ? {
+      ...moment,
+      selectedForFinalVideo: true,
+      beatId: beat.beatId,
+      role: beat.role,
+      commentary: beat.narration,
+      onScreenText: moment.onScreenText || beat.captionText,
+    } : moment);
+  }
+  return restored;
+}
+function restoreContentBeatOrder(moments, contentBeats) {
+  const beats = Array.isArray(contentBeats) ? contentBeats : [];
+  if (beats.length === 0) return moments;
+  const beatIndexById = new Map(beats.map((beat, index) => [String(beat.beatId), index]));
+  const beatIndexByNarration = new Map(beats.map((beat, index) => [normalizeBeatText(beat.narration), index]));
+  const usedPrimaryBeats = new Set();
+  const ordered = moments
+    .filter((moment) => moment.selectedForFinalVideo)
+    .sort((a, b) => Number(a.editOrder) - Number(b.editOrder))
+    .map((moment, originalIndex) => {
+      const narrationIndex = beatIndexByNarration.get(normalizeBeatText(moment.commentary));
+      const declaredIndex = beatIndexById.get(String(moment.beatId || ""));
+      const beatIndex = Number.isInteger(narrationIndex) ? narrationIndex : declaredIndex;
+      const primary = Number.isInteger(beatIndex) && !usedPrimaryBeats.has(beatIndex)
+        && (Boolean(moment.commentary) || Number.isInteger(narrationIndex));
+      if (primary) {
+        usedPrimaryBeats.add(beatIndex);
+        const beat = beats[beatIndex];
+        return {
+          ...moment,
+          beatId: beat.beatId,
+          role: beat.role,
+          commentary: beat.narration,
+          onScreenText: moment.onScreenText || beat.captionText,
+          contentSort: beatIndex * 10,
+        };
+      }
+      const finalBeatIndex = Math.max(1, beats.length - 1);
+      const supportAnchor = Number.isInteger(beatIndex)
+        ? beatIndex >= finalBeatIndex ? beatIndex * 10 - 1 : beatIndex * 10 + 1
+        : finalBeatIndex * 10 - 1;
+      return {
+        ...moment,
+        commentary: undefined,
+        contentSort: supportAnchor + originalIndex / 1000,
+      };
+    })
+    .sort((a, b) => a.contentSort - b.contentSort)
+    .map((moment, index) => {
+      const restored = { ...moment, editOrder: index };
+      delete restored.contentSort;
+      return restored;
+    });
+  const selectedById = new Map(ordered.map((moment) => [moment.id, moment]));
+  return moments.map((moment) => selectedById.get(moment.id) || { ...moment, selectedForFinalVideo: false });
+}
+
+function normalizeBeatText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function buildTrackingPool(moments, backupLimit = 14) {
+  const planned = moments.filter((moment) => moment.selectedForFinalVideo);
+  const plannedIds = new Set(planned.map((moment) => moment.id));
+  const candidates = moments
+    .filter((moment) => !plannedIds.has(moment.id) && moment.keepDecision !== "reject" && moment.confidence >= 0.4 && framingEligible(moment));
+  const backups = rankSemanticBackups(planned, candidates)
+    .slice(0, backupLimit)
+    .map((item) => item.moment);
+  const trackedIds = new Set([...plannedIds, ...backups.map((moment) => moment.id)]);
+  return moments.map((moment) => ({ ...moment, selectedForFinalVideo: trackedIds.has(moment.id) }));
+}
+
+function repairPlanWithTrackedBackups(plannedMoments, assessedMoments, tracking, targetDuration, intensity) {
+  const approvedById = new Map(assessedMoments.filter((moment) => moment.selectedForFinalVideo).map((moment) => [moment.id, moment]));
+  const rejectedPlanned = plannedMoments
+    .filter((moment) => moment.selectedForFinalVideo && !approvedById.has(moment.id))
+    .sort((a, b) => Number(a.editOrder) - Number(b.editOrder));
+  const backups = plannedMoments
+    .filter((moment) => !moment.selectedForFinalVideo && tracking?.moments?.[moment.id])
+    .map((moment) => ({ moment, assessment: assessPlannedSceneTracking(moment, tracking.moments[moment.id]) }))
+    .filter((item) => item.assessment.usable)
+    .sort((a, b) => Number(b.moment.importanceScore || 0) - Number(a.moment.importanceScore || 0));
+  const desired = [...approvedById.values()];
+  const used = new Set(desired.map((moment) => moment.id));
+
+  for (const rejected of rejectedPlanned) {
+    const reusable = desired
+      .filter((moment) => !moment.commentary && !moment.beatId)
+      .map((moment) => ({ moment, semanticScore: semanticBackupScore(rejected, moment) }))
+      .sort((a, b) => b.semanticScore - a.semanticScore)
+      .find((item) => item.semanticScore >= 18);
+    let next = reusable;
+    if (reusable) desired.splice(desired.findIndex((moment) => moment.id === reusable.moment.id), 1);
+    else next = backups
+      .filter((item) => !used.has(item.moment.id))
+      .map((item) => ({ ...item, semanticScore: semanticBackupScore(rejected, item.moment) }))
+      .sort((a, b) => b.semanticScore - a.semanticScore
+        || Number(b.moment.importanceScore || 0) - Number(a.moment.importanceScore || 0))
+      .find((item) => item.semanticScore >= 18);
+    if (!next) continue;
+    used.add(next.moment.id);
+    const backup = next.moment;
+    const playbackRate = clamp(Number(rejected.playbackRate || 1), 0.72, 1.18);
+    const desiredSourceLength = Math.min(MAX_SCENE_SECONDS * playbackRate, rejected.endTime - rejected.startTime);
+    desired.push({
+      ...backup,
+      startTime: backup.startTime,
+      endTime: Math.min(backup.endTime, backup.startTime + desiredSourceLength),
+      selectedForFinalVideo: true,
+      editOrder: rejected.editOrder,
+      beatId: rejected.beatId,
+      role: rejected.role,
+      transitionIn: rejected.transitionIn,
+      transitionDuration: rejected.transitionDuration,
+      effect: deterministicEffect(backup, intensity),
+      playbackRate,
+      playerHighlight: backup.mainPlayerVisible && (backup.ballVisible || playerOnlyAllowed(backup)),
+      commentary: rejected.commentary,
+      analysisPurpose: rejected.analysisPurpose,
+      onScreenText: rejected.onScreenText,
+      eventCallout: calloutForEvent(backup),
+      colorGrade: gradeForScene(backup),
+      soundEffect: soundForEvent(backup),
+      trackingDecision: "replacement_for_planned_scene",
+      replacesMomentId: rejected.id,
+    });
+  }
+
+  let supportOrder = Math.max(0, ...desired.map((moment) => Number(moment.editOrder || 0))) + 0.01;
+  for (const next of backups) {
+    if (selectedTimelineDuration(desired) >= targetDuration * 0.96) break;
+    if (used.has(next.moment.id)) continue;
+    used.add(next.moment.id);
+    const backup = next.moment;
+    const playbackRate = 1;
+    const semanticAnchor = plannedMoments
+      .filter((moment) => moment.selectedForFinalVideo && moment.beatId && moment.commentary && moment.role !== "conclusion")
+      .map((moment) => ({ moment, score: semanticBackupScore(moment, backup) }))
+      .sort((a, b) => b.score - a.score)[0]?.moment;
+    desired.push({
+      ...backup,
+      startTime: backup.startTime,
+      endTime: Math.min(backup.endTime, backup.startTime + MAX_SCENE_SECONDS),
+      selectedForFinalVideo: true,
+      editOrder: supportOrder,
+      beatId: semanticAnchor?.beatId,
+      replacesMomentId: undefined,
+      role: "evidence",
+      transitionIn: "cut",
+      transitionDuration: 0.06,
+      effect: deterministicEffect(backup, intensity),
+      playbackRate,
+      playerHighlight: backup.mainPlayerVisible && (backup.ballVisible || playerOnlyAllowed(backup)),
+      commentary: "",
+      analysisPurpose: "Additional tracked evidence supporting the approved content.",
+      onScreenText: undefined,
+      eventCallout: calloutForEvent(backup),
+      colorGrade: gradeForScene(backup),
+      soundEffect: soundForEvent(backup),
+      trackingDecision: "tracked_support_scene",
+    });
+    supportOrder += 0.01;
+  }
+
+  const ordered = desired
+    .sort((a, b) => Number(a.editOrder) - Number(b.editOrder))
+    .map((moment, index) => ({ ...moment, editOrder: index }));
+  const selectedById = new Map(ordered.map((moment) => [moment.id, moment]));
+  return plannedMoments.map((moment) => selectedById.get(moment.id) || { ...moment, selectedForFinalVideo: false });
+}
+
 function applyTrackingQuality(moments, tracking) {
   const approved = new Map();
   for (const moment of moments.filter((item) => item.selectedForFinalVideo)) {
@@ -782,11 +1146,11 @@ function applyTrackingQuality(moments, tracking) {
     const assessment = assessPlannedSceneTracking(moment, evidence);
     if (assessment.usable) approved.set(moment.id, { ...moment, trackingDecision: assessment.mode });
   }
-  let order = 0;
   return moments.map((moment) => {
+    if (!moment.selectedForFinalVideo) return { ...moment, selectedForFinalVideo: false, trackingDecision: "not_planned" };
     const planned = approved.get(moment.id);
     if (!planned) return { ...moment, selectedForFinalVideo: false, trackingDecision: "rejected_after_plan" };
-    return { ...planned, selectedForFinalVideo: true, editOrder: order++ };
+    return { ...planned, selectedForFinalVideo: true };
   });
 }
 
@@ -861,10 +1225,10 @@ async function loadOrTrackFootball(sourcePath, moments, media, id) {
   } catch { /* Re-run tracking when cached data is missing or stale. */ }
   return trackFootball(sourcePath, moments, media, id);
 }
-async function makeSpeech(moments, id) {
+async function makeSpeech(moments, id, narrationScript) {
   const provider = (process.env.TTS_PROVIDER || "").toLowerCase();
   if (provider !== "google_cloud") throw new Error("TTS_PROVIDER must be google_cloud. No TTS fallback was selected.");
-  const narration = buildContinuousNarration(moments);
+  const narration = narrationScript || buildContinuousNarration(moments);
   if (!narration) return new Map();
   const speechDir = join(outputRoot, id, "speech");
   await mkdir(speechDir, { recursive: true });

@@ -2,6 +2,8 @@ export type JobStage =
   | "uploaded"
   | "analyzing"
   | "detecting_moments"
+  | "writing_content"
+  | "aligning_content"
   | "tracking"
   | "ranking"
   | "generating_commentary"
@@ -61,6 +63,7 @@ export type FootballMoment = {
   rejectReason?: string;
   isReplay?: boolean;
   editOrder?: number;
+  beatId?: string;
   role?: string;
   transitionIn?: "cut" | "crossfade" | "crosszoom" | "whip" | "flash";
   playerHighlight?: boolean;

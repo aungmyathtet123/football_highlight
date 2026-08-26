@@ -11,7 +11,8 @@ const stages: { key: JobStage; label: string; detail: string }[] = [
   { key: "uploaded", label: "Uploading", detail: "Securing your source footage" },
   { key: "analyzing", label: "Analyzing football", detail: "Scanning the entire match" },
   { key: "detecting_moments", label: "Finding key moments", detail: "Goals, chances, saves and skills" },
-  { key: "ranking", label: "Directing the edit", detail: "Choosing complete stories, pacing and effects" },
+  { key: "writing_content", label: "Writing the analysis", detail: "Creating a complete 60+ second football explanation" },
+  { key: "aligning_content", label: "Aligning video evidence", detail: "Matching every content beat to the best footage" },
   { key: "tracking", label: "Tracking players & ball", detail: "Keeping the full action and marking the key player" },
   { key: "generating_commentary", label: "Creating commentary", detail: "Writing visible, evidence-based analysis" },
   { key: "editing", label: "Editing", detail: "Pacing, captions, masking and emphasis" },
@@ -24,7 +25,7 @@ const processorUrl = process.env.NEXT_PUBLIC_PROCESSOR_URL || "http://127.0.0.1:
 type LocalJob = {
   id: string; stage: JobStage; progress: number; moments: FootballMoment[];
   outputUrl?: string; analysisProvider?: "gemini" | "local_fallback"; warnings?: string[];
-  media?: { duration: number }; error?: { message: string };
+  media?: { duration: number }; editPlan?: Record<string, unknown>; error?: { message: string };
 };
 
 export function VideoStudio() {
@@ -45,6 +46,7 @@ export function VideoStudio() {
   const [moments, setMoments] = useState<FootballMoment[]>([]);
   const [outputUrl, setOutputUrl] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [editPlan, setEditPlan] = useState<Record<string, unknown> | null>(null);
   const [processingError, setProcessingError] = useState<string | null>(null);
 
   const selected = useMemo(() => moments.filter((moment) => moment.selectedForFinalVideo), [moments]);
@@ -69,6 +71,7 @@ export function VideoStudio() {
     setStageIndex(0);
     setProcessingError(null);
     setWarnings([]);
+    setEditPlan(null);
     setOutputUrl(null);
     setView("processing");
     const settings: EditSettings = { targetDuration: duration, aspectRatio: "9:16", commentary, playerHighlight: highlight, captions, logoMasking, originalAudio: audio, intensity };
@@ -92,6 +95,7 @@ export function VideoStudio() {
         if (job.stage === "completed") {
           setMoments(job.moments);
           setWarnings(job.warnings || []);
+          setEditPlan(job.editPlan || null);
           setOutputUrl(job.outputUrl || null);
           if (job.media?.duration) setSourceDuration(job.media.duration);
           setView("result");
@@ -107,7 +111,7 @@ export function VideoStudio() {
   function downloadPlan() {
     if (!file) return;
     const settings: EditSettings = { targetDuration: duration, aspectRatio: "9:16", commentary, playerHighlight: highlight, captions, logoMasking, originalAudio: audio, intensity };
-    const blob = new Blob([JSON.stringify({ version: 1, source: { name: file.name, duration: sourceDuration }, settings, moments: selected }, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify({ version: 2, source: { name: file.name, duration: sourceDuration }, settings, contentPlan: editPlan, moments: selected }, null, 2)], { type: "application/json" });
     const href = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = href;
@@ -233,5 +237,5 @@ function Toggle({ label, detail, checked, onChange }: { label: string; detail: s
 function formatBytes(bytes: number) { if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`; return `${(bytes / 1024 / 1024).toFixed(1)} MB`; }
 function formatTime(seconds: number) { const safe = Number.isFinite(seconds) ? Math.max(0, Math.round(seconds)) : 0; return `${Math.floor(safe / 60)}:${String(safe % 60).padStart(2, "0")}`; }
 function titleCase(value: string) { return value.charAt(0).toUpperCase() + value.slice(1); }
-function stageIndexFor(stage: JobStage) { const index = stages.findIndex((item) => item.key === stage); if (index >= 0) return index; if (stage === "ranking") return 2; return stages.length - 1; }
+function stageIndexFor(stage: JobStage) { const index = stages.findIndex((item) => item.key === stage); if (index >= 0) return index; if (stage === "ranking") return stages.findIndex((item) => item.key === "aligning_content"); return stages.length - 1; }
 function toBase64Url(value: string) { const bytes = new TextEncoder().encode(value); let binary = ""; bytes.forEach((byte) => { binary += String.fromCharCode(byte); }); return window.btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""); }

@@ -54,7 +54,7 @@ The local UI can start after setup, but actual AI processing needs the cloud val
 Open .env and add:
 
 ~~~env
-GEMINI_API_KEY=your_new_gemini_api_key
+GEMINI_API_KEY=replace-me
 GOOGLE_CLOUD_PROJECT=your_google_cloud_project_id
 ~~~
 
@@ -118,18 +118,15 @@ The processor health endpoint is [http://127.0.0.1:8787/health](http://127.0.0.1
 
 ## How the 60-second edit is built
 
-The processor reviews the complete source timeline before it chooses clips. It then builds one connected football-analysis story instead of joining unrelated highlights:
+The processor follows a strict content-first sequence:
 
-1. Rank evidence across the whole match and choose one incident or tactical question.
-2. Arrange a hook, setup, evidence, action, proof, and consequence/reaction.
-3. Keep every micro-scene between 1.2 and 5 seconds and use speed changes only when they clarify the action.
-4. Reject normal-play shots that cannot keep the ball and involved player inside the same 9:16 crop. Celebration and reaction shots are the exception.
-5. Track the camera crop, player marker, and ball marker from frame to frame.
-6. Render edge-to-edge at exactly 1080 × 1920 with one restrained base grade, event-specific replay/goal treatments, short animated captions, purposeful sound effects, and contextual callouts.
-7. Generate one continuous male football-analyst narration track and mute the source commentary.
+1. **Observe:** Gemini reviews the complete source timeline from beginning to end and records usable and unusable football evidence. It does not choose the final edit yet.
+2. **Write:** A separate writer creates an approved 120–147-word football-analysis script with a hook, analytical question, connected reasoning, evidence, and conclusion. Directing filler such as “look at the replay,” “watch this,” or “as you can see” fails validation.
+3. **Align:** A separate evidence editor maps every approved content beat to 1.2–5-second source clips. The planned visual timeline must be approximately 60–63 seconds and may connect several related incidents under one clear thesis.
+4. **Track:** Local frame-by-frame tracking validates that gameplay keeps the ball and involved player together. Recoverable planned scenes remain in the plan; tracking cannot silently collapse the edit into a short video.
+5. **Edit:** The renderer creates one continuous male analyst narration track, mutes the source commentary, dynamically reframes to full-bleed 1080 × 1920, and adds purposeful player/ball markers, captions, replay treatment, effects, sound accents, callouts, and restrained grading.
 
-The default target is 60 seconds. A shorter result is preferred when additional footage would weaken the story or lose the ball/player framing.
-
+The processor refuses to complete when content alignment or tracking would reduce a 60-second plan below 51 seconds. The downloadable JSON includes both the approved content plan and the aligned moments.
 If you intentionally use Laragon and football_highlight.test, set this in the private .env:
 
 ~~~env

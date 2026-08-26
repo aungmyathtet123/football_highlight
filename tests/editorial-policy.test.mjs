@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import {
   MAX_SCENE_SECONDS,
   assessPlannedSceneTracking,
+  buildContentWritingPrompt,
   buildContinuousNarration,
+  buildEvidenceAlignmentPrompt,
   buildWholeVideoDirectorPrompt,
+  contentPlanProblems,
+  normalizeContentPlan,
+  plannedSegmentDuration,
+  rankSemanticBackups,
   selectDirectorCandidates,
+  semanticBackupScore,
   splitCaptionChunks,
   strongestStoryCandidates,
 } from "../local-processor/editorial-policy.mjs";
@@ -90,4 +98,100 @@ test("tracking still rejects a planned gameplay scene with persistently missing 
     { openingJointVisible: false, jointVisibilityCoverage: 0.31, jointFitCoverage: 0.22 },
   );
   assert.equal(assessment.usable, false);
+});
+test("content is written before timestamps or editing are chosen", () => {
+  const prompt = buildContentWritingPrompt({ sourceDuration: 529.1, targetDuration: 60 });
+  assert.match(prompt, /complete source from beginning to end/i);
+  assert.match(prompt, /do not choose timestamps or edit clips yet/i);
+  assert.match(prompt, /at least 60 seconds/i);
+  assert.match(prompt, /120-147 words/i);
+  assert.match(prompt, /never use directing filler/i);
+});
+
+test("evidence alignment follows the approved content and targets a full minute", () => {
+  const prompt = buildEvidenceAlignmentPrompt({ targetDuration: 60, intensity: "dynamic" });
+  assert.match(prompt, /content is already approved/i);
+  assert.match(prompt, /do not rewrite the analysis/i);
+  assert.match(prompt, /60- to 63-second visual timeline/i);
+  assert.match(prompt, /1\.2-5\.0 second clips/i);
+});
+
+test("content validation rejects short scripts and directing filler", () => {
+  const beats = Array.from({ length: 12 }, (_, index) => ({
+    beatId: "beat-" + index,
+    narration: index === 0 ? "Look at the replay because this sentence is deliberately invalid filler language." : "Movement and timing create the decisive advantage before the final action becomes obvious.",
+    evidenceNeed: "Player and ball together",
+    captionText: "KEY DETAIL",
+  }));
+  const plan = normalizeContentPlan({
+    editorialThesis: "A complete thesis",
+    storyQuestion: "Why does the move work?",
+    storyAnswer: "Movement creates the space.",
+    contentBeats: beats,
+  }, 60);
+  assert.ok(contentPlanProblems(plan, 60).includes("directing_filler_language"));
+  const short = normalizeContentPlan({
+    editorialThesis: "A thesis",
+    storyQuestion: "Why?",
+    storyAnswer: "Timing.",
+    contentBeats: beats.slice(0, 2),
+  }, 60);
+  assert.ok(contentPlanProblems(short, 60).some((problem) => problem.startsWith("script_too_short")));
+});
+
+test("planned visual duration accounts for playback and transitions", () => {
+  const segments = Array.from({ length: 12 }, (_, index) => ({ startTime: index * 6, endTime: index * 6 + 5, playbackRate: 1, transitionDuration: 0.04 }));
+  assert.ok(plannedSegmentDuration(segments) > 59.5);
+  assert.ok(plannedSegmentDuration(segments) < 60.1);
+});
+test("processor stage order is observe, write content, align evidence, then track", () => {
+  const source = readFileSync(new URL("../local-processor/server.mjs", import.meta.url), "utf8");
+  const analyze = source.indexOf('updateJob(job, "analyzing"');
+  const write = source.indexOf('updateJob(job, "writing_content"');
+  const align = source.indexOf('updateJob(job, "aligning_content"');
+  const track = source.indexOf('updateJob(job, "tracking", 52');
+  assert.ok(analyze >= 0 && analyze < write);
+  assert.ok(write < align);
+  assert.ok(align < track);
+});
+test("approved content identity survives alignment and hard cuts stay streamable", () => {
+  const server = readFileSync(new URL("../local-processor/server.mjs", import.meta.url), "utf8");
+  const renderer = readFileSync(new URL("../local-processor/render-video-v2.mjs", import.meta.url), "utf8");
+  assert.match(server, /beatId: String\(directive\.beatId/);
+  assert.doesNotMatch(server, /directive\.commentary \|\| candidate\.commentary/);
+  assert.match(server, /restoreContentBeatOrder/);
+  assert.match(server, /restoreOriginalPlannedScenes/);
+  assert.match(renderer, /requestedTransition === "cut"/);
+  assert.match(renderer, /concat=n=2:v=1:a=1/);
+});
+test("semantic backups prefer the same incident over a higher-importance unrelated clip", () => {
+  const planned = {
+    id: "clearance-action",
+    selectedForFinalVideo: true,
+    storyId: "goal-line-clearance",
+    eventType: "save",
+    description: "Cresswell clears Hakimi's header off the goal line.",
+    commentary: "A heroic goal-line clearance protects the lead.",
+  };
+  const sameIncident = {
+    id: "clearance-replay",
+    storyId: "goal-line-clearance",
+    eventType: "save",
+    description: "Replay from the net shows the defender clearing the ball off the line.",
+    importanceScore: 55,
+  };
+  const unrelatedGoal = {
+    id: "unrelated-goal",
+    storyId: "different-goal",
+    eventType: "goal",
+    description: "A striker scores and celebrates with teammates.",
+    importanceScore: 99,
+  };
+  const unrelatedReaction = {
+    id: "same-story-celebration", storyId: planned.storyId, eventType: "celebration", storyPhase: "reaction",
+    description: "A player celebrates with teammates near the corner flag.",
+  };
+  assert.ok(semanticBackupScore(planned, unrelatedReaction) < 18);
+  assert.ok(semanticBackupScore(planned, sameIncident) > semanticBackupScore(planned, unrelatedGoal));
+  assert.equal(rankSemanticBackups([planned], [unrelatedGoal, sameIncident])[0].moment.id, "clearance-replay");
 });

@@ -158,13 +158,19 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     let audioLabel = "a0";
     let accumulated = clipDurations[0];
     for (let index = 1; index < selected.length; index += 1) {
-      const transition = transitionFilter(selected[index], clipDurations[index - 1], clipDurations[index]);
-      const offset = Math.max(0, accumulated - transition.duration);
-      filters.push(`[${videoLabel}][v${index}]xfade=transition=${transition.name}:duration=${transition.duration.toFixed(3)}:offset=${offset.toFixed(3)}[vx${index}]`);
-      filters.push(`[${audioLabel}][a${index}]acrossfade=d=${transition.duration.toFixed(3)}:c1=tri:c2=tri[ax${index}]`);
+      const requestedTransition = String(selected[index].transitionIn || "cut");
+      if (requestedTransition === "cut") {
+        filters.push(`[${videoLabel}][${audioLabel}][v${index}][a${index}]concat=n=2:v=1:a=1[vx${index}][ax${index}]`);
+        accumulated += clipDurations[index];
+      } else {
+        const transition = transitionFilter(selected[index], clipDurations[index - 1], clipDurations[index]);
+        const offset = Math.max(0, accumulated - transition.duration);
+        filters.push(`[${videoLabel}][v${index}]xfade=transition=${transition.name}:duration=${transition.duration.toFixed(3)}:offset=${offset.toFixed(3)}[vx${index}]`);
+        filters.push(`[${audioLabel}][a${index}]acrossfade=d=${transition.duration.toFixed(3)}:c1=tri:c2=tri[ax${index}]`);
+        accumulated += clipDurations[index] - transition.duration;
+      }
       videoLabel = `vx${index}`;
       audioLabel = `ax${index}`;
-      accumulated += clipDurations[index] - transition.duration;
     }
     timelineDuration = accumulated;
     filters.push(`[${videoLabel}]null[outv]`);
