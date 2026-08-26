@@ -161,12 +161,13 @@ export function assessPlannedSceneTracking(moment, evidence) {
   if (!evidence) return { usable: false, mode: "missing_tracking" };
 
   const directBall = Number(evidence.ballDetectionCoverage || 0);
+  const playerCoverage = Number(evidence.playerDetectionCoverage || 0);
   const jointVisibility = Number(evidence.jointVisibilityCoverage || 0);
   const jointFit = Number(evidence.jointFitCoverage || 0);
   const maximumBallGap = Number(evidence.maxDirectBallGap ?? Number.POSITIVE_INFINITY);
   const goalPayoff = Number(evidence.goalPayoffCoverage ?? 0);
   const goalNeedsPayoff = moment.eventType === "goal";
-  const payoffReady = !goalNeedsPayoff || goalPayoff >= 0.28;
+  const payoffReady = !goalNeedsPayoff || goalPayoff >= 0.10;
   const strict = Boolean(evidence.openingJointVisible)
     && directBall >= 0.54
     && jointVisibility >= 0.54
@@ -175,16 +176,29 @@ export function assessPlannedSceneTracking(moment, evidence) {
     && payoffReady;
   if (strict) return { usable: true, mode: "strict" };
 
-  // A weak first sample is recoverable only when the direct detections—not
-  // predictions—keep the ball and the same action context visible afterwards.
-  const recoverable = directBall >= 0.62
-    && jointVisibility >= 0.62
-    && jointFit >= 0.42
-    && maximumBallGap <= 1.0
-    && payoffReady;
-  if (recoverable) return { usable: true, mode: "recovered_planned_scene" };
+  // Gemini watches the full source and supplies scene-level visibility evidence.
+  // The local detector remains the crop validator, but a weak first sample is
+  // recoverable when enough direct detections prove the player/ball relationship.
+  const aiJointConfirmed = moment.ballVisible === true
+    && moment.mainPlayerVisible === true
+    && Number(moment.confidence || 0) >= 0.84
+    && Number(moment.visualClarity || 0) >= 80;
+  const locallySupported = playerCoverage >= 0.80
+    && directBall >= 0.30
+    && jointVisibility >= 0.30
+    && jointFit >= 0.24
+    && maximumBallGap <= 2.4;
+  if (aiJointConfirmed && locallySupported && payoffReady) {
+    return { usable: true, mode: "ai_confirmed_joint_scene" };
+  }
+
+  const replay = moment.isReplay === true || moment.storyPhase === "replay";
+  if (replay && aiJointConfirmed && playerCoverage >= 0.85 && Number(moment.visualClarity || 0) >= 88 && payoffReady) {
+    return { usable: true, mode: "ai_confirmed_close_replay" };
+  }
+
   if (goalNeedsPayoff && !payoffReady) return { usable: false, mode: "missing_goal_payoff" };
-  if (directBall < 0.54 || maximumBallGap > 1.0) return { usable: false, mode: "ball_not_visibly_continuous" };
+  if (directBall < 0.30 || maximumBallGap > 2.4) return { usable: false, mode: "ball_not_visibly_continuous" };
   return { usable: false, mode: "insufficient_joint_framing" };
 }
 

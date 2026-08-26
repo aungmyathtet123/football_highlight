@@ -1218,7 +1218,7 @@ async function loadOrTrackFootball(sourcePath, moments, media, id) {
   try {
     const tracking = JSON.parse(await readFile(path, "utf8"));
     const selected = fitSelectedMoments(moments, Number.MAX_SAFE_INTEGER);
-    if (tracking.version === 10 && selected.every((moment) => tracking.moments?.[moment.id]?.keyframes?.length)) return tracking;
+    if (tracking.version === 12 && selected.every((moment) => tracking.moments?.[moment.id]?.keyframes?.length)) return tracking;
   } catch { /* Re-run tracking when cached data is missing or stale. */ }
   return trackFootball(sourcePath, moments, media, id);
 }

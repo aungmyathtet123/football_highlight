@@ -51,7 +51,6 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     }
   }
   const annotationInputs = new Map();
-  const ballInputs = new Map();
   if (settings.playerHighlight) selected.forEach((moment, index) => {
     const trackedMoment = tracking?.moments?.[moment.id];
     const annotation = trackedMoment?.annotation;
@@ -65,15 +64,7 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
       args.push("-loop", "1", "-framerate", "30", "-i", markerPath);
       annotationInputs.set(index, { inputIndex, annotation });
     }
-    const reactionOnly = moment.eventType === "celebration" || moment.storyPhase === "reaction" || moment.role === "reaction";
-    const ballEligible = !reactionOnly
-      && Boolean(tracking?.markerPaths?.ball)
-      && trackedMoment?.keyframes?.some((frame) => Number(frame.ballMarkerVisible) > 0);
-    if (ballEligible) {
-      const inputIndex = inputCount(args);
-      args.push("-loop", "1", "-framerate", "30", "-i", tracking.markerPaths.ball);
-      ballInputs.set(index, inputIndex);
-    }
+
   });
 
   const filters = [];
@@ -88,8 +79,8 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     const sourceLength = Math.max(1.2, moment.endTime - moment.startTime);
     const playbackRate = clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
     const annotationInput = annotationInputs.get(index);
-    const cueDuration = annotationInput ? clamp(Number(annotationInput.annotation.duration), 0.45, 0.75) : 0;
-    const baseOutputLength = sourceLength / playbackRate + cueDuration;
+    const cueDuration = 0;
+    const baseOutputLength = sourceLength / playbackRate;
     const speechDuration = Number(ttsFiles.durations?.get(moment.id) || 0);
     const outputLength = Math.max(baseOutputLength, speechDuration > 0 ? speechDuration + 0.16 : 0);
     clipDurations.push(outputLength);
@@ -107,40 +98,23 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
 
     if (annotationInput) {
       const { inputIndex, annotation } = annotationInput;
-      const cueX = Number(annotation.x);
-      const cueY = Number(annotation.y);
       const spotlight = annotation.style === "spotlight";
       const playerAnchorX = spotlight ? 110 : 80;
       const playerAnchorY = spotlight ? 122 : 176;
       const playerYField = spotlight ? "playerCenterY" : "playerTopY";
-      const playerCenterX = keyframeExpression(keyframes, "playerCenterX", cueX + playerAnchorX);
-      const playerAnchorPositionY = keyframeExpression(keyframes, playerYField, cueY + playerAnchorY);
+      const playerCenterX = keyframeExpression(keyframes, "playerCenterX", Number(annotation.x) + playerAnchorX);
+      const playerAnchorPositionY = keyframeExpression(keyframes, playerYField, Number(annotation.y) + playerAnchorY);
       const playerVisible = visibilityExpression(keyframes, "markerVisible");
-      const trackDuration = clamp(Number(annotation.trackDuration || 1.25) / playbackRate, 0.70, 1.80);
-      filters.push(`[baseclip${index}]split=2[freezeSource${index}][motionSource${index}]`);
-      filters.push(`[freezeSource${index}]trim=duration=0.034,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=${cueDuration.toFixed(3)},trim=duration=${cueDuration.toFixed(3)},eq=brightness=-0.055:saturation=0.86:contrast=1.08,vignette=PI/7[freeze${index}]`);
-      filters.push(`[${inputIndex}:v]format=rgba,split=2[playerAssetFreeze${index}][playerAssetMotion${index}]`);
-      filters.push(`[freeze${index}][playerAssetFreeze${index}]overlay=x=${cueX.toFixed(2)}:y=${cueY.toFixed(2)}:eof_action=repeat:shortest=1[freezePlayer${index}]`);
-      filters.push(`[motionSource${index}][playerAssetMotion${index}]overlay=x='(${playerCenterX})-${playerAnchorX}':y='(${playerAnchorPositionY})-${playerAnchorY}':enable='between(t,0,${trackDuration.toFixed(3)})*${playerVisible}':eval=frame:eof_action=repeat:shortest=1[motionPlayer${index}]`);
-      filters.push(`[freezePlayer${index}][motionPlayer${index}]concat=n=2:v=1:a=0[playerclip${index}]`);
+      const cueTime = Math.max(0, Number(annotation.cueTime || 0) / playbackRate);
+      const trackDuration = clamp(Number(annotation.trackDuration || 1.25) / playbackRate, 0.70, 2.20);
+      const cueEnd = Math.min(baseOutputLength, cueTime + trackDuration);
+      filters.push(`[${inputIndex}:v]format=rgba[playerAsset${index}]`);
+      filters.push(`[baseclip${index}][playerAsset${index}]overlay=x='(${playerCenterX})-${playerAnchorX}':y='(${playerAnchorPositionY})-${playerAnchorY}':enable='between(t,${cueTime.toFixed(3)},${cueEnd.toFixed(3)})*${playerVisible}':eval=frame:eof_action=repeat:shortest=1[playerclip${index}]`);
     } else {
       filters.push(`[baseclip${index}]null[playerclip${index}]`);
     }
 
-    const ballInputIndex = ballInputs.get(index);
-    if (ballInputIndex !== undefined) {
-      const first = keyframes[0] || {};
-      const ballTimelineKeyframes = cueDuration > 0 && keyframes.length
-        ? [{ ...first, time: 0 }, ...keyframes.map((frame) => ({ ...frame, time: Number(frame.time) + cueDuration }))]
-        : keyframes;
-      const ballX = keyframeExpression(ballTimelineKeyframes, "ballCenterX", Number(first.ballCenterX || -320));
-      const ballY = keyframeExpression(ballTimelineKeyframes, "ballCenterY", Number(first.ballCenterY || -320));
-      const ballVisible = visibilityExpression(ballTimelineKeyframes, "ballMarkerVisible");
-      filters.push(`[${ballInputIndex}:v]format=rgba[ballAsset${index}]`);
-      filters.push(`[playerclip${index}][ballAsset${index}]overlay=x='(${ballX})-56':y='(${ballY})-56':enable='${ballVisible}':eval=frame:eof_action=repeat:shortest=1[clip${index}]`);
-    } else {
-      filters.push(`[playerclip${index}]null[clip${index}]`);
-    }
+    filters.push(`[playerclip${index}]null[clip${index}]`);
 
     const extensionDuration = Math.max(0, outputLength - baseOutputLength);
     let captionLabel = `clip${index}`;
@@ -189,8 +163,8 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
 
   let timelineDuration = clipDurations[0] || 0;
   if (selected.length === 1) {
-    filters.push("[v0]null[outv]");
-    filters.push("[a0]anull[outaBase]");
+    filters.push("[v0]null[outvBase]");
+    filters.push("[a0]anull[outaUnpadded]");
   } else {
     let videoLabel = "v0";
     let audioLabel = "a0";
@@ -214,8 +188,18 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
       audioLabel = `ax${index}`;
     }
     timelineDuration = accumulated;
-    filters.push(`[${videoLabel}]null[outv]`);
-    filters.push(`[${audioLabel}]anull[outaBase]`);
+    filters.push(`[${videoLabel}]null[outvBase]`);
+    filters.push(`[${audioLabel}]anull[outaUnpadded]`);
+  }
+  const requestedDuration = Math.max(timelineDuration, Number(settings.targetDuration || timelineDuration));
+  const endingPad = Math.max(0, requestedDuration - timelineDuration);
+  if (endingPad > 0.01) {
+    filters.push(`[outvBase]tpad=stop_mode=clone:stop_duration=${endingPad.toFixed(3)},trim=duration=${requestedDuration.toFixed(3)}[outv]`);
+    filters.push(`[outaUnpadded]apad,atrim=duration=${requestedDuration.toFixed(3)}[outaBase]`);
+    timelineDuration = requestedDuration;
+  } else {
+    filters.push("[outvBase]null[outv]");
+    filters.push("[outaUnpadded]anull[outaBase]");
   }
   if (globalNarrationInputIndex !== null) {
     const narrationDuration = Number(ttsFiles.narrationDuration || timelineDuration);
@@ -284,9 +268,7 @@ function fitSelectedMoments(moments, targetDuration, ttsFiles, tracking) {
       total += length;
     } else if (!partialSupportAdded && total < targetDuration - 1.2) {
       const playbackRate = clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
-      const annotation = tracking?.moments?.[moment.id]?.annotation;
-      const cueDuration = annotation?.style !== "none" ? clamp(Number(annotation?.duration), 0.45, 0.75) : 0;
-      const sourceLength = (targetDuration - total - cueDuration) * playbackRate;
+      const sourceLength = (targetDuration - total) * playbackRate;
       if (sourceLength >= 1.2) {
         chosen.set(moment.id, { ...moment, endTime: Math.min(moment.endTime, moment.startTime + sourceLength) });
         total = targetDuration;
@@ -473,7 +455,17 @@ function keyframeExpression(keyframes, field, fallback) {
 }
 
 function visibilityExpression(keyframes, field) {
-  return "gt(" + keyframeExpression(keyframes, field, 0) + ",0.45)";
+  const values = keyframes
+    .map((frame) => ({ time: Number(frame.time), value: Number(frame[field]) > 0.45 ? 1 : 0 }))
+    .filter((frame) => Number.isFinite(frame.time))
+    .sort((a, b) => a.time - b.time)
+    .filter((frame, index, frames) => index === 0 || frame.value !== frames[index - 1].value);
+  if (values.length === 0) return "0";
+  let expression = String(values.at(-1).value);
+  for (let index = values.length - 2; index >= 0; index -= 1) {
+    expression = `if(lt(t,${values[index + 1].time.toFixed(3)}),${values[index].value},${expression})`;
+  }
+  return expression;
 }
 
 function simplifySeries(values, tolerance) {

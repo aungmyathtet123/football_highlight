@@ -85,26 +85,26 @@ test("TTS direction requests a male analyst rather than play-by-play hype", () =
   assert.match(commentaryPrompt, /one consistent performance/i);
 });
 
-test("tracking preserves a planned replay when only its opening frame is weak", () => {
+test("tracking preserves a planned replay when local and whole-video evidence agree", () => {
   const assessment = assessPlannedSceneTracking(
-    { eventType: "goal", storyPhase: "replay", role: "proof" },
-    { openingJointVisible: false, ballDetectionCoverage: 0.83, jointVisibilityCoverage: 0.83, jointFitCoverage: 0.64, maxDirectBallGap: 0.33, goalPayoffCoverage: 0.5 },
+    { eventType: "goal", storyPhase: "replay", role: "proof", isReplay: true, ballVisible: true, mainPlayerVisible: true, confidence: 0.95, visualClarity: 92 },
+    { openingJointVisible: false, playerDetectionCoverage: 1, ballDetectionCoverage: 0.83, jointVisibilityCoverage: 0.83, jointFitCoverage: 0.64, maxDirectBallGap: 0.33, goalPayoffCoverage: 0.5 },
   );
-  assert.deepEqual(assessment, { usable: true, mode: "recovered_planned_scene" });
+  assert.deepEqual(assessment, { usable: true, mode: "ai_confirmed_joint_scene" });
 });
 
 test("tracking still rejects a planned gameplay scene with persistently missing joint framing", () => {
   const assessment = assessPlannedSceneTracking(
-    { eventType: "normal_play", storyPhase: "action", role: "action" },
-    { openingJointVisible: false, ballDetectionCoverage: 0.31, jointVisibilityCoverage: 0.31, jointFitCoverage: 0.22, maxDirectBallGap: 1.2 },
+    { eventType: "normal_play", storyPhase: "action", role: "action", ballVisible: true, mainPlayerVisible: true, confidence: 0.95, visualClarity: 90 },
+    { openingJointVisible: false, playerDetectionCoverage: 1, ballDetectionCoverage: 0.31, jointVisibilityCoverage: 0.31, jointFitCoverage: 0.22, maxDirectBallGap: 1.2 },
   );
   assert.equal(assessment.usable, false);
 });
 
 test("a player-only crop is rejected when direct ball visibility is not recoverable", () => {
   const assessment = assessPlannedSceneTracking(
-    { eventType: "shot_on_target", storyPhase: "action", role: "evidence" },
-    { openingJointVisible: true, ballDetectionCoverage: 0.53, jointVisibilityCoverage: 0.53, jointFitCoverage: 0.5, maxDirectBallGap: 1.2, goalPayoffCoverage: 1 },
+    { eventType: "shot_on_target", storyPhase: "action", role: "evidence", ballVisible: false, mainPlayerVisible: true, confidence: 0.95, visualClarity: 90 },
+    { openingJointVisible: false, playerDetectionCoverage: 1, ballDetectionCoverage: 0.12, jointVisibilityCoverage: 0.12, jointFitCoverage: 0.1, maxDirectBallGap: 3.2, goalPayoffCoverage: 1 },
   );
   assert.deepEqual(assessment, { usable: false, mode: "ball_not_visibly_continuous" });
 });
@@ -112,7 +112,7 @@ test("a player-only crop is rejected when direct ball visibility is not recovera
 test("a goal scene is rejected when its final frames do not show the payoff", () => {
   const assessment = assessPlannedSceneTracking(
     { eventType: "goal", storyPhase: "action", role: "hook" },
-    { openingJointVisible: true, ballDetectionCoverage: 0.9, jointVisibilityCoverage: 0.9, jointFitCoverage: 0.85, maxDirectBallGap: 0.3, goalPayoffCoverage: 0.1 },
+    { openingJointVisible: true, ballDetectionCoverage: 0.9, jointVisibilityCoverage: 0.9, jointFitCoverage: 0.85, maxDirectBallGap: 0.3, goalPayoffCoverage: 0.05 },
   );
   assert.deepEqual(assessment, { usable: false, mode: "missing_goal_payoff" });
 });
@@ -233,9 +233,19 @@ test("semantic backups prefer the same incident over a higher-importance unrelat
 
 test("tracker requires direct ball evidence and one stable highlight identity", () => {
   const tracker = readFileSync(new URL("../local-processor/track-football-v2.py", import.meta.url), "utf8");
+  const renderer = readFileSync(new URL("../local-processor/render-video-v2.mjs", import.meta.url), "utf8");
   assert.match(tracker, /joint_visible = direct_ball and active is not None/);
   assert.match(tracker, /record\["player_track_id"\] == highlight_track_id/);
   assert.match(tracker, /record\["possession"\]/);
+  assert.match(tracker, /MAX_VISIBLE_BALL_DIAMETER = 70\.0/);
+  assert.match(tracker, /style = "spotlight" if confidence >= 0\.54 else "none"/);
   assert.match(tracker, /"maxDirectBallGap"/);
-  assert.match(tracker, /"version": 10/);
+  assert.match(tracker, /"version": 12/);
+  assert.match(tracker, /"cueTime": round\(first\["time"\]/);
+  assert.doesNotMatch(tracker, /create_ball_ring|"ball": output_path\.parent/);
+  assert.doesNotMatch(renderer, /ballInputs|markerPaths.*ball|ballAsset/);
+  assert.doesNotMatch(renderer, /freezeSource|freezePlayer/);
+  assert.match(renderer, /frame\.value !== frames\[index - 1\]\.value/);
+  assert.doesNotMatch(renderer, /targetDuration - total - cueDuration/);
+  assert.match(renderer, /tpad=stop_mode=clone:stop_duration=.*requestedDuration/);
 });

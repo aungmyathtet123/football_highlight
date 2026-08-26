@@ -16,6 +16,8 @@ GOAL_BALL_GAP_SECONDS = 0.75
 MAX_TRACK_GAP_SECONDS = 0.75
 CAMERA_DEAD_ZONE = 0.028
 MAX_CAMERA_SPEED = 0.34
+MIN_VISIBLE_BALL_DIAMETER = 4.0
+MAX_VISIBLE_BALL_DIAMETER = 70.0
 ASSETS = {
     "arrow": {"width": 160, "height": 188, "anchor_x": 80, "anchor_y": 176},
     "spotlight": {"width": 220, "height": 244, "anchor_x": 110, "anchor_y": 122},
@@ -304,28 +306,11 @@ def create_arrow(path):
 
 def create_spotlight(path):
     image = np.zeros((244, 220, 4), dtype=np.uint8)
-    for offset, stroke, color in [(5, 12, (0, 0, 0, 150)), (0, 7, (45, 242, 210, 255))]:
-        left, right, top, bottom, arm = 22, 198, 30, 222, 46
-        segments = [
-            ((left + offset, top + arm + offset), (left + offset, top + offset)), ((left + offset, top + offset), (left + arm + offset, top + offset)),
-            ((right + offset, top + arm + offset), (right + offset, top + offset)), ((right - arm + offset, top + offset), (right + offset, top + offset)),
-            ((left + offset, bottom - arm + offset), (left + offset, bottom + offset)), ((left + offset, bottom + offset), (left + arm + offset, bottom + offset)),
-            ((right + offset, bottom - arm + offset), (right + offset, bottom + offset)), ((right - arm + offset, bottom + offset), (right + offset, bottom + offset)),
-        ]
-        for start, end in segments:
-            cv2.line(image, start, end, color, stroke, cv2.LINE_AA)
-    cv2.circle(image, (110, 122), 9, (255, 255, 255, 230), 3, cv2.LINE_AA)
+    cv2.ellipse(image, (114, 127), (84, 108), 0, 0, 360, (0, 0, 0, 150), 16, cv2.LINE_AA)
+    cv2.ellipse(image, (110, 122), (84, 108), 0, 0, 360, (45, 242, 210, 255), 8, cv2.LINE_AA)
+    cv2.ellipse(image, (110, 122), (93, 117), 0, 0, 360, (255, 255, 255, 175), 2, cv2.LINE_AA)
     if not cv2.imwrite(str(path), image):
         raise RuntimeError(f"Could not create player spotlight at {path}")
-
-
-def create_ball_ring(path):
-    image = np.zeros((112, 112, 4), dtype=np.uint8)
-    cv2.circle(image, (56, 56), 40, (0, 0, 0, 155), 13, cv2.LINE_AA)
-    cv2.circle(image, (56, 56), 40, (40, 55, 255, 255), 7, cv2.LINE_AA)
-    cv2.circle(image, (56, 56), 48, (255, 255, 255, 190), 2, cv2.LINE_AA)
-    if not cv2.imwrite(str(path), image):
-        raise RuntimeError(f"Could not create ball tracking ring at {path}")
 
 
 def build_keyframes(records, media_width, media_height, fallback_x, output_width, window_height, window_top, zoom, sample_fps):
@@ -339,17 +324,14 @@ def build_keyframes(records, media_width, media_height, fallback_x, output_width
     camera_x = smooth_camera([record["camera_target_x"] for record in records], times, resets, fallback_x, half_x, sample_fps)
     camera_y = smooth_camera([record["camera_target_y"] for record in records], times, resets, 0.5, half_y, sample_fps)
 
-    intro_records = [record for record in records if record["time"] <= 1.2 and record["possession"]]
+    intro_records = [record for record in records if record["time"] <= 1.6 and record["possession"]]
     identity_scores = {}
     for record in intro_records:
         track_id = record["player_track_id"]
         if track_id is not None:
             identity_scores[track_id] = identity_scores.get(track_id, 0.0) + record["subject_confidence"]
     highlight_track_id = max(identity_scores, key=identity_scores.get) if identity_scores else None
-    opening_identity = next((
-        record for record in records
-        if record["time"] <= 0.35 and record["possession"] and record["player_track_id"] == highlight_track_id
-    ), None)
+    opening_identity = next((record for record in intro_records if record["player_track_id"] == highlight_track_id), None)
 
     keyframes = []
     for index, record in enumerate(records):
@@ -363,8 +345,7 @@ def build_keyframes(records, media_width, media_height, fallback_x, output_width
         marker_visible = (
             highlight_track_id is not None
             and record["player_track_id"] == highlight_track_id
-            and record["possession"]
-            and record["subject_confidence"] >= 0.55
+            and record["subject_confidence"] >= 0.52
         )
         ball_marker_visible = record["direct_ball"] and record["ball_confidence"] >= 0.12
         keyframes.append({
@@ -377,23 +358,18 @@ def build_keyframes(records, media_width, media_height, fallback_x, output_width
         })
     annotation = {"style": "none", "confidence": 0.0, "duration": 0.0}
     first_record = opening_identity or records[0]
-    opening_joint_fit = (
-        opening_identity is not None
-        and first_record["direct_ball"]
-        and first_record["joint_span"] + min(0.09, crop_width / media_width * 0.22) <= crop_width / media_width
-    )
-    intro = [record for record in intro_records if record["player_track_id"] == highlight_track_id] if opening_joint_fit else []
+    intro = [record for record in intro_records if record["player_track_id"] == highlight_track_id]
     if intro:
         first = intro[0]
         continuity = len(intro) / max(1, len([record for record in records if record["time"] <= 1.2]))
-        confidence = clamp(float(np.median([record["subject_confidence"] for record in intro])) * 0.58 + continuity * 0.22 + clamp(first["ball_confidence"] / 0.45, 0.0, 1.0) * 0.20, 0.0, 1.0)
+        confidence = clamp(float(np.median([record["subject_confidence"] for record in intro])) * 0.68 + continuity * 0.24 + clamp(first["ball_confidence"] / 0.45, 0.0, 1.0) * 0.08, 0.0, 1.0)
         index = records.index(first)
         crop_left = camera_x[index] * media_width - crop_width / 2
         crop_top = camera_y[index] * media_height - crop_height / 2
         projected_x = (first["player_x"] * media_width - crop_left) / crop_width * output_width
         center_y = window_top + (first["player_y"] * media_height - crop_top) / crop_height * window_height
         top_y = window_top + (first["player_top"] * media_height - crop_top) / crop_height * window_height
-        style = "spotlight" if confidence >= 0.70 else "arrow" if confidence >= 0.54 else "none"
+        style = "spotlight" if confidence >= 0.54 else "none"
         if style != "none":
             asset = ASSETS[style]
             x = projected_x - asset["anchor_x"]
@@ -401,7 +377,8 @@ def build_keyframes(records, media_width, media_height, fallback_x, output_width
             if -asset["width"] * 0.25 <= x <= output_width - asset["width"] * 0.75 and window_top - asset["height"] * 0.25 <= y <= window_top + window_height - asset["height"] * 0.75:
                 annotation = {
                     "style": style, "confidence": round(confidence, 4), "duration": 0.58 if style == "spotlight" else 0.50,
-                    "trackDuration": round(min(1.65, max(0.8, records[-1]["time"])), 3),
+                    "cueTime": round(first["time"], 3),
+                    "trackDuration": round(min(2.0, max(0.8, records[-1]["time"] - first["time"])), 3),
                     "x": round(clamp(x, -asset["width"] * 0.15, output_width - asset["width"] * 0.85), 2),
                     "y": round(clamp(y, window_top - asset["height"] * 0.10, window_top + window_height - asset["height"] * 0.90), 2),
                     "sourceX": round(first["player_x"], 6),
@@ -457,11 +434,12 @@ def track_moment(model, capture, moment, media_width, media_height, source_fps, 
         if last_ball is not None and last_ball_time is not None:
             gap = max(0.0, timestamp - last_ball_time)
             predicted = (clamp(last_ball[0] + ball_velocity[0] * gap, 0.0, 1.0), clamp(last_ball[1] + ball_velocity[1] * gap, 0.0, 1.0))
-        detected = choose_ball(balls, predicted)
-        ball_pixel_diameter = 0.0
-        if detected is not None:
-            ball_pixel_diameter = max(detected["x2"] - detected["x1"], detected["y2"] - detected["y1"]) / view_width * args.output_width
-        direct_ball = bool(detected is not None and float(detected["confidence"]) >= 0.12 and ball_pixel_diameter >= 5.0)
+        for candidate in balls:
+            candidate["output_diameter"] = max(candidate["x2"] - candidate["x1"], candidate["y2"] - candidate["y1"]) / view_width * args.output_width
+        plausible_balls = [candidate for candidate in balls if MIN_VISIBLE_BALL_DIAMETER <= candidate["output_diameter"] <= MAX_VISIBLE_BALL_DIAMETER]
+        detected = choose_ball(plausible_balls, predicted)
+        ball_pixel_diameter = detected["output_diameter"] if detected is not None else 0.0
+        direct_ball = bool(detected is not None and float(detected["confidence"]) >= 0.12)
         ball_confidence = 0.0
         if detected is not None:
             direct_ball_frames += 1 if direct_ball else 0
@@ -595,14 +573,14 @@ def main():
     marker_paths = {
         "arrow": output_path.parent / "player-arrow.png",
         "spotlight": output_path.parent / "player-spotlight.png",
-        "ball": output_path.parent / "ball-ring.png",
+
     }
     create_arrow(marker_paths["arrow"])
     create_spotlight(marker_paths["spotlight"])
-    create_ball_ring(marker_paths["ball"])
+
     denominator = max(1, totals["samples"])
     payload = {
-        "version": 10, "model": os.path.basename(args.model), "sampleFps": args.sample_fps,
+        "version": 12, "model": os.path.basename(args.model), "sampleFps": args.sample_fps,
         "markerPaths": {key: str(path.resolve()) for key, path in marker_paths.items()}, "moments": tracked,
         "summary": {
             "sampledFrames": totals["samples"], "ballDetectionCoverage": round(totals["ball"] / denominator, 4),
