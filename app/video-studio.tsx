@@ -33,7 +33,7 @@ export function VideoStudio() {
   const [file, setFile] = useState<File | null>(null);
   const [sourceDuration, setSourceDuration] = useState(0);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [duration, setDuration] = useState(65);
+  const [duration, setDuration] = useState(60);
   const [commentary, setCommentary] = useState(true);
   const [highlight, setHighlight] = useState(true);
   const [captions, setCaptions] = useState(true);
@@ -175,8 +175,8 @@ function UploadView(props: UploadProps) {
         <div className="format-preview"><div className="phone-frame"><div className="pitch-lines"><span>9:16</span></div></div><div><span className="mini-label">OUTPUT FORMAT</span><h3>Full-screen 9:16 action tracking</h3><p>The frame is filled edge to edge while the smart crop follows the ball, active player and nearby action.</p><div className="spec-row"><span>1080 × 1920</span><span>60–70 sec</span><span>MP4</span></div></div></div>
       </section>
       <aside className="settings-card" aria-label="Edit settings">
-        <div className="settings-heading"><div><span className="mini-label">YOUR EDIT</span><h2>Settings</h2></div><button className="reset-button" onClick={() => { setDuration(65); setCommentary(true); setHighlight(true); setCaptions(true); setLogoMasking(true); setAudio("muted"); setIntensity("dynamic"); }}>Reset</button></div>
-        <Setting label="Final length" note="Target duration"><div className="segmented four">{[60, 65, 70, 80].map((value) => <button key={value} className={duration === value ? "selected" : ""} onClick={() => setDuration(value)}>{value}s{value === 65 && <small>DEFAULT</small>}</button>)}</div></Setting>
+        <div className="settings-heading"><div><span className="mini-label">YOUR EDIT</span><h2>Settings</h2></div><button className="reset-button" onClick={() => { setDuration(60); setCommentary(true); setHighlight(true); setCaptions(true); setLogoMasking(true); setAudio("muted"); setIntensity("dynamic"); }}>Reset</button></div>
+        <Setting label="Final length" note="Target duration"><div className="segmented four">{[60, 65, 70, 80].map((value) => <button key={value} className={duration === value ? "selected" : ""} onClick={() => setDuration(value)}>{value}s{value === 60 && <small>DEFAULT</small>}</button>)}</div></Setting>
         <Setting label="Aspect ratio" note="Full-screen output"><button className="select-row"><span><b className="ratio-icon" /> 9:16 Vertical</span><span>⌄</span></button></Setting>
         <div className="toggle-group"><Toggle label="AI commentary" detail="Replaces the source audio with analysis narration" checked={commentary} onChange={(value) => { setCommentary(value); if (value) setAudio("muted"); }} /><Toggle label="Player highlight" detail="Circle the active player without a text label" checked={highlight} onChange={setHighlight} /><Toggle label="Captions" detail="Burned-in dynamic subtitles" checked={captions} onChange={setCaptions} /><Toggle label="Logo / watermark masking" detail="Blur authorized persistent overlays" checked={logoMasking} onChange={setLogoMasking} /></div>
         <Setting label="Source audio" note={commentary ? "Muted while AI commentary is enabled" : "Match sound level"}><div className="segmented three">{(["normal", "reduced", "muted"] as AudioMode[]).map((value) => <button key={value} disabled={commentary} className={audio === value ? "selected" : ""} onClick={() => setAudio(value)}>{titleCase(value)}</button>)}</div></Setting>

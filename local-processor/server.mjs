@@ -9,6 +9,13 @@ import { GoogleGenAI } from "@google/genai";
 import { synthesizeGoogleCloudSpeech } from "./google-cloud-tts.mjs";
 import { renderVideoV2 } from "./render-video-v2.mjs";
 import {
+  MAX_SCENE_SECONDS,
+  buildContinuousNarration,
+  buildWholeVideoDirectorPrompt,
+  selectDirectorCandidates,
+  strongestStoryCandidates,
+} from "./editorial-policy.mjs";
+import {
   analyzeVideoIntelligenceFile,
   compactVideoIntelligenceEvidence,
   enrichMomentsWithVideoIntelligence,
@@ -158,13 +165,16 @@ async function resumeRender(id) {
   }
 }
 async function loadSavedSpeech(moments, id) {
-  const selected = moments.filter((item) => item.selectedForFinalVideo && item.commentary);
-  const files = new Map();
-  for (const [index, moment] of selected.entries()) {
-    const path = join(outputRoot, id, "speech", `${index}.wav`);
-    try { if ((await stat(path)).size > 0) files.set(moment.id, path); } catch { /* Regenerate missing speech below. */ }
-  }
-  return files.size === selected.length ? files : makeSpeech(moments, id);
+  const path = join(outputRoot, id, "speech", "narration.wav");
+  try {
+    if ((await stat(path)).size > 0) {
+      const files = new Map([["__narration__", path]]);
+      files.narrationDuration = await probeAudioDuration(path);
+      files.narrationScript = buildContinuousNarration(moments);
+      return files;
+    }
+  } catch { /* Regenerate missing narration below. */ }
+  return makeSpeech(moments, id);
 }
 async function processJob(id) {
   let job = await readJob(id);
@@ -201,20 +211,36 @@ async function processJob(id) {
         editPlan = buildDeterministicEditPlan(candidates, job.settings);
       }
     } else editPlan = buildDeterministicEditPlan(candidates, job.settings);
-    const selected = applyEditPlan(candidates, editPlan, job.settings.targetDuration);
+    let selected = applyEditPlan(candidates, editPlan, job.settings.targetDuration);
     job = await updateJob(job, "tracking", 46, {
       moments: selected,
       editPlan: {
-        title: editPlan.title || "Football highlight",
+        title: editPlan.title || "Football analysis",
+        editorialThesis: editPlan.editorialThesis || "",
+        storyQuestion: editPlan.storyQuestion || "",
+        storyAnswer: editPlan.storyAnswer || "",
         rationale: editPlan.rationale || "",
         candidateCount: candidates.length,
         selectedCount: selected.filter((moment) => moment.selectedForFinalVideo).length,
       },
     });
     const tracking = await trackFootball(job.sourceKey, selected, media, id);
-    job = await updateJob(job, "tracking", 56, { trackingSummary: tracking.summary });
-    if (tracking.summary.ballDetectionCoverage < 0.08) job.warnings.push("Ball detection was weak, so gameplay uses the wider context composition instead of a player-only crop.");
-    if (Number(tracking.summary.jointFitCoverage || 0) < 0.55) job.warnings.push("Several gameplay frames could not safely fit both the football and involved player in a tight crop; those scenes use the wider context layout.");
+    selected = applyTrackingQuality(selected, tracking);
+    const frameable = selected.filter((moment) => moment.selectedForFinalVideo);
+    if (frameable.length < 3) {
+      throw new Error("The chosen story did not contain enough full-screen scenes where the football and involved player fit together. Try another source or target duration.");
+    }
+    job = await updateJob(job, "tracking", 56, {
+      moments: selected,
+      trackingSummary: tracking.summary,
+      editPlan: {
+        ...job.editPlan,
+        selectedCount: frameable.length,
+        narrationScript: buildContinuousNarration(selected),
+      },
+    });
+    if (tracking.summary.ballDetectionCoverage < 0.08) job.warnings.push("Ball detection was weak; gameplay scenes that failed the full-screen ball-and-player framing gate were rejected.");
+    if (Number(tracking.summary.jointFitCoverage || 0) < 0.55) job.warnings.push("Some gameplay scenes could not fit the football and involved player together in full-screen 9:16, so they were removed instead of letterboxed.");
     if (job.settings.logoMasking && overlayMasks.length === 0) job.warnings.push("No persistent logo or watermark region was confidently detected, so no mask was applied.");
     job = await updateJob(job, "generating_commentary", 60);
     const ttsFiles = job.settings.commentary ? await makeSpeech(selected, id) : new Map();
@@ -403,7 +429,7 @@ async function createAnalysisProxies(sourcePath, media, id) {
 async function planEditWithGemini(candidates, media, settings) {
   const model = process.env.GEMINI_MODEL;
   const ai = new GoogleGenAI({ vertexai: true, apiKey: process.env.GEMINI_API_KEY });
-  const compactCandidates = candidates.slice(0, 140).map((moment) => ({
+  const compactCandidates = selectDirectorCandidates(candidates).map((moment) => ({
     id: moment.id,
     startTime: moment.startTime,
     endTime: moment.endTime,
@@ -422,29 +448,27 @@ async function planEditWithGemini(candidates, media, settings) {
     mainPlayerVisible: moment.mainPlayerVisible,
     isReplay: moment.isReplay,
     description: moment.description,
-    commentary: moment.commentary || "",
+    analysisPurpose: moment.analysisPurpose || "",
     videoIntelligence: moment.videoIntelligence,
   }));
-  const prompt = [
-    "You are the second-pass AI edit director for an original football commentary and criticism video. The result must be an analysis supported by necessary excerpts, never a substitute for the source match or its official highlights.",
-    `The source is ${media.duration.toFixed(2)} seconds. Build one coherent approximately ${settings.targetDuration}-second 9:16 analysis from the supplied first-pass candidate timeline.`,
-    `Editing intensity is ${settings.intensity}. Original match audio will be ${settings.commentary ? "fully muted and replaced by generated narration" : settings.originalAudio}.`,
-    "First create one original editorial thesis. Select only excerpts necessary to explain that thesis. Every selected excerpt must have a distinct analysisPurpose and original commentary; reject footage that would be included only for entertainment, chronology, or completeness.",
-    "Select observable, visually clear footage. Reject duplicates and incomplete or confusing actions. Prefer short micro-scenes that establish a point, show the evidence, and deliver the analytical payoff. The first 3 to 5 seconds must be the strongest analytical hook, without repeating it later.",
-    "During gameplay, select a segment only when the relevant player and football are visible together. Player-only framing is permitted only for celebration, reaction, or introduction. Never choose ball-only or player-only running footage.",
-    "Use the minimum source footage needed. Each segment must produce 1.2 to 5.0 output seconds. Do not reconstruct the match chronologically or include uninterrupted passages when a shorter excerpt proves the point.",
-    "Return JSON only with title, editorialThesis, rationale, and segments. Each segment must reference exactly one candidateId and contain source startTime and endTime inside that candidate, editOrder beginning at 0, role (hook|build_up|action|payoff|reaction|replay|montage), analysisPurpose, transitionIn (cut|crossfade|crosszoom|whip|flash), transitionDuration from 0.04 to 0.45, effect (none|punch_zoom|slow_motion|speed_up|replay_treatment), playbackRate from 0.72 to 1.18, playerHighlight boolean, one concise evidence-based analytical commentary sentence, onScreenText of 2 to 6 words, eventCallout (none|amazing|goal|shot|save|foul|card|close|pass|celebration), colorGrade (cool|clean|warm|dramatic|goal_gold|replay_blue), and soundEffect (none|whoosh|impact|goal|whistle|sparkle).",
-    "Use hard cuts or very short transitions for continuous play. Use crosszoom/whip only between discontinuous moments, flash for a replay, slow motion only around a clearly visible decisive skill/shot/save/goal, and avoid random effects.",
-    "Give every consecutive 1-to-5-second scene a visibly different but natural color grade. Use goal_gold only for a confirmed goal and replay_blue only for a replay. Match callouts and sound effects to verified events; do not add a GOAL, foul, card, score, name, or outcome that is not visibly supported.",
-    "Captions and callouts must be clean and short, never paragraphs. Do not invent player names, teams, scores, or outcomes. This planner improves the editorial purpose but must not claim or promise a legal fair-use determination.",
-  ].join(" ");
+  const prompt = buildWholeVideoDirectorPrompt({
+    sourceDuration: media.duration,
+    targetDuration: settings.targetDuration,
+    intensity: settings.intensity,
+    commentary: settings.commentary,
+  });
   const response = await ai.models.generateContent({
     model,
-    contents: [{ text: prompt }, { text: JSON.stringify({ candidates: compactCandidates }) }],
-    config: { responseMimeType: "application/json", temperature: 0.1 },
+    contents: [
+      { text: prompt },
+      { text: JSON.stringify({ completeObservationTimeline: compactCandidates }) },
+    ],
+    config: { responseMimeType: "application/json", temperature: 0.08 },
   });
   const parsed = JSON.parse(response.text || "{}");
-  if (!Array.isArray(parsed.segments) || parsed.segments.length === 0) throw new Error("Gemini returned no edit-decision segments.");
+  if (!parsed.editorialThesis || !parsed.storyQuestion || !Array.isArray(parsed.segments) || parsed.segments.length === 0) {
+    throw new Error("Gemini returned no coherent whole-video story plan.");
+  }
   return parsed;
 }
 
@@ -561,38 +585,48 @@ function buildFallbackMoments(duration, targetDuration) {
 }
 
 function buildDeterministicEditPlan(candidates, settings) {
-  const ranked = candidates
-    .filter((moment) => moment.keepDecision !== "reject" && moment.confidence >= 0.45 && framingEligible(moment))
-    .sort((a, b) => b.importanceScore - a.importanceScore || (b.visualClarity || 0) - (a.visualClarity || 0));
+  const story = strongestStoryCandidates(candidates)
+    .filter((moment) => moment.confidence >= 0.45 && framingEligible(moment));
+  const hook = [...story].sort((a, b) => Number(b.hookScore || 0) - Number(a.hookScore || 0))[0];
+  const ordered = [
+    ...(hook ? [hook] : []),
+    ...story.filter((moment) => moment.id !== hook?.id).sort((a, b) => a.startTime - b.startTime),
+  ];
   let total = 0;
   const selected = [];
-  for (const moment of ranked) {
+  for (const moment of ordered) {
     const effect = deterministicEffect(moment, settings.intensity);
     const playbackRate = effect === "slow_motion" ? 0.84 : effect === "speed_up" ? 1.12 : 1;
-    const outputLength = (moment.endTime - moment.startTime) / playbackRate;
+    const outputLength = Math.min(MAX_SCENE_SECONDS, (moment.endTime - moment.startTime) / playbackRate);
     if (selected.length && total + outputLength > settings.targetDuration + 1) continue;
     selected.push({
       candidateId: moment.id,
       startTime: moment.startTime,
-      endTime: moment.endTime,
+      endTime: Math.min(moment.endTime, moment.startTime + MAX_SCENE_SECONDS * playbackRate),
       editOrder: selected.length,
-      role: selected.length === 0 ? "hook" : moment.storyPhase || "montage",
-      transitionIn: selected.length === 0 ? "cut" : moment.isReplay ? "flash" : settings.intensity === "natural" ? "crossfade" : "crosszoom",
-      transitionDuration: selected.length === 0 ? 0.04 : settings.intensity === "high_energy" ? 0.18 : 0.26,
+      role: selected.length === 0 ? "hook" : moment.storyPhase || "evidence",
+      transitionIn: selected.length === 0 ? "cut" : moment.isReplay ? "flash" : "cut",
+      transitionDuration: selected.length === 0 ? 0.04 : moment.isReplay ? 0.12 : 0.06,
       effect,
       playbackRate,
       playerHighlight: moment.mainPlayerVisible && (moment.ballVisible || playerOnlyAllowed(moment)),
       commentary: moment.commentary || "",
-      analysisPurpose: moment.analysisPurpose || `Explain the significance of this ${String(moment.eventType).replaceAll("_", " ")}.`,
+      analysisPurpose: moment.analysisPurpose || "Explain how this visible evidence supports the same football story.",
       onScreenText: moment.onScreenText || eventHeadline(moment),
       eventCallout: calloutForEvent(moment),
-      colorGrade: gradeForScene(moment, selected.length),
+      colorGrade: gradeForScene(moment),
       soundEffect: soundForEvent(moment),
     });
     total += outputLength;
-    if (total >= settings.targetDuration - 3) break;
   }
-  return { title: "Best football moments", rationale: "Story-aware local fallback plan", segments: selected };
+  return {
+    title: "Football analysis",
+    editorialThesis: "One evidence-based football incident explained from setup to consequence.",
+    storyQuestion: "Why did this moment happen?",
+    storyAnswer: "The selected visual evidence explains the cause.",
+    rationale: "Single-story local fallback plan",
+    segments: selected,
+  };
 }
 
 function deterministicEffect(moment, intensity) {
@@ -665,10 +699,10 @@ function soundForEvent(moment) {
   return "none";
 }
 
-function gradeForScene(moment, index) {
+function gradeForScene(moment) {
   if (moment.eventType === "goal") return "goal_gold";
   if (moment.isReplay || moment.storyPhase === "replay") return "replay_blue";
-  return ["cool", "clean", "warm", "dramatic"][index % 4];
+  return moment.storyPhase === "hook" ? "dramatic" : "clean";
 }
 
 function applyEditPlan(candidates, plan, targetDuration) {
@@ -676,39 +710,20 @@ function applyEditPlan(candidates, plan, targetDuration) {
   const used = new Set();
   const planned = [...(Array.isArray(plan?.segments) ? plan.segments : [])]
     .sort((a, b) => Number(a.editOrder) - Number(b.editOrder));
-  const supplemental = candidates
-    .filter((candidate) => candidate.keepDecision !== "reject" && framingEligible(candidate))
-    .sort((a, b) => b.importanceScore - a.importanceScore)
-    .map((candidate, index) => ({
-      candidateId: candidate.id,
-      editOrder: planned.length + index,
-      startTime: candidate.startTime,
-      endTime: candidate.endTime,
-      role: candidate.storyPhase,
-      transitionIn: "cut",
-      transitionDuration: 0.04,
-      effect: "none",
-      playbackRate: 1,
-      playerHighlight: candidate.mainPlayerVisible,
-      commentary: candidate.commentary || "",
-      analysisPurpose: candidate.analysisPurpose || `Explain the significance of this ${String(candidate.eventType).replaceAll("_", " ")}.`,
-      onScreenText: candidate.onScreenText || eventHeadline(candidate),
-      eventCallout: calloutForEvent(candidate),
-      colorGrade: gradeForScene(candidate, planned.length + index),
-      soundEffect: soundForEvent(candidate),
-    }));
+  const primaryCandidate = planned.map((directive) => byId.get(String(directive.candidateId))).find(Boolean);
+  const primaryStoryId = primaryCandidate?.storyId;
   const edits = [];
   let outputDuration = 0;
-  for (const directive of [...planned, ...supplemental]) {
+  for (const directive of planned) {
     const candidate = byId.get(String(directive.candidateId));
-    if (!candidate || used.has(candidate.id)) continue;
-    if (!framingEligible(candidate)) continue;
+    if (!candidate || used.has(candidate.id) || !framingEligible(candidate)) continue;
+    if (primaryStoryId && candidate.storyId !== primaryStoryId) continue;
     let startTime = clamp(Number(directive.startTime), candidate.startTime, candidate.endTime - 1.2);
     let endTime = clamp(Number(directive.endTime), startTime + 1.2, candidate.endTime);
     if (!Number.isFinite(startTime)) startTime = candidate.startTime;
     if (!Number.isFinite(endTime)) endTime = candidate.endTime;
     const playbackRate = clamp(Number(directive.playbackRate || 1), 0.72, 1.18);
-    endTime = Math.min(endTime, startTime + 5 * playbackRate);
+    endTime = Math.min(endTime, startTime + MAX_SCENE_SECONDS * playbackRate);
     let effectiveLength = (endTime - startTime) / playbackRate;
     const remaining = targetDuration - outputDuration;
     if (effectiveLength > remaining + 1) {
@@ -725,26 +740,47 @@ function applyEditPlan(candidates, plan, targetDuration) {
       endTime,
       selectedForFinalVideo: true,
       editOrder: edits.length,
-      role: String(directive.role || candidate.storyPhase || "montage"),
+      role: String(directive.role || candidate.storyPhase || "evidence"),
       transitionIn,
-      transitionDuration: clamp(Number(directive.transitionDuration || 0.04), 0.04, 0.45),
+      transitionDuration: clamp(Number(directive.transitionDuration || 0.04), 0.04, 0.36),
       effect,
       playbackRate,
       playerHighlight: Boolean(directive.playerHighlight) && candidate.mainPlayerVisible && (candidate.ballVisible || playerOnlyAllowed(candidate)),
-      commentary: String(directive.commentary || candidate.commentary || "").slice(0, 220) || undefined,
-      analysisPurpose: String(directive.analysisPurpose || candidate.analysisPurpose || "").slice(0, 180) || undefined,
-      onScreenText: cleanOverlayText(directive.onScreenText || candidate.onScreenText || eventHeadline(candidate), 6),
-      eventCallout: normalizeChoice(directive.eventCallout, ["none", "amazing", "goal", "shot", "save", "foul", "card", "close", "pass", "celebration"], calloutForEvent(candidate)),
-      colorGrade: normalizeChoice(directive.colorGrade, ["cool", "clean", "warm", "dramatic", "goal_gold", "replay_blue"], gradeForScene(candidate, edits.length)),
-      soundEffect: normalizeChoice(directive.soundEffect, ["none", "whoosh", "impact", "goal", "whistle", "sparkle"], soundForEvent(candidate)),
+      commentary: String(directive.commentary || candidate.commentary || "").slice(0, 360) || undefined,
+      analysisPurpose: String(directive.analysisPurpose || candidate.analysisPurpose || "").slice(0, 220) || undefined,
+      onScreenText: cleanOverlayText(directive.onScreenText || candidate.onScreenText || eventHeadline(candidate), 4),
+      eventCallout: normalizeChoice(directive.eventCallout, ["none", "amazing", "goal", "shot", "save", "foul", "card", "close", "pass", "celebration"], "none"),
+      colorGrade: normalizeChoice(directive.colorGrade, ["clean", "dramatic", "goal_gold", "replay_blue"], gradeForScene(candidate)),
+      soundEffect: normalizeChoice(directive.soundEffect, ["none", "whoosh", "impact", "goal", "whistle", "sparkle"], "none"),
     });
     used.add(candidate.id);
     outputDuration += effectiveLength;
     if (outputDuration >= targetDuration - 0.5) break;
   }
-  if (edits.length === 0) throw new Error("The edit plan did not contain any usable football segments.");
+  if (edits.length === 0) throw new Error("The edit plan did not contain any usable football segments from one coherent story.");
   const selectedById = new Map(edits.map((edit) => [edit.id, edit]));
   return candidates.map((candidate) => selectedById.get(candidate.id) || { ...candidate, selectedForFinalVideo: false });
+}
+
+function applyTrackingQuality(moments, tracking) {
+  const approved = new Map();
+  for (const moment of moments.filter((item) => item.selectedForFinalVideo)) {
+    if (playerOnlyAllowed(moment)) {
+      approved.set(moment.id, moment);
+      continue;
+    }
+    const evidence = tracking?.moments?.[moment.id];
+    const frameable = evidence
+      && evidence.openingJointVisible
+      && Number(evidence.jointVisibilityCoverage || 0) >= 0.42
+      && Number(evidence.jointFitCoverage || 0) >= 0.48;
+    if (frameable) approved.set(moment.id, moment);
+  }
+  let order = 0;
+  return moments.map((moment) => {
+    if (!approved.has(moment.id)) return { ...moment, selectedForFinalVideo: false };
+    return { ...moment, selectedForFinalVideo: true, editOrder: order++ };
+  });
 }
 
 function fitSelectedMoments(moments, targetDuration) {
@@ -814,23 +850,32 @@ async function loadOrTrackFootball(sourcePath, moments, media, id) {
   try {
     const tracking = JSON.parse(await readFile(path, "utf8"));
     const selected = fitSelectedMoments(moments, Number.MAX_SAFE_INTEGER);
-    if (tracking.version === 8 && selected.every((moment) => tracking.moments?.[moment.id]?.keyframes?.length)) return tracking;
+    if (tracking.version === 9 && selected.every((moment) => tracking.moments?.[moment.id]?.keyframes?.length)) return tracking;
   } catch { /* Re-run tracking when cached data is missing or stale. */ }
   return trackFootball(sourcePath, moments, media, id);
 }
 async function makeSpeech(moments, id) {
   const provider = (process.env.TTS_PROVIDER || "").toLowerCase();
   if (provider !== "google_cloud") throw new Error("TTS_PROVIDER must be google_cloud. No TTS fallback was selected.");
-  const files = new Map();
+  const narration = buildContinuousNarration(moments);
+  if (!narration) return new Map();
   const speechDir = join(outputRoot, id, "speech");
   await mkdir(speechDir, { recursive: true });
-  for (const [index, moment] of moments.filter((item) => item.selectedForFinalVideo && item.commentary).entries()) {
-    const output = join(speechDir, `${index}.wav`);
-    await synthesizeGoogleCloudSpeech(moment.commentary, output);
-    files.set(moment.id, output);
-  }
+  const output = join(speechDir, "narration.wav");
+  await synthesizeGoogleCloudSpeech(narration, output);
+  const files = new Map([["__narration__", output]]);
+  files.narrationDuration = await probeAudioDuration(output);
+  files.narrationScript = narration;
   return files;
 }
+
+async function probeAudioDuration(path) {
+  const raw = await run(ffprobePath, ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path]);
+  const duration = Number(raw.trim());
+  if (!Number.isFinite(duration) || duration <= 0) throw new Error("Could not measure the generated narration duration.");
+  return duration;
+}
+
 // Legacy renderer retained for saved pre-v2 jobs.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function renderVideo(sourcePath, outputPath, moments, settings, media, ttsFiles, overlayMasks, tracking) {
@@ -1072,11 +1117,17 @@ async function reviewRenderedVideoWithGemini(outputPath, media, id, settings) {
   await run(ffmpegPath, args);
   const proxy = await readFile(proxyPath);
   const prompt = [
-    "Act as a strict football short-form video quality controller. Review the complete rendered montage.",
-    "Return JSON only with approved boolean, score 0-100, issues array, ballTracking 0-100, playerHighlight 0-100, framing 0-100, pacing 0-100, transitions 0-100, captions 0-100, watermarkMasking 0-100, and audio 0-100.",
-    "Check that every gameplay scene shows the football and involved player together; a player-only crop is allowed only for a celebration or reaction. Reject any opening freeze that marks a player while the ball is absent. Also check that scenes last 1 to 5 seconds, consecutive scenes have visibly distinct but natural color/lighting, transitions are intentional, verified goals/fouls/saves/skills receive appropriate brief callouts and sound accents, captions are at most two short lines, and narration provides genuine explanation instead of merely describing a highlight.",
-    `Narration requested: ${settings.commentary}. Player highlighting requested: ${settings.playerHighlight}. Logo masking requested: ${settings.logoMasking}.`,
-    "Do not invent problems that cannot be observed. Approve only at score 72 or higher with no severe framing or missing-action issue.",
+    "Act as a strict football-analysis Shorts quality controller. Watch the complete rendered video from beginning to end before scoring it.",
+    "Return JSON only with approved boolean, score 0-100, issues array, storyCoherence 0-100, voiceStyle 0-100, fullBleed 0-100, ballTracking 0-100, playerHighlight 0-100, framing 0-100, pacing 0-100, transitions 0-100, captions 0-100, watermarkMasking 0-100, and audio 0-100.",
+    "Reject the edit if it becomes a compilation of unrelated highlights instead of answering one football question with setup, visible evidence, cause, decisive action, proof, consequence, and optional emotional payoff.",
+    "Every gameplay scene must fill the 1080x1920 canvas edge-to-edge without black bars, blurred panels, or a small horizontal inset. The football and involved player must remain visible together. Player-only framing is allowed only for a brief reaction or celebration.",
+    "Reject any opening freeze or moving highlight that marks a player while the football is absent. Replays may use a moving ball ring or player marker when they clarify evidence.",
+    "Scenes must last 1.2 to 5 seconds. Prefer hard cuts and use slow motion, freezes, zooms, transitions, color changes, emojis, callouts, and sound accents only when they explain a visible point.",
+    "The base color grade must stay consistent and natural. Replay or decisive-proof treatment may differ, but random alternating color grades are a defect.",
+    "Captions must animate in readable 2-to-4-word groups, remain inside mobile safe areas, avoid large opaque boxes, and follow the spoken analysis.",
+    "When narration is requested, require one continuous natural adult male football-analyst performance. Reject fragmented per-scene delivery, robotic play-by-play, generic hype, narration that merely states what is visible, or original broadcast speech competing with the analyst.",
+    "Narration requested: " + settings.commentary + ". Player highlighting requested: " + settings.playerHighlight + ". Logo masking requested: " + settings.logoMasking + ".",
+    "Do not invent problems that cannot be observed. Approve only at score 80 or higher with no severe story, full-screen framing, missing-action, narration, or caption issue.",
   ].join(" ");
   const response = await ai.models.generateContent({
     model,
@@ -1087,9 +1138,12 @@ async function reviewRenderedVideoWithGemini(outputPath, media, id, settings) {
   const issues = Array.isArray(parsed.issues) ? parsed.issues.map((issue) => String(issue).slice(0, 240)).slice(0, 8) : [];
   const score = scoreField(parsed.score, 0);
   return {
-    approved: Boolean(parsed.approved) && score >= 72,
+    approved: Boolean(parsed.approved) && score >= 80,
     score,
     issues,
+    storyCoherence: scoreField(parsed.storyCoherence, 0),
+    voiceStyle: scoreField(parsed.voiceStyle, 0),
+    fullBleed: scoreField(parsed.fullBleed, 0),
     ballTracking: scoreField(parsed.ballTracking, 0),
     playerHighlight: scoreField(parsed.playerHighlight, 0),
     framing: scoreField(parsed.framing, 0),
@@ -1170,7 +1224,7 @@ function publicJob(job) {
 }
 
 function parseSettings(header) {
-  const defaults = { targetDuration: 65, aspectRatio: "9:16", commentary: true, playerHighlight: true, captions: true, logoMasking: true, originalAudio: "muted", intensity: "dynamic" };
+  const defaults = { targetDuration: 60, aspectRatio: "9:16", commentary: true, playerHighlight: true, captions: true, logoMasking: true, originalAudio: "muted", intensity: "dynamic" };
   if (!header) return defaults;
   try { return { ...defaults, ...JSON.parse(Buffer.from(header, "base64url").toString("utf8")) }; }
   catch { throw new Error("Invalid edit settings."); }

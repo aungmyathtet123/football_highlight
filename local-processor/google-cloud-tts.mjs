@@ -1,7 +1,14 @@
 import { writeFile } from "node:fs/promises";
 import { TextToSpeechClient } from "@google-cloud/text-to-speech";
 
-const commentaryPrompt = "Speak like a natural football analyst reacting to an exciting match. Be energetic, clear and conversational. Emphasize important moments without excessive shouting. Do not imitate or clone a real football commentator.";
+export const commentaryPrompt = [
+  "Use a natural adult male voice.",
+  "Speak like a confident football analyst explaining one connected incident to an intelligent fan.",
+  "Sound conversational, authoritative and energetic, but never shout like live play-by-play commentary.",
+  "Emphasize causal words about movement, space, timing, decisions and consequences.",
+  "Use punctuation for brief analytical pauses and maintain one consistent performance from hook through payoff.",
+  "Do not imitate or clone any real football commentator.",
+].join(" ");
 
 export function getGoogleCloudTtsConfig() {
   const config = {

@@ -116,6 +116,20 @@ npm run dev
 
 The processor health endpoint is [http://127.0.0.1:8787/health](http://127.0.0.1:8787/health).
 
+## How the 60-second edit is built
+
+The processor reviews the complete source timeline before it chooses clips. It then builds one connected football-analysis story instead of joining unrelated highlights:
+
+1. Rank evidence across the whole match and choose one incident or tactical question.
+2. Arrange a hook, setup, evidence, action, proof, and consequence/reaction.
+3. Keep every micro-scene between 1.2 and 5 seconds and use speed changes only when they clarify the action.
+4. Reject normal-play shots that cannot keep the ball and involved player inside the same 9:16 crop. Celebration and reaction shots are the exception.
+5. Track the camera crop, player marker, and ball marker from frame to frame.
+6. Render edge-to-edge at exactly 1080 × 1920 with one restrained base grade, event-specific replay/goal treatments, short animated captions, purposeful sound effects, and contextual callouts.
+7. Generate one continuous male football-analyst narration track and mute the source commentary.
+
+The default target is 60 seconds. A shorter result is preferred when additional footage would weaken the story or lose the ball/player framing.
+
 If you intentionally use Laragon and football_highlight.test, set this in the private .env:
 
 ~~~env

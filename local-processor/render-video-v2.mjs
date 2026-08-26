@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { splitCaptionChunks } from "./editorial-policy.mjs";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const outputWidth = 1080;
@@ -10,11 +11,17 @@ const outputHeight = 1920;
 export async function renderVideoV2(sourcePath, outputPath, moments, settings, media, ttsFiles, overlayMasks, tracking) {
   const selected = fitSelectedMoments(moments, settings.targetDuration);
   if (selected.length === 0) throw new Error("No moments were selected for the final edit.");
-  const captionFiles = settings.captions ? await makeCaptionFiles(selected, outputPath) : new Map();
+  const captionCues = settings.captions ? await makeCaptionCueFiles(selected, outputPath, tracking) : new Map();
   const calloutFiles = settings.captions ? await makeCalloutFiles(selected, outputPath) : new Map();
   const args = ["-hide_banner", "-y", "-i", sourcePath];
+  const globalNarrationPath = ttsFiles.get("__narration__");
+  let globalNarrationInputIndex = null;
+  if (globalNarrationPath) {
+    globalNarrationInputIndex = inputCount(args);
+    args.push("-i", globalNarrationPath);
+  }
   const ttsInputs = new Map();
-  for (const moment of selected) {
+  if (!globalNarrationPath) for (const moment of selected) {
     const speech = ttsFiles.get(moment.id);
     if (speech) {
       ttsInputs.set(moment.id, inputCount(args));
@@ -26,14 +33,20 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     const annotation = tracking?.moments?.[moment.id]?.annotation;
     const markerPath = tracking?.markerPaths?.[annotation?.style];
     const eligible = moment.playerHighlight !== false
-      && !moment.isReplay
       && annotation?.style !== "none"
       && Number(annotation?.confidence) >= 0.54
       && markerPath;
     if (!eligible) return;
     const inputIndex = inputCount(args);
     args.push("-loop", "1", "-framerate", "30", "-i", markerPath);
-    annotationInputs.set(index, { inputIndex, annotation });
+    let ballInputIndex = null;
+    const useBallRing = Boolean(tracking?.markerPaths?.ball)
+      && (moment.isReplay || ["hook", "evidence", "proof"].includes(moment.role));
+    if (useBallRing) {
+      ballInputIndex = inputCount(args);
+      args.push("-loop", "1", "-framerate", "30", "-i", tracking.markerPaths.ball);
+    }
+    annotationInputs.set(index, { inputIndex, ballInputIndex, annotation });
   });
 
   const filters = [];
@@ -57,56 +70,62 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     const cameraX = keyframeExpression(keyframes, "cameraX", fallbackX);
     const cameraY = keyframeExpression(keyframes, "cameraY", 0.5);
     const sourcePrefix = `[0:v]trim=start=${moment.startTime.toFixed(3)}:duration=${sourceLength.toFixed(3)},setpts=PTS-STARTPTS,${masking}`;
-    if (trackedMoment?.layoutMode === "context") {
-      filters.push(`${sourcePrefix}split=2[contextBgSource${index}][contextFgSource${index}]`);
-      filters.push(`[contextBgSource${index}]scale=${outputWidth}:${outputHeight}:force_original_aspect_ratio=increase,crop=${outputWidth}:${outputHeight},boxblur=24:2,eq=brightness=-0.10:saturation=0.82[contextBg${index}]`);
-      filters.push(`[contextFgSource${index}]scale=${outputWidth}:-2:flags=lanczos,setsar=1[contextFg${index}]`);
-      filters.push(`[contextBg${index}][contextFg${index}]overlay=x=0:y=(H-h)/2:shortest=1${visualEffectFilter(moment, settings.intensity, index)},setpts=PTS/${playbackRate.toFixed(5)},fps=30,settb=AVTB,format=yuv420p[baseclip${index}]`);
-    } else {
-      const crop = media.width / media.height >= 9 / 16
-        ? `crop=ih*9/16:ih:x='max(0,min(iw-ow,iw*(${cameraX})-ow/2))':y=0`
-        : `crop=iw:iw*16/9:x=0:y='max(0,min(ih-oh,ih*(${cameraY})-oh/2))'`;
-      filters.push(`${sourcePrefix}${crop},scale=${outputWidth}:${outputHeight}:flags=lanczos,setsar=1${visualEffectFilter(moment, settings.intensity, index)},setpts=PTS/${playbackRate.toFixed(5)},fps=30,settb=AVTB,format=yuv420p[baseclip${index}]`);
-    }
+    const crop = media.width / media.height >= 9 / 16
+      ? `crop=ih*9/16:ih:x='max(0,min(iw-ow,iw*(${cameraX})-ow/2))':y=0`
+      : `crop=iw:iw*16/9:x=0:y='max(0,min(ih-oh,ih*(${cameraY})-oh/2))'`;
+    filters.push(`${sourcePrefix}${crop},scale=${outputWidth}:${outputHeight}:flags=lanczos,setsar=1${visualEffectFilter(moment, settings.intensity, Boolean(annotationInput))},setpts=PTS/${playbackRate.toFixed(5)},fps=30,settb=AVTB,format=yuv420p[baseclip${index}]`);
 
     if (annotationInput) {
-      const { inputIndex, annotation } = annotationInput;
-      let cueX = Number(annotation.x);
-      let cueY = Number(annotation.y);
-      if (trackedMoment?.layoutMode === "context" && Number.isFinite(Number(annotation.sourceX))) {
-        const foregroundHeight = outputWidth * media.height / media.width;
-        const foregroundTop = (outputHeight - foregroundHeight) / 2;
-        const spotlight = annotation.style === "spotlight";
-        const anchorX = spotlight ? 110 : 80;
-        const anchorY = spotlight ? 122 : 176;
-        cueX = Number(annotation.sourceX) * outputWidth - anchorX;
-        cueY = foregroundTop + Number(spotlight ? annotation.sourceYCenter : annotation.sourceYTop) * foregroundHeight - anchorY;
+      const { inputIndex, ballInputIndex, annotation } = annotationInput;
+      const cueX = Number(annotation.x);
+      const cueY = Number(annotation.y);
+      const spotlight = annotation.style === "spotlight";
+      const playerAnchorX = spotlight ? 110 : 80;
+      const playerAnchorY = spotlight ? 122 : 176;
+      const playerYField = spotlight ? "playerCenterY" : "playerTopY";
+      const playerCenterX = keyframeExpression(keyframes, "playerCenterX", cueX + playerAnchorX);
+      const playerAnchorPositionY = keyframeExpression(keyframes, playerYField, cueY + playerAnchorY);
+      const playerVisible = visibilityExpression(keyframes, "markerVisible");
+      const trackDuration = clamp(Number(annotation.trackDuration || 1.25) / playbackRate, 0.70, 1.80);
+      filters.push(`[baseclip${index}]split=2[freezeSource${index}][motionSource${index}]`);
+      filters.push(`[freezeSource${index}]trim=duration=0.034,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=${cueDuration.toFixed(3)},trim=duration=${cueDuration.toFixed(3)},eq=brightness=-0.055:saturation=0.86:contrast=1.08,vignette=PI/7[freeze${index}]`);
+      filters.push(`[${inputIndex}:v]format=rgba,split=2[playerAssetFreeze${index}][playerAssetMotion${index}]`);
+      filters.push(`[freeze${index}][playerAssetFreeze${index}]overlay=x=${cueX.toFixed(2)}:y=${cueY.toFixed(2)}:eof_action=repeat:shortest=1[freezePlayer${index}]`);
+      filters.push(`[motionSource${index}][playerAssetMotion${index}]overlay=x='(${playerCenterX})-${playerAnchorX}':y='(${playerAnchorPositionY})-${playerAnchorY}':enable='between(t,0,${trackDuration.toFixed(3)})*${playerVisible}':eval=frame:eof_action=repeat:shortest=1[motionPlayer${index}]`);
+      if (ballInputIndex !== null) {
+        const first = keyframes[0] || {};
+        const ballX = keyframeExpression(keyframes, "ballCenterX", Number(first.ballCenterX || -320));
+        const ballY = keyframeExpression(keyframes, "ballCenterY", Number(first.ballCenterY || -320));
+        const ballVisible = visibilityExpression(keyframes, "ballMarkerVisible");
+        filters.push(`[${ballInputIndex}:v]format=rgba,split=2[ballAssetFreeze${index}][ballAssetMotion${index}]`);
+        filters.push(`[freezePlayer${index}][ballAssetFreeze${index}]overlay=x='(${ballX})-56':y='(${ballY})-56':enable='${ballVisible}':eval=frame:eof_action=repeat:shortest=1[cue${index}]`);
+        filters.push(`[motionPlayer${index}][ballAssetMotion${index}]overlay=x='(${ballX})-56':y='(${ballY})-56':enable='between(t,0,${trackDuration.toFixed(3)})*${ballVisible}':eval=frame:eof_action=repeat:shortest=1[trackedMotion${index}]`);
+      } else {
+        filters.push(`[freezePlayer${index}]null[cue${index}]`);
+        filters.push(`[motionPlayer${index}]null[trackedMotion${index}]`);
       }
-      filters.push(`[baseclip${index}]split=2[freezeSource${index}][motion${index}]`);
-      filters.push(`[freezeSource${index}]trim=duration=0.034,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=${cueDuration.toFixed(3)},trim=duration=${cueDuration.toFixed(3)},eq=brightness=-0.09:saturation=0.70:contrast=1.08,vignette=PI/5[freeze${index}]`);
-      filters.push(`[${inputIndex}:v]format=rgba[cueAsset${index}]`);
-      filters.push(`[freeze${index}][cueAsset${index}]overlay=x=${cueX.toFixed(2)}:y=${cueY.toFixed(2)}:eof_action=repeat:shortest=1[cue${index}]`);
-      filters.push(`[cue${index}][motion${index}]concat=n=2:v=1:a=0[clip${index}]`);
+      filters.push(`[cue${index}][trackedMotion${index}]concat=n=2:v=1:a=0[clip${index}]`);
     } else {
       filters.push(`[baseclip${index}]null[clip${index}]`);
     }
 
-    const captionPath = captionFiles.get(moment.id);
-    const calloutPath = calloutFiles.get(moment.id);
-    if (captionPath) {
+    const cues = captionCues.get(moment.id) || [];
+    let captionLabel = `clip${index}`;
+    for (const [cueIndex, cue] of cues.entries()) {
+      const nextLabel = `caption${index}_${cueIndex}`;
       const captionFont = escapeFilterPath(resolveSetting(process.env.CAPTION_FONT_PATH || "C:/Windows/Fonts/arialbd.ttf"));
-      filters.push(`[clip${index}]drawtext=fontfile='${captionFont}':textfile='${escapeFilterPath(captionPath)}':fontcolor=white:fontsize=60:borderw=5:bordercolor=black@0.88:box=1:boxcolor=black@0.38:boxborderw=18:x=(w-text_w)/2:y=h-text_h-210[captioned${index}]`);
-    } else {
-      filters.push(`[clip${index}]null[captioned${index}]`);
+      const color = cue.highlight ? "0x62D8FF" : "white";
+      filters.push(`[${captionLabel}]drawtext=fontfile='${captionFont}':textfile='${escapeFilterPath(cue.path)}':fontcolor=${color}:fontsize=72:borderw=7:bordercolor=black@0.92:shadowx=3:shadowy=4:shadowcolor=black@0.65:x=(w-text_w)/2:y=h*0.74:enable='between(t,${cue.start.toFixed(3)},${cue.end.toFixed(3)})'[${nextLabel}]`);
+      captionLabel = nextLabel;
     }
+    const calloutPath = calloutFiles.get(moment.id);
     if (calloutPath) {
       const eventFont = escapeFilterPath(resolveSetting(process.env.EVENT_FONT_PATH || "C:/Windows/Fonts/seguisym.ttf"));
       const color = eventCalloutColor(moment);
-      filters.push(`[captioned${index}]drawtext=fontfile='${eventFont}':textfile='${escapeFilterPath(calloutPath)}':fontcolor=${color}:fontsize=82:borderw=6:bordercolor=black@0.92:box=1:boxcolor=black@0.48:boxborderw=24:x=(w-text_w)/2:y=170:enable='between(t,0.10,1.35)'[v${index}]`);
+      filters.push(`[${captionLabel}]drawtext=fontfile='${eventFont}':textfile='${escapeFilterPath(calloutPath)}':fontcolor=${color}:fontsize=68:borderw=5:bordercolor=black@0.92:shadowx=3:shadowy=4:shadowcolor=black@0.65:x=(w-text_w)/2:y=260:enable='between(t,0.10,1.05)'[v${index}]`);
     } else {
-      filters.push(`[captioned${index}]null[v${index}]`);
+      filters.push(`[${captionLabel}]null[v${index}]`);
     }
-
     const speechIndex = ttsInputs.get(moment.id);
     if (speechIndex !== undefined) {
       filters.push(`[${speechIndex}:a]aresample=48000,apad,atrim=duration=${outputLength.toFixed(3)},volume=1,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[speech${index}]`);
@@ -130,9 +149,10 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     }
   });
 
+  let timelineDuration = clipDurations[0] || 0;
   if (selected.length === 1) {
     filters.push("[v0]null[outv]");
-    filters.push("[a0]anull[outa]");
+    filters.push("[a0]anull[outaBase]");
   } else {
     let videoLabel = "v0";
     let audioLabel = "a0";
@@ -146,8 +166,17 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
       audioLabel = `ax${index}`;
       accumulated += clipDurations[index] - transition.duration;
     }
+    timelineDuration = accumulated;
     filters.push(`[${videoLabel}]null[outv]`);
-    filters.push(`[${audioLabel}]anull[outa]`);
+    filters.push(`[${audioLabel}]anull[outaBase]`);
+  }
+  if (globalNarrationInputIndex !== null) {
+    const narrationDuration = Number(ttsFiles.narrationDuration || timelineDuration);
+    const tempo = clamp(narrationDuration / Math.max(0.1, timelineDuration), 0.82, 1.18);
+    filters.push(`[${globalNarrationInputIndex}:a]aresample=48000,atempo=${tempo.toFixed(5)},apad,atrim=duration=${timelineDuration.toFixed(3)},volume=1,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[narration]`);
+    filters.push("[outaBase][narration]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.96[outa]");
+  } else {
+    filters.push("[outaBase]anull[outa]");
   }
 
   const filterScriptPath = resolve(dirname(outputPath), "filtergraph-v2.txt");
@@ -186,32 +215,33 @@ function retimeKeyframes(keyframes, playbackRate) {
   return keyframes.map((frame) => ({ ...frame, time: Number(frame.time) / playbackRate }));
 }
 
-function visualEffectFilter(moment, intensity, index) {
-  const event = String(moment.eventType || "");
-  const palette = ["cool", "clean", "warm", "dramatic"];
-  const grade = event === "goal"
-    ? "goal_gold"
+function visualEffectFilter(moment, intensity, annotationActive = false) {
+  const allowed = new Set(["clean", "dramatic", "goal_gold", "replay_blue"]);
+  const grade = allowed.has(moment.colorGrade)
+    ? moment.colorGrade
     : moment.isReplay || moment.effect === "replay_treatment"
       ? "replay_blue"
-      : palette[index % palette.length];
+      : moment.eventType === "goal"
+        ? "goal_gold"
+        : moment.role === "hook"
+          ? "dramatic"
+          : "clean";
   const gradeFilters = {
-    cool: ["eq=saturation=1.04:contrast=1.10:brightness=-0.010:gamma=0.98", "colorbalance=bs=0.065:bm=0.025"],
-    clean: ["eq=saturation=1.11:contrast=1.045:brightness=0.008:gamma=1.02", "unsharp=5:5:0.25:5:5:0"],
-    warm: ["eq=saturation=1.17:contrast=1.07:brightness=0.012:gamma=1.01", "colorbalance=rs=0.055:rm=0.025:bs=-0.028"],
-    dramatic: ["eq=saturation=1.08:contrast=1.15:brightness=-0.016:gamma=0.96", "colorbalance=bs=0.030", "vignette=PI/7"],
-    goal_gold: ["eq=saturation=1.28:contrast=1.12:brightness=0.025:gamma=1.03", "colorbalance=rs=0.090:gs=0.040:bs=-0.045", "unsharp=5:5:0.55:5:5:0", "fade=t=in:st=0:d=0.10:color=white"],
-    replay_blue: ["eq=saturation=0.72:contrast=1.14:brightness=-0.020:gamma=0.96", "colorbalance=bs=0.075:bm=0.025"],
+    clean: ["eq=saturation=1.07:contrast=1.055:brightness=0.004:gamma=1.01", "unsharp=5:5:0.20:5:5:0"],
+    dramatic: ["eq=saturation=1.06:contrast=1.12:brightness=-0.012:gamma=0.98", "vignette=PI/9"],
+    goal_gold: ["eq=saturation=1.13:contrast=1.09:brightness=0.014:gamma=1.02", "colorbalance=rs=0.045:gs=0.018:bs=-0.025", "unsharp=5:5:0.30:5:5:0"],
+    replay_blue: ["eq=saturation=0.86:contrast=1.11:brightness=-0.014:gamma=0.98", "colorbalance=bs=0.040:bm=0.015"],
   };
   const filters = [...gradeFilters[grade]];
-  if (intensity === "natural" && !["goal_gold", "replay_blue"].includes(grade)) filters.push("eq=saturation=0.96:contrast=0.99");
-  if (moment.effect === "punch_zoom") {
-    filters.push("scale=1166:2074:flags=lanczos", "crop=1080:1920:x=(iw-ow)/2:y=(ih-oh)/2");
-  } else if (moment.effect === "slow_motion") {
-    filters.push("unsharp=5:5:0.35:5:5:0");
-  } else if (moment.effect === "speed_up") {
-    filters.push("eq=saturation=1.08:contrast=1.04");
+  if (intensity === "natural" && !["goal_gold", "replay_blue"].includes(grade)) {
+    filters.splice(0, filters.length, "eq=saturation=1.035:contrast=1.035:brightness=0.002");
   }
-  return `,${filters.join(",")}`;
+  if (moment.effect === "punch_zoom" && !annotationActive) {
+    filters.push("scale=1134:2016:flags=lanczos", "crop=1080:1920:x=(iw-ow)/2:y=(ih-oh)/2");
+  } else if (moment.effect === "slow_motion") {
+    filters.push("unsharp=5:5:0.28:5:5:0");
+  }
+  return "," + filters.join(",");
 }
 
 function eventCalloutColor(moment) {
@@ -251,16 +281,38 @@ function transitionFilter(moment, previousDuration, currentDuration) {
   return { name: names[moment.transitionIn] || "fade", duration: Math.max(0.04, duration) };
 }
 
-async function makeCaptionFiles(moments, outputPath) {
+async function makeCaptionCueFiles(moments, outputPath, tracking) {
   const files = new Map();
   const captionDir = resolve(dirname(outputPath), "captions");
   await mkdir(captionDir, { recursive: true });
   for (const [index, moment] of moments.entries()) {
-    const text = moment.onScreenText || shortCaptionFromCommentary(moment.commentary);
-    if (!text) continue;
-    const path = resolve(captionDir, `${index}.txt`);
-    await writeFile(path, wrapCaption(text));
-    files.set(moment.id, path);
+    const chunks = splitCaptionChunks(moment.commentary || moment.onScreenText, 4);
+    if (chunks.length === 0) continue;
+    const sourceLength = Math.max(1.2, moment.endTime - moment.startTime);
+    const playbackRate = clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
+    const annotation = tracking?.moments?.[moment.id]?.annotation;
+    const cueDuration = annotation?.style !== "none" ? clamp(Number(annotation?.duration), 0.45, 0.75) : 0;
+    const outputLength = sourceLength / playbackRate + cueDuration;
+    const weights = chunks.map((chunk) => Math.max(2, chunk.replace(/\s+/g, "").length));
+    const totalWeight = weights.reduce((total, weight) => total + weight, 0);
+    const available = Math.max(0.6, outputLength - 0.16);
+    let cursor = 0.08;
+    const cues = [];
+    for (const [cueIndex, chunk] of chunks.entries()) {
+      const duration = cueIndex === chunks.length - 1
+        ? Math.max(0.18, outputLength - 0.08 - cursor)
+        : Math.max(0.28, available * weights[cueIndex] / totalWeight);
+      const path = resolve(captionDir, index + "-" + cueIndex + ".txt");
+      await writeFile(path, chunk);
+      cues.push({
+        path,
+        start: cursor,
+        end: Math.min(outputLength - 0.04, cursor + duration),
+        highlight: cueIndex % 2 === 1 || (moment.role === "hook" && cueIndex === 0),
+      });
+      cursor += duration;
+    }
+    files.set(moment.id, cues);
   }
   return files;
 }
@@ -293,25 +345,6 @@ function eventCalloutLabel(value) {
   }[value] || "";
 }
 
-function shortCaptionFromCommentary(value) {
-  return String(value || "").replace(/[\r\n]+/g, " ").trim().split(/\s+/).filter(Boolean).slice(0, 7).join(" ");
-}
-
-function wrapCaption(value, width = 22) {
-  const words = String(value).replace(/[\r\n]+/g, " ").trim().split(/\s+/).filter(Boolean).slice(0, 7);
-  const lines = [];
-  let current = "";
-  for (const word of words) {
-    if (current && `${current} ${word}`.length > width) {
-      lines.push(current);
-      current = word;
-    } else {
-      current = current ? `${current} ${word}` : word;
-    }
-  }
-  if (current) lines.push(current);
-  return lines.slice(0, 2).join("\n").toUpperCase();
-}
 
 function sourceMaskFilters(masks, media) {
   return masks.map((mask) => {
@@ -350,6 +383,10 @@ function keyframeExpression(keyframes, field, fallback) {
     expression = `if(lt(t,${next.time.toFixed(3)}),${segment},${expression})`;
   }
   return expression;
+}
+
+function visibilityExpression(keyframes, field) {
+  return "gt(" + keyframeExpression(keyframes, field, 0) + ",0.45)";
 }
 
 function simplifySeries(values, tolerance) {

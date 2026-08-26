@@ -55,7 +55,7 @@ async function stage(dependencies: ProcessingDependencies, id: string, next: Job
 
 export function validateSettings(input: Partial<EditSettings>): EditSettings {
   const allowedDurations = new Set([60, 65, 70, 80]);
-  const targetDuration = Number(input.targetDuration ?? 65);
+  const targetDuration = Number(input.targetDuration ?? 60);
   if (!allowedDurations.has(targetDuration)) throw new ProviderError("INVALID_DURATION", "Final length must be 60, 65, 70, or 80 seconds.");
   const originalAudio = input.originalAudio ?? "reduced";
   const intensity = input.intensity ?? "dynamic";
