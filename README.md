@@ -42,7 +42,7 @@ The setup is safe to run again. It:
 - installs FFmpeg and FFprobe locally under tools/ffmpeg/bin
 - creates .venv-tracking
 - installs CPU PyTorch and the pinned packages in requirements-tracking.txt
-- downloads and verifies the local YOLO11n tracking model
+- downloads the YOLO11n player detector and the football-specific ball detector, then verifies the ball-model SHA-256 checksum
 - checks every required local component
 
 The first setup downloads several large packages and can take time.
@@ -142,6 +142,7 @@ The safe defaults are documented in .env.example. Important local paths are:
 ~~~env
 TRACKING_PYTHON=./.venv-tracking/Scripts/python.exe
 TRACKING_MODEL=./tools/tracking/yolo11n.pt
+TRACKING_BALL_MODEL=./tools/tracking/yolo-football-ball-detection.pt
 FFMPEG_PATH=./tools/ffmpeg/bin/ffmpeg.exe
 FFPROBE_PATH=./tools/ffmpeg/bin/ffprobe.exe
 ~~~
@@ -159,5 +160,7 @@ work/
 ~~~
 
 Local source files and rendered outputs stay under local-data/. When cloud analysis is enabled, compressed analysis media and related metadata are sent to the configured Google services.
+
+Ball tracking uses the [martinjolif football-ball YOLO11n model](https://huggingface.co/martinjolif/yolo-football-ball-detection), licensed AGPL-3.0. The application keeps that downloaded weight outside Git and uses it locally.
 
 Only use footage you own or have permission to edit. Editing, cropping, narration, effects, or watermark handling does not automatically make use lawful or qualify it as fair use.

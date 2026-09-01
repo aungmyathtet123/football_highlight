@@ -94,6 +94,15 @@ if (Test-Path -LiteralPath $trackingModel) {
   Fail "YOLO tracking model is missing at $trackingModel"
 }
 
+$ballModelSetting = if ($values.ContainsKey("TRACKING_BALL_MODEL")) { $values["TRACKING_BALL_MODEL"] } else { "./tools/tracking/yolo-football-ball-detection.pt" }
+$trackingBallModel = Resolve-ProjectPath $ballModelSetting
+$expectedBallModelHash = "FB37942448E7DE08745E8AAB148D0794F680A738DDD55E5F17ABE9AB2D6313FB"
+if ((Test-Path -LiteralPath $trackingBallModel) -and ((Get-FileHash -Algorithm SHA256 -LiteralPath $trackingBallModel).Hash -eq $expectedBallModelHash)) {
+  Pass "Football-specific ball tracking model"
+} else {
+  Fail "Football-specific ball model is missing or invalid at $trackingBallModel"
+}
+
 $cloudProblems = [Collections.Generic.List[string]]::new()
 if (-not $values.ContainsKey("GEMINI_API_KEY") -or -not $values["GEMINI_API_KEY"]) {
   $cloudProblems.Add("GEMINI_API_KEY is empty in .env.")

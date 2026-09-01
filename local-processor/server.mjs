@@ -41,9 +41,12 @@ const ffprobePath = resolveExecutable(process.env.FFPROBE_PATH || "ffprobe");
 const trackingPythonPath = resolveExecutable(process.env.TRACKING_PYTHON || "./.venv-tracking/Scripts/python.exe");
 const trackingScriptPath = resolveSetting(process.env.TRACKING_SCRIPT || "./local-processor/track-football-v2.py");
 const trackingModelPath = resolveSetting(process.env.TRACKING_MODEL || "./tools/tracking/yolo11n.pt");
+const trackingBallModelPath = resolveSetting(process.env.TRACKING_BALL_MODEL || "./tools/tracking/yolo-football-ball-detection.pt");
 const trackingSampleFps = clamp(Number(process.env.TRACKING_SAMPLE_FPS || 8), 1, 12);
 const trackingImageSize = Math.round(clamp(Number(process.env.TRACKING_IMAGE_SIZE || 960), 320, 1280));
+const trackingBallImageSize = Math.round(clamp(Number(process.env.TRACKING_BALL_IMAGE_SIZE || 1280), 640, 1600));
 const trackingConfidence = clamp(Number(process.env.TRACKING_CONFIDENCE || 0.08), 0.01, 0.8);
+const trackingBallConfidence = clamp(Number(process.env.TRACKING_BALL_CONFIDENCE || 0.03), 0.01, 0.5);
 const analysisChunkSeconds = Math.round(clamp(Number(process.env.ANALYSIS_CHUNK_SECONDS || 240), 60, 600));
 const analysisChunkOverlap = clamp(Number(process.env.ANALYSIS_CHUNK_OVERLAP || 4), 0, 12);
 const analysisFps = clamp(Number(process.env.ANALYSIS_FPS || 3), 1, 8);
@@ -66,7 +69,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/health") {
       const tools = await inspectTools();
       return json(response, 200, {
-        ok: tools.ffmpeg && tools.ffprobe && tools.trackingPython && tools.trackingModel,
+        ok: tools.ffmpeg && tools.ffprobe && tools.trackingPython && tools.trackingModel && tools.trackingBallModel,
         storage: dataRoot,
         analysisProvider: process.env.GEMINI_API_KEY ? (videoIntelligenceEnabled() ? "gemini+video_intelligence" : "gemini") : "local_fallback",
         videoIntelligence: videoIntelligenceEnabled(),
@@ -1165,7 +1168,7 @@ function fitSelectedMoments(moments, targetDuration) {
 }
 
 async function trackFootball(sourcePath, moments, media, id) {
-  for (const [label, path] of [["Python tracking runtime", trackingPythonPath], ["football tracking script", trackingScriptPath], ["YOLO tracking model", trackingModelPath]]) {
+  for (const [label, path] of [["Python tracking runtime", trackingPythonPath], ["football tracking script", trackingScriptPath], ["YOLO player model", trackingModelPath], ["football-specific ball model", trackingBallModelPath]]) {
     try { await stat(path); }
     catch { throw new Error(`${label} is missing at ${path}. Run npm run setup:tracking once, then retry.`); }
   }
@@ -1196,9 +1199,12 @@ async function trackFootball(sourcePath, moments, media, id) {
       "--moments", inputPath,
       "--output", outputPath,
       "--model", trackingModelPath,
+      "--ball-model", trackingBallModelPath,
       "--sample-fps", String(trackingSampleFps),
       "--image-size", String(trackingImageSize),
+      "--ball-image-size", String(trackingBallImageSize),
       "--confidence", String(trackingConfidence),
+      "--ball-confidence", String(trackingBallConfidence),
       "--output-width", String(outputWidth),
       "--output-height", String(outputHeight),
       "--window-height", String(outputHeight),
@@ -1218,7 +1224,7 @@ async function loadOrTrackFootball(sourcePath, moments, media, id) {
   try {
     const tracking = JSON.parse(await readFile(path, "utf8"));
     const selected = fitSelectedMoments(moments, Number.MAX_SAFE_INTEGER);
-    if (tracking.version === 14 && selected.every((moment) => tracking.moments?.[moment.id]?.keyframes?.length)) return tracking;
+    if (tracking.version === 16 && selected.every((moment) => tracking.moments?.[moment.id]?.keyframes?.length)) return tracking;
   } catch { /* Re-run tracking when cached data is missing or stale. */ }
   return trackFootball(sourcePath, moments, media, id);
 }
@@ -1627,12 +1633,13 @@ function setCors(request, response) { const origin = String(request.headers.orig
 function json(response, status, value) { response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }); response.end(JSON.stringify(value)); }
 function send(response, status) { response.writeHead(status); response.end(); }
 async function inspectTools() {
-  const [ffmpeg, ffprobe, trackingPython, trackingModel] = await Promise.all([
+  const [ffmpeg, ffprobe, trackingPython, trackingModel, trackingBallModel] = await Promise.all([
     run(ffmpegPath, ["-version"]).then(() => true).catch(() => false),
     run(ffprobePath, ["-version"]).then(() => true).catch(() => false),
     stat(trackingPythonPath).then(() => true).catch(() => false),
     stat(trackingModelPath).then(() => true).catch(() => false),
+    stat(trackingBallModelPath).then(() => true).catch(() => false),
   ]);
-  return { ffmpeg, ffprobe, trackingPython, trackingModel, ffmpegPath, ffprobePath };
+  return { ffmpeg, ffprobe, trackingPython, trackingModel, trackingBallModel, ffmpegPath, ffprobePath };
 }
 async function loadDotEnv(path) { try { const text = await readFile(path, "utf8"); for (const line of text.split(/\r?\n/)) { const match = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/); if (!match || process.env[match[1]] !== undefined) continue; process.env[match[1]] = match[2].replace(/^(["'])(.*)\1$/, "$2"); } } catch { /* The local .env file is optional. */ } }

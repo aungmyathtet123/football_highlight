@@ -6,6 +6,10 @@ $venvRoot = Join-Path $projectRoot ".venv-tracking"
 $venvPython = Join-Path $venvRoot "Scripts/python.exe"
 $modelDirectory = Join-Path $projectRoot "tools/tracking"
 $requirementsPath = Join-Path $projectRoot "requirements-tracking.txt"
+$ballModelPath = Join-Path $modelDirectory "yolo-football-ball-detection.pt"
+$ballModelDownload = Join-Path $modelDirectory "yolo-football-ball-detection.download"
+$ballModelUrl = "https://huggingface.co/martinjolif/yolo-football-ball-detection/resolve/main/yolo-football-ball-detection.pt?download=true"
+$ballModelSha256 = "FB37942448E7DE08745E8AAB148D0794F680A738DDD55E5F17ABE9AB2D6313FB"
 
 if (-not (Test-Path -LiteralPath $venvPython)) {
   $python = Get-Command python.exe -ErrorAction SilentlyContinue
@@ -47,6 +51,20 @@ try {
 } finally {
   Pop-Location
 }
+
+$ballModelValid = (Test-Path -LiteralPath $ballModelPath) -and ((Get-FileHash -Algorithm SHA256 -LiteralPath $ballModelPath).Hash -eq $ballModelSha256)
+if (-not $ballModelValid) {
+  if (Test-Path -LiteralPath $ballModelDownload) { Remove-Item -LiteralPath $ballModelDownload -Force }
+  Invoke-WebRequest -Uri $ballModelUrl -OutFile $ballModelDownload
+  $downloadHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ballModelDownload).Hash
+  if ($downloadHash -ne $ballModelSha256) {
+    Remove-Item -LiteralPath $ballModelDownload -Force
+    throw "The football ball model checksum did not match the verified release."
+  }
+  Move-Item -LiteralPath $ballModelDownload -Destination $ballModelPath -Force
+}
+& $venvPython -c "from ultralytics import YOLO; m=YOLO(r'$ballModelPath'); assert m.names == {0: 'ball'}; print('Football-specific ball model ready.')"
+if ($LASTEXITCODE -ne 0) { throw "Could not load the football-specific ball model." }
 
 & $venvPython -c "import cv2, torch, ultralytics; print(f'Python tracking ready: torch={torch.__version__}, ultralytics={ultralytics.__version__}, opencv={cv2.__version__}')"
 if ($LASTEXITCODE -ne 0) { throw "Tracking dependency import verification failed." }

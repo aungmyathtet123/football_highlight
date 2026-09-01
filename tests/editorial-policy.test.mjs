@@ -244,7 +244,12 @@ test("tracker requires direct ball evidence and one stable highlight identity", 
   assert.match(tracker, /MAX_VISIBLE_BALL_DIAMETER = 70\.0/);
   assert.match(tracker, /style = "spotlight" if confidence >= 0\.54 else "none"/);
   assert.match(tracker, /"maxDirectBallGap"/);
-  assert.match(tracker, /"version": 14/);
+  assert.match(tracker, /"version": 16/);
+  assert.match(tracker, /--ball-model/);
+  assert.match(tracker, /FOOTBALL_BALL_CLASS = 0/);
+  assert.match(tracker, /5\.5 \* point_distance/);
+  assert.match(tracker, /first verified possessor is the kick-origin player/);
+  assert.match(tracker, /goal payoff is the continued verified/);
   assert.match(tracker, /"cueTime": round\(first\["time"\]/);
   assert.doesNotMatch(tracker, /create_ball_ring|"ball": output_path\.parent/);
   assert.doesNotMatch(renderer, /ballInputs|markerPaths.*ball|ballAsset/);
