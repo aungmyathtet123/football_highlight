@@ -18,6 +18,7 @@ CAMERA_DEAD_ZONE = 0.028
 MAX_CAMERA_SPEED = 0.34
 MIN_VISIBLE_BALL_DIAMETER = 4.0
 MAX_VISIBLE_BALL_DIAMETER = 70.0
+MAX_POSSESSION_DISTANCE = 0.10
 ASSETS = {
     "arrow": {"width": 160, "height": 188, "anchor_x": 80, "anchor_y": 176},
     "spotlight": {"width": 220, "height": 244, "anchor_x": 110, "anchor_y": 122},
@@ -294,6 +295,26 @@ def smooth_camera(values, times, resets, initial, half_window, sample_fps):
     return output
 
 
+def enforce_joint_framing(camera_x, records, view_width):
+    """Keep a verified ball and its involved player inside the vertical crop."""
+    half_view = view_width / 2
+    frame_edge = min(0.028, view_width * 0.075)
+    output = []
+    for center, record in zip(camera_x, records):
+        if record["ball_x"] is None or record["player_x"] is None:
+            output.append(center)
+            continue
+        joint_left = min(record["ball_x"], record["player_x1"])
+        joint_right = max(record["ball_x"], record["player_x2"])
+        if joint_right - joint_left + frame_edge * 2 > view_width:
+            output.append(center)
+            continue
+        minimum_center = joint_right + frame_edge - half_view
+        maximum_center = joint_left - frame_edge + half_view
+        output.append(clamp(clamp(center, minimum_center, maximum_center), half_view, 1.0 - half_view))
+    return output
+
+
 def create_arrow(path):
     image = np.zeros((188, 160, 4), dtype=np.uint8)
     points = np.array([[58, 18], [102, 18], [102, 112], [136, 112], [80, 176], [24, 112], [58, 112]], np.int32)
@@ -323,6 +344,7 @@ def build_keyframes(records, media_width, media_height, fallback_x, output_width
     half_x, half_y = crop_width / media_width / 2, crop_height / media_height / 2
     camera_x = smooth_camera([record["camera_target_x"] for record in records], times, resets, fallback_x, half_x, sample_fps)
     camera_y = smooth_camera([record["camera_target_y"] for record in records], times, resets, 0.5, half_y, sample_fps)
+    camera_x = enforce_joint_framing(camera_x, records, crop_width / media_width)
 
     intro_records = [record for record in records if record["time"] <= 1.6 and record["possession"]]
     identity_scores = {}
@@ -345,7 +367,9 @@ def build_keyframes(records, media_width, media_height, fallback_x, output_width
         marker_visible = (
             highlight_track_id is not None
             and record["player_track_id"] == highlight_track_id
-            and record["subject_confidence"] >= 0.52
+            and record["possession"]
+            and record["joint_fit"]
+            and record["subject_confidence"] >= 0.55
         )
         ball_marker_visible = record["direct_ball"] and record["ball_confidence"] >= 0.12
         keyframes.append({
@@ -354,7 +378,7 @@ def build_keyframes(records, media_width, media_height, fallback_x, output_width
             "ballCenterX": round(ball_center_x, 2), "ballCenterY": round(ball_center_y, 2),
             "markerVisible": 1 if marker_visible else 0, "ballMarkerVisible": 1 if ball_marker_visible else 0,
             "ballConfidence": round(record["ball_confidence"], 4), "subjectConfidence": round(record["subject_confidence"], 4), "jointVisible": 1 if record["joint_visible"] else 0,
-            "sceneCut": 1 if record["scene_cut"] else 0,
+            "jointFit": 1 if record["joint_fit"] else 0, "sceneCut": 1 if record["scene_cut"] else 0,
         })
     annotation = {"style": "none", "confidence": 0.0, "duration": 0.0}
     first_record = opening_identity or records[0]
@@ -460,7 +484,12 @@ def track_moment(model, capture, moment, media_width, media_height, source_fps, 
             ball_confidence = max(0.04, 0.20 * (1 - (timestamp - last_direct_ball_time) / allowed_ball_gap))
         else:
             last_ball, ball_velocity = None, (0.0, 0.0)
-        active, subject_id, pending_id, pending_count = choose_locked_player(people, last_ball, subject_id, pending_id, pending_count)
+        if last_ball is None:
+            active = next((person for person in people if person.get("trackId") == subject_id), None)
+            if subject_id is None:
+                active, pending_id, pending_count = None, None, 0
+        else:
+            active, subject_id, pending_id, pending_count = choose_locked_player(people, last_ball, subject_id, pending_id, pending_count)
         if previous_subject_id is not None and subject_id is not None and subject_id != previous_subject_id:
             identity_switches += 1
         if subject_id is not None:
@@ -474,17 +503,20 @@ def track_moment(model, capture, moment, media_width, media_height, source_fps, 
         else:
             subject_confidence = 0.0
         target_x, target_y, spread = action_target(people, last_ball, active, ball_velocity, fallback_x, view_width, goal_mode)
-        possessing = bool(direct_ball and active is not None and proximity <= 0.135)
+        possessing = bool(direct_ball and active is not None and proximity <= MAX_POSSESSION_DISTANCE)
         joint_visible = direct_ball and active is not None
         joint_span = max(last_ball[0], active["x2"]) - min(last_ball[0], active["x1"]) if joint_visible else 1.0
+        joint_margin = min(0.056, view_width * 0.15)
+        joint_fit = bool(joint_visible and joint_span + joint_margin * 2 <= view_width)
         current_direct_gap = 0.0 if direct_ball else current_direct_gap + 1.0 / args.sample_fps
         maximum_direct_gap = max(maximum_direct_gap, current_direct_gap)
         records.append({
             "time": timestamp - start, "camera_target_x": target_x, "camera_target_y": target_y, "action_spread": spread,
             "player_x": active["cx"] if active is not None else None, "player_y": active["cy"] if active is not None else None,
             "player_top": active["y1"] if active is not None else None, "player_track_id": active.get("trackId") if active is not None else None,
+            "player_x1": active["x1"] if active is not None else None, "player_x2": active["x2"] if active is not None else None,
             "ball_x": last_ball[0] if last_ball is not None else None, "ball_y": last_ball[1] if last_ball is not None else None,
-            "direct_ball": direct_ball, "joint_visible": joint_visible, "joint_span": joint_span,
+            "direct_ball": direct_ball, "joint_visible": joint_visible, "joint_fit": joint_fit, "joint_span": joint_span,
             "possession": possessing, "ball_pixel_diameter": ball_pixel_diameter,
             "subject_confidence": subject_confidence, "scene_cut": scene_cut, "ball_confidence": ball_confidence,
         })
@@ -497,8 +529,7 @@ def track_moment(model, capture, moment, media_width, media_height, source_fps, 
     spread_p90 = float(np.percentile(spreads, 90)) if spreads else 0.0
     subject_frames = sum(record["subject_confidence"] >= 0.48 for record in records)
     joint_frames = sum(record["joint_visible"] for record in records)
-    joint_margin = min(0.09, view_width * 0.22)
-    joint_fit_frames = sum(record["joint_visible"] and record["joint_span"] + joint_margin <= view_width for record in records)
+    joint_fit_frames = sum(record["joint_fit"] for record in records)
     possession_frames = sum(record["possession"] for record in records)
     highlight_track_id = annotation.get("trackId")
     highlight_identity_frames = sum(
@@ -511,7 +542,7 @@ def track_moment(model, capture, moment, media_width, media_height, source_fps, 
         records
         and records[0]["direct_ball"]
         and records[0]["player_track_id"] is not None
-        and records[0]["joint_span"] + joint_margin <= view_width
+        and records[0]["joint_fit"]
     )
     player_only_allowed = moment.get("eventType") == "celebration" or moment.get("storyPhase") == "reaction" or moment.get("role") == "reaction"
     requires_joint_framing = not player_only_allowed
@@ -580,7 +611,7 @@ def main():
 
     denominator = max(1, totals["samples"])
     payload = {
-        "version": 12, "model": os.path.basename(args.model), "sampleFps": args.sample_fps,
+        "version": 14, "model": os.path.basename(args.model), "sampleFps": args.sample_fps,
         "markerPaths": {key: str(path.resolve()) for key, path in marker_paths.items()}, "moments": tracked,
         "summary": {
             "sampledFrames": totals["samples"], "ballDetectionCoverage": round(totals["ball"] / denominator, 4),
