@@ -1251,7 +1251,7 @@ async function loadOrTrackFootball(sourcePath, moments, media, id) {
   try {
     const tracking = JSON.parse(await readFile(path, "utf8"));
     const selected = fitSelectedMoments(moments, Number.MAX_SAFE_INTEGER);
-    if (tracking.version === 20 && selected.every((moment) => tracking.moments?.[moment.id]?.keyframes?.length)) return tracking;
+    if (tracking.version === 24 && selected.every((moment) => tracking.moments?.[moment.id]?.keyframes?.length)) return tracking;
   } catch { /* Re-run tracking when cached data is missing or stale. */ }
   return trackFootball(sourcePath, moments, media, id);
 }
@@ -1542,7 +1542,7 @@ async function reviewRenderedVideoWithGemini(outputPath, media, id, settings) {
     "Act as a strict football-analysis Shorts quality controller. Watch the complete rendered video from beginning to end before scoring it.",
     "Return JSON only with approved boolean, score 0-100, issues array, storyCoherence 0-100, voiceStyle 0-100, fullBleed 0-100, ballTracking 0-100, playerHighlight 0-100, framing 0-100, pacing 0-100, transitions 0-100, captions 0-100, watermarkMasking 0-100, and audio 0-100.",
     "Reject the edit if it becomes a compilation of unrelated highlights instead of answering one football question with setup, visible evidence, cause, decisive action, proof, consequence, and optional emotional payoff.",
-    "Every gameplay scene must fill the 1080x1920 canvas edge-to-edge without black bars, blurred panels, or a small horizontal inset. The football and involved player must remain visible together. Player-only framing is allowed only for a brief reaction or celebration.",
+    "Every gameplay scene must fill the 1080x1920 canvas edge-to-edge without black bars, blurred panels, or a small horizontal inset. The football and involved player must remain visible together. Reject visible camera shaking, rapid left-right corrections, false late ball reacquisition, or an empty-pitch goal hold. Player-only framing is allowed only for a brief reaction or celebration.",
     "Reject any opening freeze or moving highlight that marks a player while the football is absent. Replays may use a moving ball ring or player marker when they clarify evidence.",
     "Gameplay scenes must last 5 to 12 seconds and must finish the visible action; never cut during an unresolved pass, shot, save, duel, or run. Prefer fewer complete scenes and hard cuts. Use slow motion, freezes, zooms, transitions, color changes, emojis, callouts, and sound accents only when they explain a visible point.",
     "The base color grade must stay consistent and natural. Replay or decisive-proof treatment may differ, but random alternating color grades are a defect.",

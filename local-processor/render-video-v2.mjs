@@ -127,7 +127,7 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
       const nextLabel = `caption${index}_${cueIndex}`;
       const captionFont = escapeFilterPath(resolveSetting(process.env.CAPTION_FONT_PATH || "C:/Windows/Fonts/arialbd.ttf"));
       const color = cue.highlight ? "0x62D8FF" : "white";
-      filters.push(`[${captionLabel}]drawtext=fontfile='${captionFont}':textfile='${escapeFilterPath(cue.path)}':fontcolor=${color}:fontsize=72:borderw=7:bordercolor=black@0.92:shadowx=3:shadowy=4:shadowcolor=black@0.65:x=(w-text_w)/2:y=h*0.74:enable='between(t,${cue.start.toFixed(3)},${cue.end.toFixed(3)})'[${nextLabel}]`);
+      filters.push(`[${captionLabel}]drawtext=fontfile='${captionFont}':textfile='${escapeFilterPath(cue.path)}':fontcolor=${color}:fontsize=${cue.fontSize}:borderw=7:bordercolor=black@0.92:shadowx=3:shadowy=4:shadowcolor=black@0.65:x=(w-text_w)/2:y=h*0.74:enable='between(t,${cue.start.toFixed(3)},${cue.end.toFixed(3)})'[${nextLabel}]`);
       captionLabel = nextLabel;
     }
     const calloutPath = calloutFiles.get(moment.id);
@@ -347,18 +347,26 @@ function transitionFilter(moment, previousDuration, currentDuration) {
   return { name: names[moment.transitionIn] || "fade", duration: Math.max(0.04, duration) };
 }
 
+function captionFontSize(text) {
+  const widthUnits = [...String(text || "")].reduce((total, character) => {
+    if (/\s/.test(character)) return total + 0.30;
+    if (/[MW@#%&]/.test(character)) return total + 0.82;
+    if (/[Iil1|'.,:;]/.test(character)) return total + 0.30;
+    if (/[A-Z0-9]/.test(character)) return total + 0.64;
+    return total + 0.54;
+  }, 0);
+  return Math.round(clamp(900 / Math.max(8, widthUnits), 52, 72));
+}
 async function makeCaptionCueFiles(moments, outputPath, tracking, ttsFiles) {
   const files = new Map();
   const captionDir = resolve(dirname(outputPath), "captions");
   await mkdir(captionDir, { recursive: true });
   for (const [index, moment] of moments.entries()) {
-    const chunks = splitCaptionChunks(moment.commentary || moment.onScreenText, 4);
+    const chunks = splitCaptionChunks(moment.commentary || moment.onScreenText, 3, 18);
     if (chunks.length === 0) continue;
     const sourceLength = Math.max(0.1, moment.endTime - moment.startTime);
     const playbackRate = clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
-    const annotation = tracking?.moments?.[moment.id]?.annotation;
-    const cueDuration = annotation?.style !== "none" ? clamp(Number(annotation?.duration), 0.45, 0.75) : 0;
-    const baseOutputLength = sourceLength / playbackRate + cueDuration;
+    const baseOutputLength = sourceLength / playbackRate;
     const speechDuration = Number(ttsFiles.durations?.get(moment.id) || 0);
     const outputLength = Math.max(baseOutputLength, speechDuration > 0 ? speechDuration + 0.16 : 0);
     const weights = chunks.map((chunk) => Math.max(2, chunk.replace(/\s+/g, "").length));
@@ -375,8 +383,9 @@ async function makeCaptionCueFiles(moments, outputPath, tracking, ttsFiles) {
       cues.push({
         path,
         start: cursor,
-        end: Math.min(outputLength - 0.04, cursor + duration),
+        end: Math.min(outputLength - 0.04, cursor + duration - 0.001),
         highlight: cueIndex % 2 === 1 || (moment.role === "hook" && cueIndex === 0),
+        fontSize: captionFontSize(chunk),
       });
       cursor += duration;
     }

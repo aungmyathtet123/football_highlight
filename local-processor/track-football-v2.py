@@ -340,22 +340,47 @@ def smooth_camera(values, times, resets, initial, half_window, sample_fps):
 
 
 def enforce_joint_framing(camera_x, records, view_width):
-    """Keep a verified ball and its involved player inside the vertical crop."""
+    """Stabilize the crop while keeping every frameable player/ball pair visible."""
     half_view = view_width / 2
     frame_edge = min(0.028, view_width * 0.075)
-    output = []
-    for center, record in zip(camera_x, records):
+    global_bounds = (half_view, 1.0 - half_view)
+    bounds = []
+    for record in records:
         if record["ball_x"] is None or record["player_x"] is None:
-            output.append(center)
+            bounds.append(global_bounds)
             continue
         joint_left = min(record["ball_x"], record["player_x1"])
         joint_right = max(record["ball_x"], record["player_x2"])
         if joint_right - joint_left + frame_edge * 2 > view_width:
-            output.append(center)
+            bounds.append(global_bounds)
             continue
-        minimum_center = joint_right + frame_edge - half_view
-        maximum_center = joint_left - frame_edge + half_view
-        output.append(clamp(clamp(center, minimum_center, maximum_center), half_view, 1.0 - half_view))
+        minimum_center = max(half_view, joint_right + frame_edge - half_view)
+        maximum_center = min(1.0 - half_view, joint_left - frame_edge + half_view)
+        bounds.append((minimum_center, maximum_center) if minimum_center <= maximum_center else global_bounds)
+
+    output = [clamp(center, lower, upper) for center, (lower, upper) in zip(camera_x, bounds)]
+    # Project a symmetric temporal smoother back into the valid framing interval.
+    # Looking both backward and forward lets the crop begin a necessary pan early
+    # instead of snapping only when a fast pass or shot reaches the frame edge.
+    for _ in range(8):
+        softened = output[:]
+        for index in range(len(output)):
+            values = [(camera_x[index], 0.34)]
+            if index > 0 and not records[index]["scene_cut"]:
+                values.append((output[index - 1], 0.33))
+            if index + 1 < len(output) and not records[index + 1]["scene_cut"]:
+                values.append((output[index + 1], 0.33))
+            desired = weighted_center(values, camera_x[index])
+            lower, upper = bounds[index]
+            softened[index] = clamp(desired, lower, upper)
+        output = softened
+
+    for index in range(1, len(output)):
+        if records[index]["scene_cut"] or abs(output[index] - output[index - 1]) >= 0.006:
+            continue
+        lower, upper = bounds[index]
+        if lower <= output[index - 1] <= upper:
+            output[index] = output[index - 1]
     return output
 
 
@@ -513,9 +538,15 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
                 default=1.0,
             )
         plausible_balls = [candidate for candidate in balls if MIN_VISIBLE_BALL_DIAMETER <= candidate["output_diameter"] <= MAX_VISIBLE_BALL_DIAMETER]
-        detected = choose_ball(plausible_balls, predicted)
+        goal_search_expired = bool(
+            goal_mode
+            and last_direct_ball_time is not None
+            and timestamp - last_direct_ball_time > allowed_ball_gap
+        )
+        candidate_ball = None if goal_search_expired else choose_ball(plausible_balls, predicted)
+        detected = candidate_ball if candidate_ball is not None and float(candidate_ball["confidence"]) >= 0.12 else None
         ball_pixel_diameter = detected["output_diameter"] if detected is not None else 0.0
-        direct_ball = bool(detected is not None and float(detected["confidence"]) >= 0.12)
+        direct_ball = detected is not None
         ball_confidence = 0.0
         if detected is not None:
             direct_ball_frames += 1 if direct_ball else 0
@@ -559,6 +590,16 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         else:
             subject_confidence = 0.0
         target_x, target_y, spread = action_target(people, last_ball, active, ball_velocity, fallback_x, view_width, goal_mode)
+        resolved_goal_hold = bool(
+            goal_mode
+            and last_ball is None
+            and records
+            and timestamp - start >= (end - start) * 0.55
+        )
+        if resolved_goal_hold:
+            target_x = records[-1]["camera_target_x"]
+            target_y = records[-1]["camera_target_y"]
+            spread = records[-1]["action_spread"]
         possessing = bool(direct_ball and active is not None and proximity <= MAX_POSSESSION_DISTANCE)
         tracked_ball = last_ball is not None and ball_confidence >= 0.04
         joint_visible = tracked_ball and active is not None
@@ -582,6 +623,10 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         args.window_top, args.zoom, args.sample_fps,
     )
     denominator = max(1, sampled_frames)
+    camera_positions = [frame["cameraX"] for frame in keyframes]
+    camera_steps = [abs(camera_positions[index] - camera_positions[index - 1]) for index in range(1, len(camera_positions))]
+    camera_velocities = [camera_positions[index] - camera_positions[index - 1] for index in range(1, len(camera_positions))]
+    camera_jerks = [abs(camera_velocities[index] - camera_velocities[index - 1]) for index in range(1, len(camera_velocities))]
     spreads = [record["action_spread"] for record in records if record["action_spread"] > 0]
     spread_p90 = float(np.percentile(spreads, 90)) if spreads else 0.0
     subject_frames = sum(record["subject_confidence"] >= 0.48 for record in records)
@@ -629,6 +674,9 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         "highlightIdentityCoverage": round(highlight_identity_frames / denominator, 4),
         "goalPayoffCoverage": round(goal_payoff_frames / max(1, len(payoff_records)), 4) if goal_mode else 1.0,
         "visibleBallPixelMedian": round(float(np.median(visible_ball_sizes)), 2) if visible_ball_sizes else 0.0,
+        "cameraMaxStep": round(max(camera_steps), 4) if camera_steps else 0.0,
+        "cameraStepP95": round(float(np.percentile(camera_steps, 95)), 4) if camera_steps else 0.0,
+        "cameraJerkP95": round(float(np.percentile(camera_jerks, 95)), 4) if camera_jerks else 0.0,
     }
 
 
@@ -675,7 +723,7 @@ def main():
 
     denominator = max(1, totals["samples"])
     payload = {
-        "version": 20, "model": os.path.basename(args.model), "ballModel": os.path.basename(args.ball_model), "sampleFps": args.sample_fps,
+        "version": 24, "model": os.path.basename(args.model), "ballModel": os.path.basename(args.ball_model), "sampleFps": args.sample_fps,
         "markerPaths": {key: str(path.resolve()) for key, path in marker_paths.items()}, "moments": tracked,
         "summary": {
             "sampledFrames": totals["samples"], "ballDetectionCoverage": round(totals["ball"] / denominator, 4),

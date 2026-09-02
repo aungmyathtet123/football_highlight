@@ -69,7 +69,7 @@ export function normalizeContentPlan(raw, targetDuration) {
       role: String(beat?.role || "analysis"),
       narration: normalizeSentence(beat?.narration),
       evidenceNeed: String(beat?.evidenceNeed || "Visible football evidence supporting this point.").slice(0, 220),
-      captionText: splitCaptionChunks(beat?.captionText || beat?.narration, 4)[0] || "KEY DETAIL",
+      captionText: splitCaptionChunks(beat?.captionText || beat?.narration, 3, 18)[0] || "KEY DETAIL",
     }))
     .filter((beat) => beat.narration);
   const contentScript = beats.map((beat) => beat.narration).join(" ");
@@ -166,6 +166,10 @@ export function assessPlannedSceneTracking(moment, evidence) {
   const jointFit = Number(evidence.jointFitCoverage || 0);
   const maximumBallGap = Number(evidence.maxDirectBallGap ?? Number.POSITIVE_INFINITY);
   const goalPayoff = Number(evidence.goalPayoffCoverage ?? 0);
+  const cameraMaxStep = Number(evidence.cameraMaxStep ?? Number.POSITIVE_INFINITY);
+  const cameraStepP95 = Number(evidence.cameraStepP95 ?? Number.POSITIVE_INFINITY);
+  const cameraJerkP95 = Number(evidence.cameraJerkP95 ?? Number.POSITIVE_INFINITY);
+  const stableCamera = cameraMaxStep <= 0.12 && cameraStepP95 <= 0.055 && cameraJerkP95 <= 0.055;
   const goalNeedsPayoff = moment.eventType === "goal";
   const allowedDirectBallGap = goalNeedsPayoff ? 3.0 : 2.4;
   const payoffReady = !goalNeedsPayoff || goalPayoff >= 0.10;
@@ -174,6 +178,7 @@ export function assessPlannedSceneTracking(moment, evidence) {
     && jointVisibility >= 0.72
     && jointFit >= 0.68
     && maximumBallGap <= allowedDirectBallGap
+    && stableCamera
     && payoffReady;
   if (strict) return { usable: true, mode: "strict" };
 
@@ -188,7 +193,8 @@ export function assessPlannedSceneTracking(moment, evidence) {
     && directBall >= 0.30
     && jointVisibility >= 0.70
     && jointFit >= 0.65
-    && maximumBallGap <= allowedDirectBallGap;
+    && maximumBallGap <= allowedDirectBallGap
+    && stableCamera;
   if (aiJointConfirmed && locallySupported && payoffReady) {
     return { usable: true, mode: "ai_confirmed_joint_scene" };
   }
@@ -200,6 +206,7 @@ export function assessPlannedSceneTracking(moment, evidence) {
 
   if (goalNeedsPayoff && !payoffReady) return { usable: false, mode: "missing_goal_payoff" };
   if (directBall < 0.30 || maximumBallGap > allowedDirectBallGap) return { usable: false, mode: "ball_not_visibly_continuous" };
+  if (!stableCamera) return { usable: false, mode: "unstable_camera" };
   return { usable: false, mode: "insufficient_joint_framing" };
 }
 
@@ -266,22 +273,29 @@ function semanticTokens(moment, evidenceOnly = false) {
     .map(normalizeSemanticToken)
     .filter((token) => token.length >= 4 && !semanticStopWords.has(token)));
 }
-export function splitCaptionChunks(value, maximumWords = 4) {
+export function splitCaptionChunks(value, maximumWords = 3, maximumCharacters = 18) {
   const words = String(value || "").replace(/[\r\n]+/g, " ").trim().split(/\s+/).filter(Boolean);
   if (words.length === 0) return [];
   const chunks = [];
   let current = [];
   for (const word of words) {
-    current.push(word);
+    const candidate = [...current, word].join(" ");
+    if (current.length && (current.length >= maximumWords || candidate.length > maximumCharacters)) {
+      chunks.push(current.join(" "));
+      current = [word];
+    } else {
+      current.push(word);
+    }
     const punctuationBreak = /[.!?,;:]$/.test(word) && current.length >= 2;
-    if (current.length >= maximumWords || punctuationBreak) {
+    if (punctuationBreak) {
       chunks.push(current.join(" "));
       current = [];
     }
   }
   if (current.length) {
-    if (current.length === 1 && chunks.length && chunks.at(-1).split(/\s+/).length < maximumWords) {
-      chunks[chunks.length - 1] += " " + current[0];
+    const merged = chunks.length ? chunks.at(-1) + " " + current.join(" ") : "";
+    if (current.length === 1 && chunks.length && chunks.at(-1).split(/\s+/).length < maximumWords && merged.length <= maximumCharacters) {
+      chunks[chunks.length - 1] = merged;
     } else {
       chunks.push(current.join(" "));
     }

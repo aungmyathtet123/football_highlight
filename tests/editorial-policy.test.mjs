@@ -75,11 +75,16 @@ test("continuous narration follows edit order and remains sentence based", () =>
   assert.equal(narration, "Watch the defender step forward. That movement opens the space.");
 });
 
-test("captions are broken into animated mobile-size groups", () => {
-  const chunks = splitCaptionChunks("Watch the defender step forward because that movement opens the space.", 4);
-  assert.ok(chunks.length >= 3);
-  assert.ok(chunks.every((chunk) => chunk.split(/\s+/).length <= 4));
+test("captions are short and stay inside the mobile safe width", () => {
+  const chunks = splitCaptionChunks("Watch the defender step forward because that movement opens the space.", 3, 18);
+  assert.ok(chunks.length >= 4);
+  assert.ok(chunks.every((chunk) => chunk.split(/\s+/).length <= 3));
+  assert.ok(chunks.every((chunk) => chunk.length <= 18 || !chunk.includes(" ")));
   assert.equal(chunks.join(" "), "Watch the defender step forward because that movement opens the space.");
+  assert.deepEqual(
+    splitCaptionChunks("resistance through sharp vertical movement creates the opening"),
+    ["resistance through", "sharp vertical", "movement creates", "the opening"],
+  );
 });
 
 test("TTS direction requests a male analyst rather than play-by-play hype", () => {
@@ -92,7 +97,7 @@ test("TTS direction requests a male analyst rather than play-by-play hype", () =
 test("tracking preserves a planned replay when local and whole-video evidence agree", () => {
   const assessment = assessPlannedSceneTracking(
     { eventType: "goal", storyPhase: "replay", role: "proof", isReplay: true, ballVisible: true, mainPlayerVisible: true, confidence: 0.95, visualClarity: 92 },
-    { openingJointVisible: false, playerDetectionCoverage: 1, ballDetectionCoverage: 0.83, jointVisibilityCoverage: 0.83, jointFitCoverage: 0.72, maxDirectBallGap: 0.33, goalPayoffCoverage: 0.5 },
+    { openingJointVisible: false, playerDetectionCoverage: 1, ballDetectionCoverage: 0.83, jointVisibilityCoverage: 0.83, jointFitCoverage: 0.72, maxDirectBallGap: 0.33, goalPayoffCoverage: 0.5, cameraMaxStep: 0.03, cameraStepP95: 0.02, cameraJerkP95: 0.01 },
   );
   assert.deepEqual(assessment, { usable: true, mode: "ai_confirmed_joint_scene" });
 });
@@ -100,7 +105,7 @@ test("tracking preserves a planned replay when local and whole-video evidence ag
 test("tracking still rejects a planned gameplay scene with persistently missing joint framing", () => {
   const assessment = assessPlannedSceneTracking(
     { eventType: "normal_play", storyPhase: "action", role: "action", ballVisible: true, mainPlayerVisible: true, confidence: 0.95, visualClarity: 90 },
-    { openingJointVisible: false, playerDetectionCoverage: 1, ballDetectionCoverage: 0.31, jointVisibilityCoverage: 0.31, jointFitCoverage: 0.22, maxDirectBallGap: 1.2 },
+    { openingJointVisible: false, playerDetectionCoverage: 1, ballDetectionCoverage: 0.31, jointVisibilityCoverage: 0.31, jointFitCoverage: 0.22, maxDirectBallGap: 1.2, cameraMaxStep: 0.03, cameraStepP95: 0.02, cameraJerkP95: 0.01 },
   );
   assert.equal(assessment.usable, false);
 });
@@ -108,13 +113,13 @@ test("tracking still rejects a planned gameplay scene with persistently missing 
 test("a player-only crop is rejected when direct ball visibility is not recoverable", () => {
   const assessment = assessPlannedSceneTracking(
     { eventType: "shot_on_target", storyPhase: "action", role: "evidence", ballVisible: false, mainPlayerVisible: true, confidence: 0.95, visualClarity: 90 },
-    { openingJointVisible: false, playerDetectionCoverage: 1, ballDetectionCoverage: 0.12, jointVisibilityCoverage: 0.12, jointFitCoverage: 0.1, maxDirectBallGap: 3.2, goalPayoffCoverage: 1 },
+    { openingJointVisible: false, playerDetectionCoverage: 1, ballDetectionCoverage: 0.12, jointVisibilityCoverage: 0.12, jointFitCoverage: 0.1, maxDirectBallGap: 3.2, goalPayoffCoverage: 1, cameraMaxStep: 0.03, cameraStepP95: 0.02, cameraJerkP95: 0.01 },
   );
   assert.deepEqual(assessment, { usable: false, mode: "ball_not_visibly_continuous" });
 });
 
 test("a completed goal may hold briefly on the net and goalkeeper after the ball disappears", () => {
-  const evidence = { openingJointVisible: true, playerDetectionCoverage: 1, ballDetectionCoverage: 0.52, jointVisibilityCoverage: 0.97, jointFitCoverage: 0.95, maxDirectBallGap: 2.7, goalPayoffCoverage: 0.92 };
+  const evidence = { openingJointVisible: true, playerDetectionCoverage: 1, ballDetectionCoverage: 0.52, jointVisibilityCoverage: 0.97, jointFitCoverage: 0.95, maxDirectBallGap: 2.7, goalPayoffCoverage: 0.92, cameraMaxStep: 0.03, cameraStepP95: 0.02, cameraJerkP95: 0.01 };
   assert.deepEqual(assessPlannedSceneTracking(
     { eventType: "goal", storyPhase: "action", role: "evidence" },
     evidence,
@@ -127,11 +132,18 @@ test("a completed goal may hold briefly on the net and goalkeeper after the ball
 test("a goal scene is rejected when its final frames do not show the payoff", () => {
   const assessment = assessPlannedSceneTracking(
     { eventType: "goal", storyPhase: "action", role: "hook" },
-    { openingJointVisible: true, ballDetectionCoverage: 0.9, jointVisibilityCoverage: 0.9, jointFitCoverage: 0.85, maxDirectBallGap: 0.3, goalPayoffCoverage: 0.05 },
+    { openingJointVisible: true, ballDetectionCoverage: 0.9, jointVisibilityCoverage: 0.9, jointFitCoverage: 0.85, maxDirectBallGap: 0.3, goalPayoffCoverage: 0.05, cameraMaxStep: 0.03, cameraStepP95: 0.02, cameraJerkP95: 0.01 },
   );
   assert.deepEqual(assessment, { usable: false, mode: "missing_goal_payoff" });
 });
 
+test("an otherwise trackable scene is rejected when the crop visibly shakes", () => {
+  const assessment = assessPlannedSceneTracking(
+    { eventType: "normal_play", storyPhase: "action", role: "action", ballVisible: true, mainPlayerVisible: true },
+    { openingJointVisible: true, playerDetectionCoverage: 1, ballDetectionCoverage: 0.9, jointVisibilityCoverage: 0.95, jointFitCoverage: 0.95, maxDirectBallGap: 0.2, goalPayoffCoverage: 1, cameraMaxStep: 0.2, cameraStepP95: 0.08, cameraJerkP95: 0.09 },
+  );
+  assert.deepEqual(assessment, { usable: false, mode: "unstable_camera" });
+});
 test("narration timing validation binds every spoken beat to its visual", () => {
   assert.deepEqual(synchronizationProblems([
     { beatId: "beat-1", momentId: "goal", narration: "The runner opens the lane.", visualStart: 0, visualDuration: 3.2, speechDuration: 3 },
@@ -218,6 +230,9 @@ test("approved content identity survives alignment and hard cuts stay streamable
   assert.match(renderer, /ttsFiles\.durations/);
   assert.match(renderer, /synchronizationProblems/);
   assert.match(renderer, /tpad=stop_mode=clone/);
+  assert.match(renderer, /fontsize=\$\{cue\.fontSize\}/);
+  assert.match(renderer, /captionFontSize\(chunk\)/);
+  assert.match(renderer, /cursor \+ duration - 0\.001/);
   assert.match(renderer, /concat=n=2:v=1:a=1/);
 });
 test("semantic backups prefer the same incident over a higher-importance unrelated clip", () => {
@@ -262,10 +277,12 @@ test("tracker requires direct ball evidence and one stable highlight identity", 
   assert.match(tracker, /if last_ball is None:/);
   assert.match(tracker, /proximity <= MAX_POSSESSION_DISTANCE/);
   assert.match(tracker, /camera_x = enforce_joint_framing\(camera_x, records/);
+  assert.match(tracker, /for _ in range\(8\)/);
+  assert.match(tracker, /instead of snapping/);
   assert.match(tracker, /MAX_VISIBLE_BALL_DIAMETER = 70\.0/);
   assert.match(tracker, /style = "spotlight" if confidence >= 0\.54 else "none"/);
   assert.match(tracker, /"maxDirectBallGap"/);
-  assert.match(tracker, /"version": 20/);
+  assert.match(tracker, /"version": 24/);
   assert.match(tracker, /--ball-model/);
   assert.match(tracker, /FOOTBALL_BALL_CLASS = 0/);
   assert.match(tracker, /5\.5 \* point_distance/);
@@ -277,6 +294,11 @@ test("tracker requires direct ball evidence and one stable highlight identity", 
   assert.match(tracker, /not incumbent_frameable/);
   assert.match(tracker, /velocity_decay = 0\.62 if goal_mode else 0\.76/);
   assert.match(tracker, /maximum_prediction_step = 0\.035 if goal_mode else 0\.055/);
+  assert.match(tracker, /goal_search_expired = bool/);
+  assert.match(tracker, /resolved_goal_hold = bool/);
+  assert.match(tracker, /candidate_ball if candidate_ball is not None/);
+  assert.match(tracker, /"cameraStepP95"/);
+  assert.match(tracker, /"cameraJerkP95"/);
   assert.match(tracker, /"cueTime": round\(first\["time"\]/);
   assert.doesNotMatch(tracker, /create_ball_ring|"ball": output_path\.parent/);
   assert.doesNotMatch(renderer, /ballInputs|markerPaths.*ball|ballAsset/);
