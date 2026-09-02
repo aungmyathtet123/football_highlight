@@ -120,10 +120,10 @@ The processor health endpoint is [http://127.0.0.1:8787/health](http://127.0.0.1
 
 The processor follows a strict content-first sequence:
 
-1. **Observe:** Gemini reviews the complete source timeline from beginning to end and records usable and unusable football evidence. It does not choose the final edit yet.
+1. **Observe:** Gemini reviews the complete source timeline from beginning to end and records complete 5–12-second actions, including ordered timestamps for the initiating movement, decisive contact, result, and natural ending. It does not choose the final edit yet.
 2. **Write:** A separate writer creates an approved 120–147-word football-analysis script with a hook, analytical question, connected reasoning, evidence, and conclusion. Directing filler such as “look at the replay,” “watch this,” or “as you can see” fails validation.
-3. **Align:** A separate evidence editor maps every approved content beat to 1.2–5-second source clips. The planned visual timeline must be approximately 60–63 seconds and may connect several related incidents under one clear thesis.
-4. **Track:** Local frame-by-frame tracking validates that gameplay keeps the ball and involved player together. Recoverable planned scenes remain in the plan; tracking cannot silently collapse the edit into a short video.
+3. **Align:** A separate evidence editor maps approved content to fewer 5–12-second complete-action scenes. It never cuts an unresolved pass, shot, save, duel, or run merely because five seconds elapsed. The planned visual timeline must be approximately 60–63 seconds and may connect several related incidents under one clear thesis.
+4. **Track:** Local tracking samples gameplay at 10 frames per second, anchors the initiating player, hands camera ownership to the receiver, defender, or goalkeeper nearest the moving ball, and validates that both fit together in the full-screen 9:16 crop. Recoverable planned scenes remain in the plan; tracking cannot silently collapse the edit into a short video.
 5. **Edit:** The renderer creates one continuous male analyst narration track, mutes the source commentary, dynamically reframes to full-bleed 1080 × 1920, and adds purposeful player/ball markers, captions, replay treatment, effects, sound accents, callouts, and restrained grading.
 
 The processor refuses to complete when content alignment or tracking would reduce a 60-second plan below 51 seconds. The downloadable JSON includes both the approved content plan and the aligned moments.
@@ -143,6 +143,7 @@ The safe defaults are documented in .env.example. Important local paths are:
 TRACKING_PYTHON=./.venv-tracking/Scripts/python.exe
 TRACKING_MODEL=./tools/tracking/yolo11n.pt
 TRACKING_BALL_MODEL=./tools/tracking/yolo-football-ball-detection.pt
+TRACKING_SAMPLE_FPS=10
 FFMPEG_PATH=./tools/ffmpeg/bin/ffmpeg.exe
 FFPROBE_PATH=./tools/ffmpeg/bin/ffprobe.exe
 ~~~

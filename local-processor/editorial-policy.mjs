@@ -1,5 +1,5 @@
-export const MIN_SCENE_SECONDS = 1.2;
-export const MAX_SCENE_SECONDS = 5;
+export const MIN_SCENE_SECONDS = 5;
+export const MAX_SCENE_SECONDS = 12;
 
 export function selectDirectorCandidates(candidates, limit = 180) {
   return [...candidates]
@@ -20,7 +20,7 @@ export function buildWholeVideoDirectorPrompt({ sourceDuration, targetDuration, 
     "First choose exactly one analytical question and one evidence-based answer. Examples of the form, not facts to copy: Why did this goal happen? Which defensive movement opened the space? Why was the decision controversial?",
     "Select one incident/storyId. A replay or reaction may be included only when it clearly belongs to that same incident. Never fill time with unrelated goals, saves, skills, or celebrations.",
     "The opening 0-3 seconds must show the decisive proof or outcome while the narration creates an unanswered football question. Then reconstruct the setup, reveal the tactical cause, show the decisive action, use replay as proof when available, and end on the consequence or emotional payoff.",
-    "Use only evidence clips between " + MIN_SCENE_SECONDS + " and " + MAX_SCENE_SECONDS + " output seconds. Split longer candidates at natural boundaries. The selected source material may initially exceed the target, but the returned final sequence must not exceed " + (targetDuration + 1) + " seconds after playback-rate changes.",
+    "Use complete gameplay scenes between " + MIN_SCENE_SECONDS + " and " + MAX_SCENE_SECONDS + " output seconds. A scene begins before the meaningful touch or movement and ends only after the pass, shot, save, goal, turnover, whistle, or reaction resolves. Never cut an active action merely because five seconds elapsed. Split only at a true possession reset, replay cut, whistle, or completed consequence. Segment startTime and endTime must preserve the candidate's complete action boundaries; choose a different candidate instead of trimming inside an action. The selected source material may initially exceed the target, but the returned final sequence must not exceed " + (targetDuration + 3) + " seconds after playback-rate changes.",
     "Every gameplay clip must visibly contain the football and the involved player in the same full-screen 9:16 crop. Reject footage that requires letterboxing, blurred panels, a ball-only crop, or a player-only crop. Player-only footage is allowed only for a short reaction or celebration payoff.",
     "Write narration as connected reasoning, not isolated captions and not play-by-play. Each beat must link to the previous beat, identify a visible clue, and explain cause, decision, space, timing, technique, or consequence. Do not repeatedly say tactical, demonstrates, replay footage, amazing, or what a goal.",
     "Across all segment commentary fields use approximately " + minimumNarrationWords + "-" + maximumNarrationWords + " words. Use a confident, conversational male football analyst style with natural punctuation and brief dramatic pauses. Never imitate a real commentator.",
@@ -45,7 +45,7 @@ export function buildContentWritingPrompt({ sourceDuration, targetDuration }) {
     "Never use directing filler such as look at the replay, watch this, notice how, focus on, pay attention, here we see, you can see, or in this clip. Never narrate the editing process.",
     "Do not copy candidate commentary. Do not invent names, teams, scorelines, motives, or outcomes that are not supported by the observation timeline.",
     "Return JSON only with title, editorialThesis, contentAngle, storyQuestion, storyAnswer, and contentBeats.",
-    "contentBeats must contain 12-20 ordered beats. Each beat needs beatId, role (hook|setup|analysis|evidence|turn|conclusion), narration of 7-18 words, evidenceNeed, and captionText of 2-4 words.",
+    "contentBeats must contain 8-12 ordered beats. Each beat needs beatId, role (hook|setup|analysis|evidence|turn|conclusion), narration of 7-18 words, evidenceNeed, and captionText of 2-4 words.",
   ].join(" ");
 }
 
@@ -54,8 +54,8 @@ export function buildEvidenceAlignmentPrompt({ targetDuration, intensity }) {
     "You are the evidence editor. The football analysis content is already approved and must remain the authority.",
     "Do not rewrite the analysis. Map every content beat to visible evidence from the complete observation timeline.",
     "Build a " + targetDuration + "- to " + (targetDuration + 3) + "-second visual timeline. Editing intensity is " + intensity + ".",
-    "Use 1.2-5.0 second clips and enough distinct clips to cover the duration. Several related incidents may support the same thesis.",
-    "Every gameplay segment must show the ball and involved player together. Reaction or celebration may be player-only.",
+    "Use 5-12 second complete-action scenes and enough evidence to cover the duration. Prefer fewer finished scenes over many chopped fragments. Keep each chosen candidate's complete start and end boundaries; never trim a candidate to fill a timeline gap. Several related incidents may support the same thesis.",
+    "Every gameplay segment must show the ball and currently involved player together in every tracked 9:16 sample. Follow possession from the initiating player through the receiver, defender, or goalkeeper until the action resolves. Reaction or celebration may be player-only.",
     "Mostly use hard cuts. Use replay, speed changes, freeze, player highlight, callout, color treatment, and sound accents only when they support that content beat.",
     "Return JSON only with rationale and segments. Each segment needs candidateId, beatId, startTime, endTime, editOrder, role, analysisPurpose, transitionIn, transitionDuration, effect, playbackRate, playerHighlight, onScreenText, eventCallout, colorGrade, and soundEffect.",
     "Never output commentary or a new script. Never use a source interval outside its candidate.",
@@ -94,7 +94,7 @@ export function contentPlanProblems(plan, targetDuration) {
   if (words < minimumWords) problems.push("script_too_short:" + words + "<" + minimumWords);
   if (words > maximumWords) problems.push("script_too_long:" + words + ">" + maximumWords);
   if (!plan?.editorialThesis || !plan?.storyQuestion || !plan?.storyAnswer) problems.push("missing_analysis_structure");
-  if (!Array.isArray(plan?.contentBeats) || plan.contentBeats.length < 12) problems.push("too_few_content_beats");
+  if (!Array.isArray(plan?.contentBeats) || plan.contentBeats.length < 8) problems.push("too_few_content_beats");
   if (/\b(?:look at(?: the)? replay|look at|watch this|watch the replay|notice how|focus on|pay attention|here we see|here you can see|you can see|we can see|as you can see|in this clip|in the replay)\b/i.test(plan?.contentScript || "")) problems.push("directing_filler_language");
   return problems;
 }
@@ -106,7 +106,7 @@ export function plannedSegmentDuration(segments) {
     const rate = Math.min(1.18, Math.max(0.72, Number(segment?.playbackRate || 1)));
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return total;
     const transition = index === 0 ? 0 : Math.min(0.36, Math.max(0.04, Number(segment?.transitionDuration || 0.04)));
-    return total + Math.min(5, (end - start) / rate) - transition;
+    return total + Math.min(MAX_SCENE_SECONDS, (end - start) / rate) - transition;
   }, 0);
 }
 
@@ -167,12 +167,13 @@ export function assessPlannedSceneTracking(moment, evidence) {
   const maximumBallGap = Number(evidence.maxDirectBallGap ?? Number.POSITIVE_INFINITY);
   const goalPayoff = Number(evidence.goalPayoffCoverage ?? 0);
   const goalNeedsPayoff = moment.eventType === "goal";
+  const allowedDirectBallGap = goalNeedsPayoff ? 3.0 : 2.4;
   const payoffReady = !goalNeedsPayoff || goalPayoff >= 0.10;
   const strict = Boolean(evidence.openingJointVisible)
-    && directBall >= 0.54
-    && jointVisibility >= 0.54
-    && jointFit >= 0.42
-    && maximumBallGap <= 0.8
+    && directBall >= 0.35
+    && jointVisibility >= 0.72
+    && jointFit >= 0.68
+    && maximumBallGap <= allowedDirectBallGap
     && payoffReady;
   if (strict) return { usable: true, mode: "strict" };
 
@@ -185,9 +186,9 @@ export function assessPlannedSceneTracking(moment, evidence) {
     && Number(moment.visualClarity || 0) >= 80;
   const locallySupported = playerCoverage >= 0.80
     && directBall >= 0.30
-    && jointVisibility >= 0.30
-    && jointFit >= 0.24
-    && maximumBallGap <= 2.4;
+    && jointVisibility >= 0.70
+    && jointFit >= 0.65
+    && maximumBallGap <= allowedDirectBallGap;
   if (aiJointConfirmed && locallySupported && payoffReady) {
     return { usable: true, mode: "ai_confirmed_joint_scene" };
   }
@@ -198,7 +199,7 @@ export function assessPlannedSceneTracking(moment, evidence) {
   }
 
   if (goalNeedsPayoff && !payoffReady) return { usable: false, mode: "missing_goal_payoff" };
-  if (directBall < 0.30 || maximumBallGap > 2.4) return { usable: false, mode: "ball_not_visibly_continuous" };
+  if (directBall < 0.30 || maximumBallGap > allowedDirectBallGap) return { usable: false, mode: "ball_not_visibly_continuous" };
   return { usable: false, mode: "insufficient_joint_framing" };
 }
 

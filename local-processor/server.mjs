@@ -9,6 +9,7 @@ import { GoogleGenAI } from "@google/genai";
 import { synthesizeGoogleCloudSpeech } from "./google-cloud-tts.mjs";
 import { renderVideoV2 } from "./render-video-v2.mjs";
 import {
+  MIN_SCENE_SECONDS,
   MAX_SCENE_SECONDS,
   assessPlannedSceneTracking,
   buildContentWritingPrompt,
@@ -42,7 +43,7 @@ const trackingPythonPath = resolveExecutable(process.env.TRACKING_PYTHON || "./.
 const trackingScriptPath = resolveSetting(process.env.TRACKING_SCRIPT || "./local-processor/track-football-v2.py");
 const trackingModelPath = resolveSetting(process.env.TRACKING_MODEL || "./tools/tracking/yolo11n.pt");
 const trackingBallModelPath = resolveSetting(process.env.TRACKING_BALL_MODEL || "./tools/tracking/yolo-football-ball-detection.pt");
-const trackingSampleFps = clamp(Number(process.env.TRACKING_SAMPLE_FPS || 8), 1, 12);
+const trackingSampleFps = clamp(Number(process.env.TRACKING_SAMPLE_FPS || 10), 1, 12);
 const trackingImageSize = Math.round(clamp(Number(process.env.TRACKING_IMAGE_SIZE || 960), 320, 1280));
 const trackingBallImageSize = Math.round(clamp(Number(process.env.TRACKING_BALL_IMAGE_SIZE || 1280), 640, 1600));
 const trackingConfidence = clamp(Number(process.env.TRACKING_CONFIDENCE || 0.08), 0.01, 0.8);
@@ -427,8 +428,8 @@ function buildAnalysisPrompt(targetDuration, excerpt, chunkNumber, chunkCount, h
     `This excerpt starts at source time ${excerpt.startTime.toFixed(3)} seconds and lasts ${excerpt.duration.toFixed(3)} seconds. Return all startTime and endTime values RELATIVE TO THIS EXCERPT, beginning at zero.`,
     `The eventual montage target is about ${targetDuration} seconds, but do not select the final edit yet. Build a comprehensive candidate/story timeline first.`,
     "Return JSON only with top-level moments and overlayMasks arrays.",
-    "For moments, identify observable football micro-scenes of 1.2 to 5.0 seconds: anticipation or build-up, skill/pass/dribble, decisive action, result, reaction/celebration, and replay when present. Split longer actions at natural visual boundaries while keeping the same storyId. Include useful context and explicitly identify weak footage.",
-    "Every moment must contain: startTime, endTime, eventType (goal|penalty|assist|big_chance|shot_on_target|save|foul|yellow_card|red_card|free_kick|var|skill|dribble|tackle|celebration|normal_play), storyId, storyPhase (hook|build_up|action|payoff|reaction|replay|standalone), keepDecision (keep|support|replay|reject), importanceScore 0-100, hookScore 0-100, flowScore 0-100, visualClarity 0-100, excitementScore 0-100, narrativeCompleteness 0-100, description, rejectReason, confidence 0-1, ballVisible, mainPlayerVisible, isReplay, commentary, analysisPurpose, onScreenText, and focusX 0-1.",
+    "For moments, identify complete football action scenes of 5 to 12 seconds. Start before the initiating touch, run, pass, dribble, or defensive movement; include the decisive contact; and end only after the shot, save, goal, turnover, whistle, replay conclusion, or reaction resolves. Never split an active action because five seconds elapsed. Use a new scene only at a possession reset, broadcast cut, replay cut, whistle, or completed consequence. Include useful context and explicitly identify weak footage.",
+    "Every moment must contain: startTime, endTime, eventType (goal|penalty|assist|big_chance|shot_on_target|save|foul|yellow_card|red_card|free_kick|var|skill|dribble|tackle|celebration|normal_play), storyId, storyPhase (hook|build_up|action|payoff|reaction|replay|standalone), keepDecision (keep|support|replay|reject), actionComplete boolean, completionReason, keyActionTimes as an ordered array of {time,detail}, importanceScore 0-100, hookScore 0-100, flowScore 0-100, visualClarity 0-100, excitementScore 0-100, narrativeCompleteness 0-100, description, rejectReason, confidence 0-1, ballVisible, mainPlayerVisible, isReplay, commentary, analysisPurpose, onScreenText, and focusX 0-1.",
     "Prefer complete actions with a few seconds of context. Do not merge unrelated events. Do not discard replays; label them so the edit director can decide. Mark obstructed, static, duplicate, irrelevant, or unclear footage as reject.",
     "Never invent names, teams, scores, or events. Commentary must be one short evidence-based analytical sentence that adds explanation, criticism, or meaning rather than merely announcing what happens. analysisPurpose must state why this exact excerpt is needed. onScreenText must be a clean 2-to-6-word hook, never a paragraph.",
     "For gameplay, mark keep or support only when the relevant player and football are both visible in the same composition. Player-only footage is allowed only for a celebration, reaction, or introduction. Do not select ball-only or player-only running footage.",
@@ -441,8 +442,8 @@ function buildAnalysisRecoveryPrompt(excerpt, chunkNumber, chunkCount) {
   return [
     `Re-inspect football excerpt ${chunkNumber} of ${chunkCount}. The previous response contained no usable moments.`,
     `The excerpt duration is ${excerpt.duration.toFixed(3)} seconds. Return startTime and endTime as JSON numbers in seconds RELATIVE to this excerpt, from 0 through ${excerpt.duration.toFixed(3)}. Never use HH:MM:SS strings.`,
-    "Return JSON only as {moments:[...],overlayMasks:[]}. If football is visible, return at least four distinct observable 1.2-to-5.0-second scenes. Include weak or obstructed scenes with keepDecision reject instead of returning an empty array.",
-    "Every moment requires startTime, endTime, eventType, storyId, storyPhase, keepDecision, importanceScore, hookScore, flowScore, visualClarity, excitementScore, narrativeCompleteness, description, rejectReason, confidence, ballVisible, mainPlayerVisible, isReplay, commentary, analysisPurpose, onScreenText, and focusX.",
+    "Return JSON only as {moments:[...],overlayMasks:[]}. If football is visible, return distinct complete 5-to-12-second action scenes. Include weak, incomplete, obstructed, or untrackable scenes with keepDecision reject instead of returning an empty array.",
+    "Every moment requires startTime, endTime, eventType, storyId, storyPhase, keepDecision, actionComplete, completionReason, keyActionTimes, importanceScore, hookScore, flowScore, visualClarity, excitementScore, narrativeCompleteness, description, rejectReason, confidence, ballVisible, mainPlayerVisible, isReplay, commentary, analysisPurpose, onScreenText, and focusX.",
     "Use eventType goal|penalty|assist|big_chance|shot_on_target|save|foul|yellow_card|red_card|free_kick|var|skill|dribble|tackle|celebration|normal_play. Do not invent identities, scores, or outcomes. Commentary must explain only visible evidence.",
   ].join(" ");
 }
@@ -501,6 +502,9 @@ function compactPlanningCandidates(candidates) {
     storyId: moment.storyId,
     storyPhase: moment.storyPhase,
     keepDecision: moment.keepDecision,
+    actionComplete: moment.actionComplete,
+    completionReason: moment.completionReason,
+    keyActionTimes: moment.keyActionTimes,
     importanceScore: moment.importanceScore,
     hookScore: moment.hookScore,
     flowScore: moment.flowScore,
@@ -631,13 +635,30 @@ function normalizeMoments(items, duration, offset = 0) {
       importance * 0.34 + hookScore * 0.14 + flowScore * 0.12 + visualClarity * 0.14
       + excitementScore * 0.12 + narrativeCompleteness * 0.14,
     );
-    const keepDecision = ["keep", "support", "replay", "reject"].includes(item.keepDecision) ? item.keepDecision : "keep";
+    const requestedKeepDecision = ["keep", "support", "replay", "reject"].includes(item.keepDecision) ? item.keepDecision : "keep";
     const storyPhase = ["hook", "build_up", "action", "payoff", "reaction", "replay", "standalone"].includes(item.storyPhase) ? item.storyPhase : "standalone";
+    const reactionOnly = item.eventType === "celebration" || storyPhase === "reaction";
+    const minimumCompleteDuration = reactionOnly ? 2 : MIN_SCENE_SECONDS;
+    const actionDuration = endTime - startTime;
+    const actionComplete = item.actionComplete === true
+      && actionDuration >= minimumCompleteDuration
+      && actionDuration <= MAX_SCENE_SECONDS;
+    const keepDecision = requestedKeepDecision !== "reject" && !actionComplete ? "reject" : requestedKeepDecision;
     const storyKey = String(item.storyId || `scene-${index + 1}`).replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 80);
     return [{
       id: `candidate-${Math.round(offset * 1000)}-${index + 1}`, startTime, endTime,
       eventType: eventTypes.has(item.eventType) ? item.eventType : "normal_play",
       storyId: `story-${Math.round(offset)}-${storyKey}`, storyPhase, keepDecision,
+      actionComplete,
+      completionReason: String(item.completionReason || (actionComplete ? "Visible action reaches a natural result." : "Action is incomplete or too short.")).slice(0, 220),
+      keyActionTimes: (Array.isArray(item.keyActionTimes) ? item.keyActionTimes : []).flatMap((keyAction) => {
+        const relativeTime = Number(keyAction?.time);
+        if (!Number.isFinite(relativeTime)) return [];
+        return [{
+          time: clamp(offset + relativeTime, startTime, endTime),
+          detail: String(keyAction?.detail || "Action detail").slice(0, 140),
+        }];
+      }).slice(0, 12),
       importanceScore: editorialScore, sourceImportanceScore: importance,
       hookScore, flowScore, visualClarity, excitementScore, narrativeCompleteness,
       description: String(item.description || "Observed football passage").slice(0, 240),
@@ -755,17 +776,19 @@ function buildDeterministicEditPlan(candidates, settings, contentPlan) {
   for (const moment of ordered) {
     if (total >= settings.targetDuration) break;
     const effect = deterministicEffect(moment, settings.intensity);
-    const playbackRate = effect === "slow_motion" ? 0.84 : effect === "speed_up" ? 1.12 : 1;
-    const sourceLength = Math.min(MAX_SCENE_SECONDS * playbackRate, moment.endTime - moment.startTime);
-    const remaining = settings.targetDuration - total;
-    const desiredOutput = Math.min(sourceLength / playbackRate, remaining + 0.2);
-    if (desiredOutput < 1.2) continue;
+    const sourceLength = moment.endTime - moment.startTime;
+    const requestedPlaybackRate = effect === "slow_motion" ? 0.84 : effect === "speed_up" ? 1.12 : 1;
+    const playbackRate = clamp(Math.max(requestedPlaybackRate, sourceLength / MAX_SCENE_SECONDS), 0.72, 1.18);
+    const minimumOutputLength = minimumSceneSeconds(moment);
+    const desiredOutput = sourceLength / playbackRate;
+    if (desiredOutput < minimumOutputLength) continue;
+    if (total + desiredOutput > settings.targetDuration + 3) continue;
     const beat = contentPlan.contentBeats[selected.length] || null;
     selected.push({
       candidateId: moment.id,
       beatId: beat?.beatId || "support-" + (selected.length + 1),
       startTime: moment.startTime,
-      endTime: Math.min(moment.endTime, moment.startTime + desiredOutput * playbackRate),
+      endTime: moment.endTime,
       editOrder: selected.length,
       role: beat?.role || moment.storyPhase || "evidence",
       transitionIn: selected.length === 0 ? "cut" : moment.isReplay ? "flash" : "cut",
@@ -810,6 +833,10 @@ function deterministicEffect(moment, intensity) {
 
 function playerOnlyAllowed(moment) {
   return moment.eventType === "celebration" || ["reaction"].includes(moment.storyPhase) || ["reaction"].includes(moment.role);
+}
+
+function minimumSceneSeconds(moment) {
+  return playerOnlyAllowed(moment) ? 2 : MIN_SCENE_SECONDS;
 }
 
 function framingEligible(moment) {
@@ -888,20 +915,20 @@ function applyEditPlan(candidates, plan, targetDuration) {
     const candidate = byId.get(String(directive.candidateId));
     if (!candidate || used.has(candidate.id) || !framingEligible(candidate)) continue;
 
-    let startTime = clamp(Number(directive.startTime), candidate.startTime, candidate.endTime - 1.2);
-    let endTime = clamp(Number(directive.endTime), startTime + 1.2, candidate.endTime);
-    if (!Number.isFinite(startTime)) startTime = candidate.startTime;
-    if (!Number.isFinite(endTime)) endTime = candidate.endTime;
-    const playbackRate = clamp(Number(directive.playbackRate || 1), 0.72, 1.18);
-    endTime = Math.min(endTime, startTime + MAX_SCENE_SECONDS * playbackRate);
-    let effectiveLength = (endTime - startTime) / playbackRate;
-    const remaining = targetDuration - outputDuration;
-    if (effectiveLength > remaining + 1) {
-      if (remaining < 1.2) continue;
-      endTime = Math.min(candidate.endTime, startTime + remaining * playbackRate);
-      effectiveLength = (endTime - startTime) / playbackRate;
-    }
-    if (endTime - startTime < 1.2) continue;
+    const candidateSourceLength = candidate.endTime - candidate.startTime;
+    const playbackRate = clamp(
+      Math.max(Number(directive.playbackRate || 1), candidateSourceLength / MAX_SCENE_SECONDS),
+      0.72,
+      1.18,
+    );
+    const minimumOutputLength = minimumSceneSeconds(candidate);
+    if (candidateSourceLength / playbackRate < minimumOutputLength) continue;
+    const startTime = candidate.startTime;
+    const endTime = candidate.endTime;
+    const effectiveLength = candidateSourceLength / playbackRate;
+    const maximumAllowed = targetDuration + 3 - outputDuration;
+    if (effectiveLength > maximumAllowed) continue;
+    if (effectiveLength + 0.001 < minimumOutputLength) continue;
     const transitionIn = ["cut", "crossfade", "crosszoom", "whip", "flash"].includes(directive.transitionIn) ? directive.transitionIn : "cut";
     const effect = ["none", "punch_zoom", "slow_motion", "speed_up", "replay_treatment"].includes(directive.effect) ? directive.effect : "none";
     edits.push({
@@ -1032,7 +1059,7 @@ function buildTrackingPool(moments, backupLimit = 14) {
   const planned = moments.filter((moment) => moment.selectedForFinalVideo);
   const plannedIds = new Set(planned.map((moment) => moment.id));
   const candidates = moments
-    .filter((moment) => !plannedIds.has(moment.id) && moment.keepDecision !== "reject" && moment.confidence >= 0.4 && framingEligible(moment));
+    .filter((moment) => !plannedIds.has(moment.id) && moment.keepDecision !== "reject" && moment.confidence >= 0.4 && framingEligible(moment) && (moment.endTime - moment.startTime) / clamp(Number(moment.playbackRate || 1), 0.72, 1.18) >= minimumSceneSeconds(moment));
   const backups = rankSemanticBackups(planned, candidates)
     .slice(0, backupLimit)
     .map((item) => item.moment);
@@ -1071,7 +1098,7 @@ function repairPlanWithTrackedBackups(plannedMoments, assessedMoments, tracking,
     used.add(next.moment.id);
     const backup = next.moment;
     const playbackRate = clamp(Number(rejected.playbackRate || 1), 0.72, 1.18);
-    const desiredSourceLength = Math.min(MAX_SCENE_SECONDS * playbackRate, rejected.endTime - rejected.startTime);
+    const desiredSourceLength = Math.min(MAX_SCENE_SECONDS * playbackRate, Math.max(minimumSceneSeconds(backup) * playbackRate, rejected.endTime - rejected.startTime));
     desired.push({
       ...backup,
       startTime: backup.startTime,
@@ -1157,11 +1184,11 @@ function applyTrackingQuality(moments, tracking) {
 function fitSelectedMoments(moments, targetDuration) {
   let total = 0;
   return moments
-    .filter((item) => item.selectedForFinalVideo && item.endTime - item.startTime >= 1.2)
+    .filter((item) => item.selectedForFinalVideo && (item.endTime - item.startTime) / clamp(Number(item.playbackRate || 1), 0.72, 1.18) >= minimumSceneSeconds(item))
     .sort((a, b) => Number(a.editOrder ?? Number.MAX_SAFE_INTEGER) - Number(b.editOrder ?? Number.MAX_SAFE_INTEGER) || a.startTime - b.startTime)
     .filter((moment) => {
       const length = (moment.endTime - moment.startTime) / clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
-      if (total + length > targetDuration + 0.5) return false;
+      if (total + length > targetDuration + 3) return false;
       total += length;
       return true;
     });
@@ -1224,7 +1251,7 @@ async function loadOrTrackFootball(sourcePath, moments, media, id) {
   try {
     const tracking = JSON.parse(await readFile(path, "utf8"));
     const selected = fitSelectedMoments(moments, Number.MAX_SAFE_INTEGER);
-    if (tracking.version === 16 && selected.every((moment) => tracking.moments?.[moment.id]?.keyframes?.length)) return tracking;
+    if (tracking.version === 20 && selected.every((moment) => tracking.moments?.[moment.id]?.keyframes?.length)) return tracking;
   } catch { /* Re-run tracking when cached data is missing or stale. */ }
   return trackFootball(sourcePath, moments, media, id);
 }
@@ -1517,7 +1544,7 @@ async function reviewRenderedVideoWithGemini(outputPath, media, id, settings) {
     "Reject the edit if it becomes a compilation of unrelated highlights instead of answering one football question with setup, visible evidence, cause, decisive action, proof, consequence, and optional emotional payoff.",
     "Every gameplay scene must fill the 1080x1920 canvas edge-to-edge without black bars, blurred panels, or a small horizontal inset. The football and involved player must remain visible together. Player-only framing is allowed only for a brief reaction or celebration.",
     "Reject any opening freeze or moving highlight that marks a player while the football is absent. Replays may use a moving ball ring or player marker when they clarify evidence.",
-    "Scenes must last 1.2 to 5 seconds. Prefer hard cuts and use slow motion, freezes, zooms, transitions, color changes, emojis, callouts, and sound accents only when they explain a visible point.",
+    "Gameplay scenes must last 5 to 12 seconds and must finish the visible action; never cut during an unresolved pass, shot, save, duel, or run. Prefer fewer complete scenes and hard cuts. Use slow motion, freezes, zooms, transitions, color changes, emojis, callouts, and sound accents only when they explain a visible point.",
     "The base color grade must stay consistent and natural. Replay or decisive-proof treatment may differ, but random alternating color grades are a defect.",
     "Captions must animate in readable 2-to-4-word groups, remain inside mobile safe areas, avoid large opaque boxes, and follow the spoken analysis.",
     "When narration is requested, require one continuous natural adult male football-analyst performance. Reject fragmented per-scene delivery, robotic play-by-play, generic hype, narration that merely states what is visible, or original broadcast speech competing with the analyst.",

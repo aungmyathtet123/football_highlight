@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import {
+  MIN_SCENE_SECONDS,
   MAX_SCENE_SECONDS,
   assessPlannedSceneTracking,
   buildContentWritingPrompt,
@@ -32,8 +33,11 @@ test("whole-video director prompt enforces the requested editorial flow", () => 
   assert.match(prompt, /one incident\/storyId/i);
   assert.match(prompt, /full-bleed 1080x1920/i);
   assert.match(prompt, /continuous male analyst narration/i);
-  assert.match(prompt, /between 1\.2 and 5 output seconds/i);
-  assert.equal(MAX_SCENE_SECONDS, 5);
+  assert.match(prompt, /between 5 and 12 output seconds/i);
+  assert.equal(MIN_SCENE_SECONDS, 5);
+  assert.equal(MAX_SCENE_SECONDS, 12);
+  assert.match(prompt, /Never cut an active action merely because five seconds elapsed/i);
+  assert.match(prompt, /preserve the candidate's complete action boundaries/i);
 });
 
 test("director candidate selection considers strong moments from the end of a long video", () => {
@@ -88,7 +92,7 @@ test("TTS direction requests a male analyst rather than play-by-play hype", () =
 test("tracking preserves a planned replay when local and whole-video evidence agree", () => {
   const assessment = assessPlannedSceneTracking(
     { eventType: "goal", storyPhase: "replay", role: "proof", isReplay: true, ballVisible: true, mainPlayerVisible: true, confidence: 0.95, visualClarity: 92 },
-    { openingJointVisible: false, playerDetectionCoverage: 1, ballDetectionCoverage: 0.83, jointVisibilityCoverage: 0.83, jointFitCoverage: 0.64, maxDirectBallGap: 0.33, goalPayoffCoverage: 0.5 },
+    { openingJointVisible: false, playerDetectionCoverage: 1, ballDetectionCoverage: 0.83, jointVisibilityCoverage: 0.83, jointFitCoverage: 0.72, maxDirectBallGap: 0.33, goalPayoffCoverage: 0.5 },
   );
   assert.deepEqual(assessment, { usable: true, mode: "ai_confirmed_joint_scene" });
 });
@@ -109,6 +113,17 @@ test("a player-only crop is rejected when direct ball visibility is not recovera
   assert.deepEqual(assessment, { usable: false, mode: "ball_not_visibly_continuous" });
 });
 
+test("a completed goal may hold briefly on the net and goalkeeper after the ball disappears", () => {
+  const evidence = { openingJointVisible: true, playerDetectionCoverage: 1, ballDetectionCoverage: 0.52, jointVisibilityCoverage: 0.97, jointFitCoverage: 0.95, maxDirectBallGap: 2.7, goalPayoffCoverage: 0.92 };
+  assert.deepEqual(assessPlannedSceneTracking(
+    { eventType: "goal", storyPhase: "action", role: "evidence" },
+    evidence,
+  ), { usable: true, mode: "strict" });
+  assert.equal(assessPlannedSceneTracking(
+    { eventType: "normal_play", storyPhase: "action", role: "evidence" },
+    evidence,
+  ).usable, false);
+});
 test("a goal scene is rejected when its final frames do not show the payoff", () => {
   const assessment = assessPlannedSceneTracking(
     { eventType: "goal", storyPhase: "action", role: "hook" },
@@ -143,7 +158,8 @@ test("evidence alignment follows the approved content and targets a full minute"
   assert.match(prompt, /content is already approved/i);
   assert.match(prompt, /do not rewrite the analysis/i);
   assert.match(prompt, /60- to 63-second visual timeline/i);
-  assert.match(prompt, /1\.2-5\.0 second clips/i);
+  assert.match(prompt, /5-12 second complete-action scenes/i);
+  assert.match(prompt, /never trim a candidate to fill a timeline gap/i);
 });
 
 test("content validation rejects short scripts and directing filler", () => {
@@ -170,7 +186,7 @@ test("content validation rejects short scripts and directing filler", () => {
 });
 
 test("planned visual duration accounts for playback and transitions", () => {
-  const segments = Array.from({ length: 12 }, (_, index) => ({ startTime: index * 6, endTime: index * 6 + 5, playbackRate: 1, transitionDuration: 0.04 }));
+  const segments = Array.from({ length: 8 }, (_, index) => ({ startTime: index * 8, endTime: index * 8 + 7.5, playbackRate: 1, transitionDuration: 0.04 }));
   assert.ok(plannedSegmentDuration(segments) > 59.5);
   assert.ok(plannedSegmentDuration(segments) < 60.1);
 });
@@ -188,6 +204,11 @@ test("approved content identity survives alignment and hard cuts stay streamable
   const server = readFileSync(new URL("../local-processor/server.mjs", import.meta.url), "utf8");
   const renderer = readFileSync(new URL("../local-processor/render-video-v2.mjs", import.meta.url), "utf8");
   assert.match(server, /beatId: String\(directive\.beatId/);
+  assert.match(server, /const startTime = candidate\.startTime/);
+  assert.match(server, /const endTime = candidate\.endTime/);
+  assert.doesNotMatch(server, /clamp\(Number\(directive\.startTime\)/);
+  assert.match(server, /actionDuration <= MAX_SCENE_SECONDS/);
+  assert.match(server, /TRACKING_SAMPLE_FPS \|\| 10/);
   assert.doesNotMatch(server, /directive\.commentary \|\| candidate\.commentary/);
   assert.match(server, /restoreContentBeatOrder/);
   assert.match(server, /restoreOriginalPlannedScenes/);
@@ -234,7 +255,7 @@ test("semantic backups prefer the same incident over a higher-importance unrelat
 test("tracker requires direct ball evidence and one stable highlight identity", () => {
   const tracker = readFileSync(new URL("../local-processor/track-football-v2.py", import.meta.url), "utf8");
   const renderer = readFileSync(new URL("../local-processor/render-video-v2.mjs", import.meta.url), "utf8");
-  assert.match(tracker, /joint_visible = direct_ball and active is not None/);
+  assert.match(tracker, /joint_visible = tracked_ball and active is not None/);
   assert.match(tracker, /record\["player_track_id"\] == highlight_track_id/);
   assert.match(tracker, /record\["possession"\]/);
   assert.match(tracker, /and record\["joint_fit"\]/);
@@ -244,12 +265,18 @@ test("tracker requires direct ball evidence and one stable highlight identity", 
   assert.match(tracker, /MAX_VISIBLE_BALL_DIAMETER = 70\.0/);
   assert.match(tracker, /style = "spotlight" if confidence >= 0\.54 else "none"/);
   assert.match(tracker, /"maxDirectBallGap"/);
-  assert.match(tracker, /"version": 16/);
+  assert.match(tracker, /"version": 20/);
   assert.match(tracker, /--ball-model/);
   assert.match(tracker, /FOOTBALL_BALL_CLASS = 0/);
   assert.match(tracker, /5\.5 \* point_distance/);
   assert.match(tracker, /first verified possessor is the kick-origin player/);
   assert.match(tracker, /goal payoff is the continued verified/);
+  assert.match(tracker, /tracked_ball = last_ball is not None/);
+  assert.match(tracker, /nearest_to_ball = min/);
+  assert.match(tracker, /frameable_people =/);
+  assert.match(tracker, /not incumbent_frameable/);
+  assert.match(tracker, /velocity_decay = 0\.62 if goal_mode else 0\.76/);
+  assert.match(tracker, /maximum_prediction_step = 0\.035 if goal_mode else 0\.055/);
   assert.match(tracker, /"cueTime": round\(first\["time"\]/);
   assert.doesNotMatch(tracker, /create_ball_ring|"ball": output_path\.parent/);
   assert.doesNotMatch(renderer, /ballInputs|markerPaths.*ball|ballAsset/);

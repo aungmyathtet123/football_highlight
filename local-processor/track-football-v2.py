@@ -226,19 +226,37 @@ def player_score(person, ball, incumbent_id):
     return proximity - continuity - maturity - person["confidence"] * 0.025
 
 
-def choose_locked_player(people, ball, incumbent_id, pending_id, pending_count):
+def choose_locked_player(people, ball, incumbent_id, pending_id, pending_count, view_width):
     if not people:
         return None, incumbent_id, None, 0
     challenger = min(people, key=lambda person: player_score(person, ball, incumbent_id))
+    nearest_to_ball = min(
+        people,
+        key=lambda person: point_distance((person["cx"], person["y2"]), ball, 0.52),
+    ) if ball is not None else challenger
+    joint_margin = min(0.056, view_width * 0.15)
+    frameable_people = [
+        person for person in people
+        if ball is not None
+        and max(ball[0], person["x2"]) - min(ball[0], person["x1"]) + joint_margin * 2 <= view_width
+    ]
+    framing_player = min(
+        frameable_people,
+        key=lambda person: abs(person["cx"] - ball[0]) + abs(person["cy"] - ball[1]) * 0.18,
+    ) if frameable_people else None
     incumbent = next((person for person in people if person.get("trackId") == incumbent_id), None)
     if incumbent is None:
-        return challenger, challenger["trackId"], None, 0
+        preferred = framing_player or challenger
+        return preferred, preferred["trackId"], None, 0
+    incumbent_frameable = incumbent in frameable_people
+    if ball is not None and framing_player is not None and not incumbent_frameable:
+        return framing_player, framing_player["trackId"], None, 0
     if challenger["trackId"] == incumbent_id:
         return incumbent, incumbent_id, None, 0
     incumbent_gap = point_distance((incumbent["cx"], incumbent["y2"]), ball, 0.52) if ball is not None else 0.0
-    challenger_gap = point_distance((challenger["cx"], challenger["y2"]), ball, 0.52) if ball is not None else 1.0
-    if ball is not None and incumbent_gap > 0.16 and challenger_gap + 0.05 < incumbent_gap:
-        return challenger, challenger["trackId"], None, 0
+    nearest_gap = point_distance((nearest_to_ball["cx"], nearest_to_ball["y2"]), ball, 0.52) if ball is not None else 1.0
+    if ball is not None and incumbent_gap > 0.13 and nearest_gap + 0.035 < incumbent_gap:
+        return nearest_to_ball, nearest_to_ball["trackId"], None, 0
     if player_score(challenger, ball, incumbent_id) + 0.11 < player_score(incumbent, ball, incumbent_id):
         count = pending_count + 1 if challenger["trackId"] == pending_id else 1
         if count >= 5:
@@ -483,7 +501,11 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         predicted = None
         if last_ball is not None and last_ball_time is not None:
             gap = max(0.0, timestamp - last_ball_time)
-            predicted = (clamp(last_ball[0] + ball_velocity[0] * gap, 0.0, 1.0), clamp(last_ball[1] + ball_velocity[1] * gap, 0.0, 1.0))
+            maximum_prediction_step = 0.035 if goal_mode else 0.055
+            predicted = (
+                clamp(last_ball[0] + clamp(ball_velocity[0] * gap, -maximum_prediction_step, maximum_prediction_step), 0.0, 1.0),
+                clamp(last_ball[1] + clamp(ball_velocity[1] * gap, -maximum_prediction_step, maximum_prediction_step), 0.0, 1.0),
+            )
         for candidate in balls:
             candidate["output_diameter"] = max(candidate["x2"] - candidate["x1"], candidate["y2"] - candidate["y1"]) / view_width * args.output_width
             candidate["nearest_player_distance"] = min(
@@ -511,6 +533,10 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
             ball_confidence = float(detected["confidence"])
         elif predicted is not None and last_direct_ball_time is not None and timestamp - last_direct_ball_time <= allowed_ball_gap:
             last_ball, last_ball_time = predicted, timestamp
+            # A missed airborne detection must not keep full velocity until the
+            # prediction shoots beyond the goal. Decay toward a goal-side hold.
+            velocity_decay = 0.62 if goal_mode else 0.76
+            ball_velocity = (ball_velocity[0] * velocity_decay, ball_velocity[1] * velocity_decay)
             ball_confidence = max(0.04, 0.20 * (1 - (timestamp - last_direct_ball_time) / allowed_ball_gap))
         else:
             last_ball, ball_velocity = None, (0.0, 0.0)
@@ -519,7 +545,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
             if subject_id is None:
                 active, pending_id, pending_count = None, None, 0
         else:
-            active, subject_id, pending_id, pending_count = choose_locked_player(people, last_ball, subject_id, pending_id, pending_count)
+            active, subject_id, pending_id, pending_count = choose_locked_player(people, last_ball, subject_id, pending_id, pending_count, view_width)
         if previous_subject_id is not None and subject_id is not None and subject_id != previous_subject_id:
             identity_switches += 1
         if subject_id is not None:
@@ -534,7 +560,8 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
             subject_confidence = 0.0
         target_x, target_y, spread = action_target(people, last_ball, active, ball_velocity, fallback_x, view_width, goal_mode)
         possessing = bool(direct_ball and active is not None and proximity <= MAX_POSSESSION_DISTANCE)
-        joint_visible = direct_ball and active is not None
+        tracked_ball = last_ball is not None and ball_confidence >= 0.04
+        joint_visible = tracked_ball and active is not None
         joint_span = max(last_ball[0], active["x2"]) - min(last_ball[0], active["x1"]) if joint_visible else 1.0
         joint_margin = min(0.056, view_width * 0.15)
         joint_fit = bool(joint_visible and joint_span + joint_margin * 2 <= view_width)
@@ -648,7 +675,7 @@ def main():
 
     denominator = max(1, totals["samples"])
     payload = {
-        "version": 16, "model": os.path.basename(args.model), "ballModel": os.path.basename(args.ball_model), "sampleFps": args.sample_fps,
+        "version": 20, "model": os.path.basename(args.model), "ballModel": os.path.basename(args.ball_model), "sampleFps": args.sample_fps,
         "markerPaths": {key: str(path.resolve()) for key, path in marker_paths.items()}, "moments": tracked,
         "summary": {
             "sampledFrames": totals["samples"], "ballDetectionCoverage": round(totals["ball"] / denominator, 4),

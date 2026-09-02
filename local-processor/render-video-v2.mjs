@@ -2,7 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { splitCaptionChunks } from "./editorial-policy.mjs";
+import { MIN_SCENE_SECONDS, splitCaptionChunks } from "./editorial-policy.mjs";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const outputWidth = 1080;
@@ -76,7 +76,7 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
   const clipStarts = [0];
 
   selected.forEach((moment, index) => {
-    const sourceLength = Math.max(1.2, moment.endTime - moment.startTime);
+    const sourceLength = Math.max(0.1, moment.endTime - moment.startTime);
     const playbackRate = clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
     const annotationInput = annotationInputs.get(index);
     const cueDuration = 0;
@@ -247,7 +247,7 @@ function delayValue(seconds) {
 
 function fitSelectedMoments(moments, targetDuration, ttsFiles, tracking) {
   const ordered = moments
-    .filter((item) => item.selectedForFinalVideo && item.endTime - item.startTime >= 1.2)
+    .filter((item) => item.selectedForFinalVideo && sceneOutputDuration(item) >= minimumSceneSeconds(item))
     .sort((a, b) => Number(a.editOrder ?? Number.MAX_SAFE_INTEGER) - Number(b.editOrder ?? Number.MAX_SAFE_INTEGER) || a.startTime - b.startTime);
   const estimatedDuration = (moment) => {
     const playbackRate = clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
@@ -260,23 +260,22 @@ function fitSelectedMoments(moments, targetDuration, ttsFiles, tracking) {
   const narrated = ordered.filter((moment) => moment.commentary);
   const chosen = new Map(narrated.map((moment) => [moment.id, moment]));
   let total = narrated.reduce((sum, moment) => sum + estimatedDuration(moment), 0);
-  let partialSupportAdded = false;
   for (const moment of ordered.filter((item) => !item.commentary)) {
     const length = estimatedDuration(moment);
-    if (total + length <= targetDuration + 1) {
-      chosen.set(moment.id, moment);
-      total += length;
-    } else if (!partialSupportAdded && total < targetDuration - 1.2) {
-      const playbackRate = clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
-      const sourceLength = (targetDuration - total) * playbackRate;
-      if (sourceLength >= 1.2) {
-        chosen.set(moment.id, { ...moment, endTime: Math.min(moment.endTime, moment.startTime + sourceLength) });
-        total = targetDuration;
-        partialSupportAdded = true;
-      }
-    }
+    if (total + length > targetDuration + 3) continue;
+    chosen.set(moment.id, moment);
+    total += length;
   }
   return ordered.flatMap((moment) => chosen.has(moment.id) ? [chosen.get(moment.id)] : []);
+}
+
+function sceneOutputDuration(moment) {
+  return (moment.endTime - moment.startTime) / clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
+}
+
+function minimumSceneSeconds(moment) {
+  const reactionOnly = moment.eventType === "celebration" || moment.storyPhase === "reaction" || moment.role === "reaction";
+  return reactionOnly ? 2 : MIN_SCENE_SECONDS;
 }
 function retimeKeyframes(keyframes, playbackRate) {
   return keyframes.map((frame) => ({ ...frame, time: Number(frame.time) / playbackRate }));
@@ -355,7 +354,7 @@ async function makeCaptionCueFiles(moments, outputPath, tracking, ttsFiles) {
   for (const [index, moment] of moments.entries()) {
     const chunks = splitCaptionChunks(moment.commentary || moment.onScreenText, 4);
     if (chunks.length === 0) continue;
-    const sourceLength = Math.max(1.2, moment.endTime - moment.startTime);
+    const sourceLength = Math.max(0.1, moment.endTime - moment.startTime);
     const playbackRate = clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
     const annotation = tracking?.moments?.[moment.id]?.annotation;
     const cueDuration = annotation?.style !== "none" ? clamp(Number(annotation?.duration), 0.45, 0.75) : 0;
