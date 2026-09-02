@@ -52,6 +52,7 @@ const analysisChunkSeconds = Math.round(clamp(Number(process.env.ANALYSIS_CHUNK_
 const analysisChunkOverlap = clamp(Number(process.env.ANALYSIS_CHUNK_OVERLAP || 4), 0, 12);
 const analysisFps = clamp(Number(process.env.ANALYSIS_FPS || 3), 1, 8);
 const analysisHeight = Math.round(clamp(Number(process.env.ANALYSIS_HEIGHT || 480), 360, 720));
+const geminiRequestTimeoutMs = Math.round(clamp(Number(process.env.GEMINI_REQUEST_TIMEOUT_MS || 180000), 30000, 600000));
 const outputWidth = 1080;
 const outputHeight = 1920;
 const maxUploadBytes = 2 * 1024 * 1024 * 1024;
@@ -228,13 +229,34 @@ async function processJob(id) {
       videoIntelligenceSummary: job.videoIntelligenceSummary,
     });
     job = await updateJob(job, "tracking", 34);
-    const discoveryTrackingPool = buildPrePlanningTrackingPool(candidates);
-    const tracking = await trackFootball(job.sourceKey, discoveryTrackingPool, media, id);
+    let discoveryTrackingPool = buildPrePlanningTrackingPool(candidates);
+    let tracking = await trackFootball(job.sourceKey, discoveryTrackingPool, media, id);
     candidates = applyPrePlanningTrackingQuality(candidates, tracking);
-    const verifiedEvidenceDuration = availableVerifiedEvidenceDuration(candidates);
+    let verifiedEvidenceDuration = availableVerifiedEvidenceDuration(candidates);
     const requiredEvidenceDuration = Math.max(MIN_SCENE_SECONDS * 2, job.settings.targetDuration - 1);
+    if (process.env.GEMINI_API_KEY) for (let pass = 1; pass <= 2 && verifiedEvidenceDuration < requiredEvidenceDuration; pass += 1) {
+      const previousCount = candidates.length;
+      const previousFingerprint = candidateFingerprint(candidates);
+      const missingDuration = requiredEvidenceDuration - verifiedEvidenceDuration;
+      let refined;
+      try {
+        refined = await discoverAdditionalCandidatesWithGemini(job.sourceKey, media, job.settings.targetDuration, id, candidates, missingDuration, pass);
+      } catch (error) {
+        job.warnings.push(`Target-aware discovery pass ${pass} could not complete: ${sanitizeProviderError(String(error?.message || error))}`);
+        break;
+      }
+      if (candidateFingerprint(refined) === previousFingerprint) break;
+      candidates = refined;
+      const candidateDelta = Math.max(0, refined.length - previousCount);
+      job.warnings.push(`Target-aware discovery pass ${pass} added or corrected ${Math.max(1, candidateDelta)} candidate scenes before content writing.`);
+      job = await updateJob(job, "detecting_moments", 34 + pass, { moments: candidates });
+      discoveryTrackingPool = buildPrePlanningTrackingPool(candidates);
+      tracking = await trackFootball(job.sourceKey, discoveryTrackingPool, media, id);
+      candidates = applyPrePlanningTrackingQuality(candidates, tracking);
+      verifiedEvidenceDuration = availableVerifiedEvidenceDuration(candidates);
+    }
     if (verifiedEvidenceDuration < requiredEvidenceDuration) {
-      throw new Error(`Whole-video analysis verified only ${verifiedEvidenceDuration.toFixed(1)} seconds of stable ball-and-player evidence for the requested ${job.settings.targetDuration}-second video. Content was not written because its visuals could not yet support the requested length.`);
+      throw new Error(`After targeted whole-video re-analysis, only ${verifiedEvidenceDuration.toFixed(1)} seconds of stable ball-and-player evidence could be verified for the requested ${job.settings.targetDuration}-second video. Content was not written because the verified source evidence still could not support that length.`);
     }
     job = await updateJob(job, "writing_content", 40, {
       moments: candidates,
@@ -327,12 +349,19 @@ async function processJob(id) {
     await updateJob(job, "failed", job.progress || 0);
   }
 }
+function createGeminiClient() {
+  return new GoogleGenAI({
+    vertexai: true,
+    apiKey: process.env.GEMINI_API_KEY,
+    httpOptions: { timeout: geminiRequestTimeoutMs },
+  });
+}
 async function analyzeWithGemini(sourcePath, media, targetDuration, id) {
   const model = process.env.GEMINI_MODEL;
   if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is missing.");
   if (!process.env.GOOGLE_CLOUD_PROJECT || !process.env.GOOGLE_CLOUD_LOCATION) throw new Error("GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION are required for Gemini.");
   if (!model) throw new Error("GEMINI_MODEL is required; no fallback model is configured.");
-  const ai = new GoogleGenAI({ vertexai: true, apiKey: process.env.GEMINI_API_KEY });
+  const ai = createGeminiClient();
   const proxies = await createAnalysisProxies(sourcePath, media, id);
   const discoveredMoments = [];
   const discoveredMasks = [];
@@ -401,6 +430,51 @@ async function analyzeWithGemini(sourcePath, media, targetDuration, id) {
   }
 }
 
+async function discoverAdditionalCandidatesWithGemini(sourcePath, media, targetDuration, id, candidates, missingDuration, pass) {
+  const ai = createGeminiClient();
+  const proxies = await createAnalysisProxies(sourcePath, media, id);
+  const discovered = [];
+  const requestedPerExcerpt = Math.max(MIN_SCENE_SECONDS * 2, Math.ceil(missingDuration * 1.5 / Math.max(1, proxies.length)));
+  for (const [index, excerpt] of proxies.entries()) {
+    const excerptEnd = excerpt.startTime + excerpt.duration;
+    const priorTimeline = candidates
+      .filter((moment) => moment.endTime > excerpt.startTime && moment.startTime < excerptEnd)
+      .map((moment) => ({
+        startTime: Math.max(0, moment.startTime - excerpt.startTime),
+        endTime: Math.min(excerpt.duration, moment.endTime - excerpt.startTime),
+        eventType: moment.eventType,
+        storyPhase: moment.storyPhase,
+        result: moment.keepDecision === "reject" ? "rejected" : "verified",
+        reason: moment.trackingDecision || moment.rejectReason || "first_pass",
+      }));
+    const prompt = [
+      `This is target-aware football discovery pass ${pass}. The user requested ${targetDuration} seconds, and ${missingDuration.toFixed(1)} more verified seconds are still needed.`,
+      `Re-inspect excerpt ${index + 1} of ${proxies.length} from beginning to end. Return timestamps RELATIVE to this ${excerpt.duration.toFixed(3)}-second excerpt.`,
+      `Find at least ${requestedPerExcerpt} seconds of ADDITIONAL complete 5-to-12-second actions when visibly available. Return only new or corrected candidates; do not duplicate intervals already marked verified.`,
+      "Revisit rejected intervals intelligently. Split an overlong 13-plus-second interval only at a true broadcast cut, possession reset, whistle, replay boundary, or completed consequence. Never cut through an active pass, shot, save, duel, or run.",
+      "For ball_not_visibly_continuous or insufficient_joint_framing, find a different source angle or nearby complete action where the ball and involved player stay visible together. For unstable_camera, choose a naturally stable broadcast passage; do not hide shaking by shortening an unfinished action.",
+      "Return JSON only as {moments:[...],overlayMasks:[]}. Every moment requires startTime, endTime, eventType, storyId, storyPhase, keepDecision, actionComplete, completionReason, keyActionTimes, importanceScore, hookScore, flowScore, visualClarity, excitementScore, narrativeCompleteness, description, rejectReason, confidence, ballVisible, mainPlayerVisible, isReplay, commentary, analysisPurpose, onScreenText, and focusX.",
+      "Use eventType goal|penalty|assist|big_chance|shot_on_target|save|foul|yellow_card|red_card|free_kick|var|skill|dribble|tackle|celebration|normal_play. Mark only a fully resolved action as keep, support, or replay. Do not invent identities, scores, or outcomes.",
+    ].join(" ");
+    const proxy = await readFile(excerpt.path);
+    const response = await ai.models.generateContent({
+      model: process.env.GEMINI_MODEL,
+      contents: [
+        { inlineData: { data: proxy.toString("base64"), mimeType: "video/mp4" } },
+        { text: prompt },
+        { text: JSON.stringify({ priorCandidateResults: priorTimeline }) },
+      ],
+      config: { responseMimeType: "application/json", temperature: 0.08 },
+    });
+    const parsed = JSON.parse(response.text || "{}");
+    discovered.push(...normalizeMoments(parsed.moments, media.duration, excerpt.startTime));
+  }
+  return mergeAnalyzedMoments([...candidates, ...discovered]);
+}
+
+function candidateFingerprint(candidates) {
+  return candidates.map((moment) => [moment.startTime.toFixed(3), moment.endTime.toFixed(3), moment.eventType, moment.storyPhase, moment.keepDecision].join(":")).join("|");
+}
 function buildAnalysisPrompt(targetDuration, excerpt, chunkNumber, chunkCount, hasVideoIntelligence = false) {
   const excerptEvidenceBudget = Math.max(MIN_SCENE_SECONDS * 2, Math.ceil(targetDuration * 1.5 / Math.max(1, chunkCount)));
   return [
@@ -465,8 +539,12 @@ async function createAnalysisProxies(sourcePath, media, id) {
     if (media.hasAudio) args.push("-c:a", "aac", "-b:a", "32k", "-ac", "1", "-ar", "16000");
     else args.push("-an");
     args.push("-movflags", "+faststart", proxyPath);
-    await run(ffmpegPath, args);
-    const info = await stat(proxyPath);
+    let info;
+    try { info = await stat(proxyPath); } catch { /* Create a missing analysis proxy. */ }
+    if (!info || info.size < 1024 || info.size > 15 * 1024 * 1024) {
+      await run(ffmpegPath, args);
+      info = await stat(proxyPath);
+    }
     if (info.size > 15 * 1024 * 1024) throw new Error(`Gemini analysis excerpt ${index + 1} exceeds the safe inline upload limit.`);
     excerpts.push({ path: proxyPath, startTime, duration });
     if (startTime + duration >= media.duration - 0.05) break;
@@ -503,7 +581,7 @@ function compactPlanningCandidates(candidates) {
 }
 
 async function writeAnalysisContentWithGemini(candidates, media, settings, verifiedEvidenceDuration) {
-  const ai = new GoogleGenAI({ vertexai: true, apiKey: process.env.GEMINI_API_KEY });
+  const ai = createGeminiClient();
   const prompt = buildContentWritingPrompt({ sourceDuration: media.duration, targetDuration: settings.targetDuration, verifiedEvidenceDuration });
   const timeline = compactPlanningCandidates(candidates);
   let response = await ai.models.generateContent({
@@ -531,7 +609,7 @@ async function writeAnalysisContentWithGemini(candidates, media, settings, verif
 }
 
 async function alignContentToVideoWithGemini(content, candidates, settings, verifiedEvidenceDuration) {
-  const ai = new GoogleGenAI({ vertexai: true, apiKey: process.env.GEMINI_API_KEY });
+  const ai = createGeminiClient();
   const prompt = buildEvidenceAlignmentPrompt({ targetDuration: settings.targetDuration, intensity: settings.intensity, verifiedEvidenceDuration });
   const timeline = compactPlanningCandidates(candidates);
   const beatMap = new Map(content.contentBeats.map((beat) => [beat.beatId, beat]));
@@ -1550,7 +1628,7 @@ async function validateRenderedVideo(outputPath, settings) {
 
 async function reviewRenderedVideoWithGemini(outputPath, media, id, settings) {
   const model = process.env.GEMINI_MODEL;
-  const ai = new GoogleGenAI({ vertexai: true, apiKey: process.env.GEMINI_API_KEY });
+  const ai = createGeminiClient();
   const proxyPath = join(outputRoot, id, "quality-review.mp4");
   const videoKbps = Math.round(clamp(13 * 1024 * 1024 * 8 / Math.max(1, media.duration) / 1000 - 32, 180, 700));
   const args = ["-hide_banner", "-y", "-i", outputPath, "-vf", "fps=2,scale=-2:360", "-c:v", "libx264", "-preset", "veryfast", "-b:v", `${videoKbps}k`, "-maxrate", `${videoKbps}k`, "-bufsize", `${videoKbps * 2}k`, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "24k", "-ac", "1", "-ar", "16000", "-movflags", "+faststart", proxyPath];

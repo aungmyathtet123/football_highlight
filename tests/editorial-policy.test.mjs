@@ -219,6 +219,11 @@ test("processor learns the target, verifies footage, writes content, then aligns
   assert.ok(durationGate < write && write < align);
   assert.match(source, /Math\.ceil\(targetDuration \* 1\.5 \/ Math\.max\(1, chunkCount\)\)/);
   assert.match(source, /Math\.min\(12, reactionDuration\)/);
+  assert.match(source, /for \(let pass = 1; pass <= 2/);
+  assert.match(source, /discoverAdditionalCandidatesWithGemini/);
+  assert.match(source, /Split an overlong 13-plus-second interval/);
+  assert.match(source, /candidateFingerprint\(refined\)/);
+  assert.match(source, /httpOptions: \{ timeout: geminiRequestTimeoutMs \}/);
   assert.match(source, /stopped before rendering instead of padding or stretching/);
   assert.doesNotMatch(source, /first verified evidence alignment produced/);
 });
