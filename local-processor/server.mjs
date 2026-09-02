@@ -227,18 +227,29 @@ async function processJob(id) {
       overlayMasks,
       videoIntelligenceSummary: job.videoIntelligenceSummary,
     });
-    job = await updateJob(job, "writing_content", 36);
-    let contentPlan;
-    if (process.env.GEMINI_API_KEY) {
-      try {
-        contentPlan = await writeAnalysisContentWithGemini(candidates, media, job.settings);
-      } catch (error) {
-        job.warnings.push(`The AI content-writing pass failed validation, so a conservative evidence-based script was used: ${sanitizeProviderError(String(error?.message || error))}`);
-        contentPlan = buildDeterministicContentPlan(candidates, job.settings);
-      }
-    } else contentPlan = buildDeterministicContentPlan(candidates, job.settings);
-    job = await updateJob(job, "aligning_content", 44, {
+    job = await updateJob(job, "tracking", 34);
+    const discoveryTrackingPool = buildPrePlanningTrackingPool(candidates);
+    const tracking = await trackFootball(job.sourceKey, discoveryTrackingPool, media, id);
+    candidates = applyPrePlanningTrackingQuality(candidates, tracking);
+    const verifiedEvidenceDuration = availableVerifiedEvidenceDuration(candidates);
+    const requiredEvidenceDuration = Math.max(MIN_SCENE_SECONDS * 2, job.settings.targetDuration - 1);
+    if (verifiedEvidenceDuration < requiredEvidenceDuration) {
+      throw new Error(`Whole-video analysis verified only ${verifiedEvidenceDuration.toFixed(1)} seconds of stable ball-and-player evidence for the requested ${job.settings.targetDuration}-second video. Content was not written because its visuals could not yet support the requested length.`);
+    }
+    job = await updateJob(job, "writing_content", 40, {
+      moments: candidates,
+      trackingSummary: tracking.summary,
       editPlan: {
+        requestedDuration: job.settings.targetDuration,
+        verifiedEvidenceDuration,
+        planningMode: "target_first_verified_evidence",
+      },
+    });
+    const contentPlan = process.env.GEMINI_API_KEY
+      ? await writeAnalysisContentWithGemini(candidates, media, job.settings, verifiedEvidenceDuration)
+      : buildDeterministicContentPlan(candidates, job.settings);    job = await updateJob(job, "aligning_content", 48, {
+      editPlan: {
+        ...job.editPlan,
         title: contentPlan.title,
         editorialThesis: contentPlan.editorialThesis,
         contentAngle: contentPlan.contentAngle,
@@ -247,60 +258,28 @@ async function processJob(id) {
         contentBeats: contentPlan.contentBeats,
         contentScript: contentPlan.contentScript,
         wordCount: contentPlan.wordCount,
-        candidateCount: candidates.length,
+        candidateCount: candidates.filter((moment) => moment.keepDecision !== "reject").length,
       },
     });
-    if (process.env.GEMINI_API_KEY) {
-      try {
-        editPlan = await alignContentToVideoWithGemini(contentPlan, candidates, job.settings);
-      } catch (error) {
-        job.warnings.push(`The AI evidence-alignment pass failed, so the approved content was mapped conservatively: ${sanitizeProviderError(String(error?.message || error))}`);
-        editPlan = buildDeterministicEditPlan(candidates, job.settings, contentPlan);
-      }
-    } else editPlan = buildDeterministicEditPlan(candidates, job.settings, contentPlan);
-    let selected = applyEditPlan(candidates, editPlan, job.settings.targetDuration);
+    editPlan = process.env.GEMINI_API_KEY
+      ? await alignContentToVideoWithGemini(contentPlan, candidates, job.settings, verifiedEvidenceDuration)
+      : buildDeterministicEditPlan(candidates, job.settings, contentPlan);    let selected = applyEditPlan(candidates, editPlan, job.settings.targetDuration);
     selected = restoreContentBeatOrder(selected, contentPlan.contentBeats);
+    selected = applyTrackingQuality(selected, tracking);
     let selectedDuration = selectedTimelineDuration(selected);
-    if (selectedDuration < job.settings.targetDuration * 0.68) {
-      job.warnings.push(`The first evidence alignment produced only ${selectedDuration.toFixed(1)} seconds after validation, so it was rebuilt from the approved content before tracking.`);
-      editPlan = buildDeterministicEditPlan(candidates, job.settings, contentPlan);
-      selected = applyEditPlan(candidates, editPlan, job.settings.targetDuration);
-      selected = restoreContentBeatOrder(selected, contentPlan.contentBeats);
-      selectedDuration = selectedTimelineDuration(selected);
-    }
-    if (selectedDuration < job.settings.targetDuration * 0.68) {
-      throw new Error(`The approved content could map to only ${selectedDuration.toFixed(1)} seconds of valid footage. The editor will not produce another misleading short result.`);
-    }
-    job = await updateJob(job, "tracking", 52, {
-      moments: selected,
-      editPlan: {
-        ...job.editPlan,
-        rationale: editPlan.rationale || "",
-        plannedDuration: selectedDuration,
-        selectedCount: selected.filter((moment) => moment.selectedForFinalVideo).length,
-      },
-    });
-    const plannedMoments = selected;
-    const trackingPool = buildTrackingPool(plannedMoments);
-    const tracking = await trackFootball(job.sourceKey, trackingPool, media, id);
-    selected = applyTrackingQuality(plannedMoments, tracking);
-    let frameableDuration = selectedTimelineDuration(selected);
-    if (frameableDuration < job.settings.targetDuration * 0.96) {
-      selected = repairPlanWithTrackedBackups(plannedMoments, selected, tracking, job.settings.targetDuration, job.settings.intensity);
-      selected = restoreContentBeatOrder(selected, contentPlan.contentBeats);
-      frameableDuration = selectedTimelineDuration(selected);
-    }
     const frameable = selected.filter((moment) => moment.selectedForFinalVideo);
-    if (frameable.length < 2 || frameableDuration < job.settings.targetDuration * 0.68) {
-      throw new Error(`Tracked primary and backup evidence could preserve only ${frameableDuration.toFixed(1)} seconds of the approved content plan.`);
+    if (frameable.length < 2 || selectedDuration < requiredEvidenceDuration) {
+      throw new Error(`The verified evidence plan reached ${selectedDuration.toFixed(1)} of the requested ${job.settings.targetDuration} seconds. The editor stopped before rendering instead of padding or stretching an incomplete plan.`);
     }
     job = await updateJob(job, "tracking", 56, {
       moments: selected,
       trackingSummary: tracking.summary,
       editPlan: {
         ...job.editPlan,
+        rationale: editPlan.rationale || "",
         selectedCount: frameable.length,
-        plannedDuration: frameableDuration,
+        plannedDuration: selectedDuration,
+        verifiedEvidenceDuration,
         narrationScript: buildContinuousNarration(selected),
       },
     });
@@ -389,7 +368,7 @@ async function analyzeWithGemini(sourcePath, media, targetDuration, id) {
         warnings.push(`Gemini returned no usable numeric moments for excerpt ${index + 1}; the processor retried that excerpt with a simplified recovery prompt.`);
         const retryContents = [
           { inlineData: { data: proxy.toString("base64"), mimeType: "video/mp4" } },
-          { text: buildAnalysisRecoveryPrompt(excerpt, index + 1, proxies.length) },
+          { text: buildAnalysisRecoveryPrompt(excerpt, index + 1, proxies.length, targetDuration) },
         ];
         if (visionEvidence) retryContents.push({
           text: `Supporting shot/object evidence with ABSOLUTE source timestamps follows. The response itself must still use numeric seconds RELATIVE to this excerpt.\n${JSON.stringify(compactVideoIntelligenceEvidence(visionEvidence))}`,
@@ -423,10 +402,12 @@ async function analyzeWithGemini(sourcePath, media, targetDuration, id) {
 }
 
 function buildAnalysisPrompt(targetDuration, excerpt, chunkNumber, chunkCount, hasVideoIntelligence = false) {
+  const excerptEvidenceBudget = Math.max(MIN_SCENE_SECONDS * 2, Math.ceil(targetDuration * 1.5 / Math.max(1, chunkCount)));
   return [
     `You are the first-pass football video analyst for a professional short-form editor. Analyze every visible scene and all audio in excerpt ${chunkNumber} of ${chunkCount}.`,
     `This excerpt starts at source time ${excerpt.startTime.toFixed(3)} seconds and lasts ${excerpt.duration.toFixed(3)} seconds. Return all startTime and endTime values RELATIVE TO THIS EXCERPT, beginning at zero.`,
-    `The eventual montage target is about ${targetDuration} seconds, but do not select the final edit yet. Build a comprehensive candidate/story timeline first.`,
+    `The user requested a ${targetDuration}-second finished analysis. Do not select the edit yet: return at least ${excerptEvidenceBudget} seconds of non-rejected complete actions from this excerpt when it supports them, so the combined whole-video timeline has a 1.5x evidence buffer before local framing verification.`,
+    "Return every viable complete player-and-ball action in this excerpt, not only the highest-scoring highlight and not only one scene per incident.",
     "Return JSON only with top-level moments and overlayMasks arrays.",
     "For moments, identify complete football action scenes of 5 to 12 seconds. Start before the initiating touch, run, pass, dribble, or defensive movement; include the decisive contact; and end only after the shot, save, goal, turnover, whistle, replay conclusion, or reaction resolves. Never split an active action because five seconds elapsed. Use a new scene only at a possession reset, broadcast cut, replay cut, whistle, or completed consequence. Include useful context and explicitly identify weak footage.",
     "Every moment must contain: startTime, endTime, eventType (goal|penalty|assist|big_chance|shot_on_target|save|foul|yellow_card|red_card|free_kick|var|skill|dribble|tackle|celebration|normal_play), storyId, storyPhase (hook|build_up|action|payoff|reaction|replay|standalone), keepDecision (keep|support|replay|reject), actionComplete boolean, completionReason, keyActionTimes as an ordered array of {time,detail}, importanceScore 0-100, hookScore 0-100, flowScore 0-100, visualClarity 0-100, excitementScore 0-100, narrativeCompleteness 0-100, description, rejectReason, confidence 0-1, ballVisible, mainPlayerVisible, isReplay, commentary, analysisPurpose, onScreenText, and focusX 0-1.",
@@ -438,11 +419,11 @@ function buildAnalysisPrompt(targetDuration, excerpt, chunkNumber, chunkCount, h
   ].filter(Boolean).join(" ");
 }
 
-function buildAnalysisRecoveryPrompt(excerpt, chunkNumber, chunkCount) {
+function buildAnalysisRecoveryPrompt(excerpt, chunkNumber, chunkCount, targetDuration) {
   return [
     `Re-inspect football excerpt ${chunkNumber} of ${chunkCount}. The previous response contained no usable moments.`,
     `The excerpt duration is ${excerpt.duration.toFixed(3)} seconds. Return startTime and endTime as JSON numbers in seconds RELATIVE to this excerpt, from 0 through ${excerpt.duration.toFixed(3)}. Never use HH:MM:SS strings.`,
-    "Return JSON only as {moments:[...],overlayMasks:[]}. If football is visible, return distinct complete 5-to-12-second action scenes. Include weak, incomplete, obstructed, or untrackable scenes with keepDecision reject instead of returning an empty array.",
+    `The requested finished video is ${targetDuration} seconds. Return JSON only as {moments:[...],overlayMasks:[]}. If football is visible, return every distinct complete 5-to-12-second action scene so the whole source can supply enough verified evidence. Include weak, incomplete, obstructed, or untrackable scenes with keepDecision reject instead of returning an empty array.`,
     "Every moment requires startTime, endTime, eventType, storyId, storyPhase, keepDecision, actionComplete, completionReason, keyActionTimes, importanceScore, hookScore, flowScore, visualClarity, excitementScore, narrativeCompleteness, description, rejectReason, confidence, ballVisible, mainPlayerVisible, isReplay, commentary, analysisPurpose, onScreenText, and focusX.",
     "Use eventType goal|penalty|assist|big_chance|shot_on_target|save|foul|yellow_card|red_card|free_kick|var|skill|dribble|tackle|celebration|normal_play. Do not invent identities, scores, or outcomes. Commentary must explain only visible evidence.",
   ].join(" ");
@@ -521,9 +502,9 @@ function compactPlanningCandidates(candidates) {
   }));
 }
 
-async function writeAnalysisContentWithGemini(candidates, media, settings) {
+async function writeAnalysisContentWithGemini(candidates, media, settings, verifiedEvidenceDuration) {
   const ai = new GoogleGenAI({ vertexai: true, apiKey: process.env.GEMINI_API_KEY });
-  const prompt = buildContentWritingPrompt({ sourceDuration: media.duration, targetDuration: settings.targetDuration });
+  const prompt = buildContentWritingPrompt({ sourceDuration: media.duration, targetDuration: settings.targetDuration, verifiedEvidenceDuration });
   const timeline = compactPlanningCandidates(candidates);
   let response = await ai.models.generateContent({
     model: process.env.GEMINI_MODEL,
@@ -549,9 +530,9 @@ async function writeAnalysisContentWithGemini(candidates, media, settings) {
   return content;
 }
 
-async function alignContentToVideoWithGemini(content, candidates, settings) {
+async function alignContentToVideoWithGemini(content, candidates, settings, verifiedEvidenceDuration) {
   const ai = new GoogleGenAI({ vertexai: true, apiKey: process.env.GEMINI_API_KEY });
-  const prompt = buildEvidenceAlignmentPrompt({ targetDuration: settings.targetDuration, intensity: settings.intensity });
+  const prompt = buildEvidenceAlignmentPrompt({ targetDuration: settings.targetDuration, intensity: settings.intensity, verifiedEvidenceDuration });
   const timeline = compactPlanningCandidates(candidates);
   const beatMap = new Map(content.contentBeats.map((beat) => [beat.beatId, beat]));
   const requestAlignment = async (correction = "") => {
@@ -1166,6 +1147,43 @@ function repairPlanWithTrackedBackups(plannedMoments, assessedMoments, tracking,
   return plannedMoments.map((moment) => selectedById.get(moment.id) || { ...moment, selectedForFinalVideo: false });
 }
 
+function buildPrePlanningTrackingPool(candidates) {
+  return candidates.map((moment) => ({
+    ...moment,
+    selectedForFinalVideo: moment.keepDecision !== "reject"
+      && Number(moment.confidence || 0) >= 0.4
+      && framingEligible(moment)
+      && (moment.endTime - moment.startTime) / clamp(Number(moment.playbackRate || 1), 0.72, 1.18) >= minimumSceneSeconds(moment),
+  }));
+}
+
+function applyPrePlanningTrackingQuality(candidates, tracking) {
+  return candidates.map((moment) => {
+    if (moment.keepDecision === "reject") return { ...moment, selectedForFinalVideo: false, trackingDecision: "analysis_rejected" };
+    const evidence = tracking?.moments?.[moment.id];
+    if (!evidence) return { ...moment, keepDecision: "reject", selectedForFinalVideo: false, trackingDecision: "not_tracked" };
+    const assessment = assessPlannedSceneTracking(moment, evidence);
+    if (!assessment.usable) return {
+      ...moment,
+      keepDecision: "reject",
+      selectedForFinalVideo: false,
+      trackingDecision: assessment.mode,
+      rejectReason: `Local framing verification: ${assessment.mode}`,
+    };
+    return { ...moment, selectedForFinalVideo: false, trackingDecision: assessment.mode };
+  });
+}
+
+function availableVerifiedEvidenceDuration(candidates) {
+  let gameplayDuration = 0;
+  let reactionDuration = 0;
+  for (const moment of candidates.filter((item) => item.keepDecision !== "reject" && !["analysis_rejected", "not_tracked"].includes(item.trackingDecision))) {
+    const duration = Math.min(MAX_SCENE_SECONDS, (moment.endTime - moment.startTime) / clamp(Number(moment.playbackRate || 1), 0.72, 1.18));
+    if (playerOnlyAllowed(moment)) reactionDuration += duration;
+    else gameplayDuration += duration;
+  }
+  return gameplayDuration + Math.min(12, reactionDuration);
+}
 function applyTrackingQuality(moments, tracking) {
   const approved = new Map();
   for (const moment of moments.filter((item) => item.selectedForFinalVideo)) {

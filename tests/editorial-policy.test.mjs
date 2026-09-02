@@ -156,24 +156,28 @@ test("narration timing validation binds every spoken beat to its visual", () => 
     { beatId: "beat-2", momentId: "silent", narration: "The goalkeeper commits early.", visualStart: 0, visualDuration: 3, speechDuration: 0 },
   ]), ["missing_speech:silent"]);
 });
-test("content is written before timestamps or editing are chosen", () => {
-  const prompt = buildContentWritingPrompt({ sourceDuration: 529.1, targetDuration: 60 });
+test("content is written for the requested duration only after footage is verified", () => {
+  const prompt = buildContentWritingPrompt({ sourceDuration: 529.1, targetDuration: 60, verifiedEvidenceDuration: 74.6 });
   assert.match(prompt, /complete source from beginning to end/i);
+  assert.match(prompt, /only locally tracked, frameable evidence/i);
+  assert.match(prompt, /requested approximately 60 seconds/i);
+  assert.match(prompt, /verified evidence budget is 74\.6 seconds/i);
   assert.match(prompt, /do not choose timestamps or edit clips yet/i);
-  assert.match(prompt, /at least 60 seconds/i);
+  assert.match(prompt, /approximately 60 seconds/i);
   assert.match(prompt, /120-147 words/i);
   assert.match(prompt, /never use directing filler/i);
 });
 
-test("evidence alignment follows the approved content and targets a full minute", () => {
-  const prompt = buildEvidenceAlignmentPrompt({ targetDuration: 60, intensity: "dynamic" });
+test("evidence alignment uses only pre-verified footage for the requested minute", () => {
+  const prompt = buildEvidenceAlignmentPrompt({ targetDuration: 60, intensity: "dynamic", verifiedEvidenceDuration: 74.6 });
   assert.match(prompt, /content is already approved/i);
+  assert.match(prompt, /already passed local ball, involved-player, joint-framing, and camera-stability verification/i);
+  assert.match(prompt, /verified pool contains 74\.6 seconds/i);
   assert.match(prompt, /do not rewrite the analysis/i);
   assert.match(prompt, /60- to 63-second visual timeline/i);
   assert.match(prompt, /5-12 second complete-action scenes/i);
   assert.match(prompt, /never trim a candidate to fill a timeline gap/i);
 });
-
 test("content validation rejects short scripts and directing filler", () => {
   const beats = Array.from({ length: 12 }, (_, index) => ({
     beatId: "beat-" + index,
@@ -202,15 +206,21 @@ test("planned visual duration accounts for playback and transitions", () => {
   assert.ok(plannedSegmentDuration(segments) > 59.5);
   assert.ok(plannedSegmentDuration(segments) < 60.1);
 });
-test("processor stage order is observe, write content, align evidence, then track", () => {
+test("processor learns the target, verifies footage, writes content, then aligns the edit", () => {
   const source = readFileSync(new URL("../local-processor/server.mjs", import.meta.url), "utf8");
-  const analyze = source.indexOf('updateJob(job, "analyzing"');
-  const write = source.indexOf('updateJob(job, "writing_content"');
-  const align = source.indexOf('updateJob(job, "aligning_content"');
-  const track = source.indexOf('updateJob(job, "tracking", 52');
-  assert.ok(analyze >= 0 && analyze < write);
-  assert.ok(write < align);
-  assert.ok(align < track);
+  const analyze = source.indexOf('updateJob(job, "analyzing", 12');
+  const track = source.indexOf('updateJob(job, "tracking", 34');
+  const verify = source.indexOf("applyPrePlanningTrackingQuality", track);
+  const durationGate = source.indexOf("verifiedEvidenceDuration < requiredEvidenceDuration", verify);
+  const write = source.indexOf('updateJob(job, "writing_content", 40');
+  const align = source.indexOf('updateJob(job, "aligning_content", 48');
+  assert.ok(analyze >= 0 && analyze < track);
+  assert.ok(track < verify && verify < durationGate);
+  assert.ok(durationGate < write && write < align);
+  assert.match(source, /Math\.ceil\(targetDuration \* 1\.5 \/ Math\.max\(1, chunkCount\)\)/);
+  assert.match(source, /Math\.min\(12, reactionDuration\)/);
+  assert.match(source, /stopped before rendering instead of padding or stretching/);
+  assert.doesNotMatch(source, /first verified evidence alignment produced/);
 });
 test("approved content identity survives alignment and hard cuts stay streamable", () => {
   const server = readFileSync(new URL("../local-processor/server.mjs", import.meta.url), "utf8");

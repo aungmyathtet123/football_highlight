@@ -31,13 +31,15 @@ export function buildWholeVideoDirectorPrompt({ sourceDuration, targetDuration, 
   ].join(" ");
 }
 
-export function buildContentWritingPrompt({ sourceDuration, targetDuration }) {
+export function buildContentWritingPrompt({ sourceDuration, targetDuration, verifiedEvidenceDuration = targetDuration }) {
   const minimumWords = Math.round(targetDuration * 2.0);
   const maximumWords = Math.round(targetDuration * 2.45);
+  const verifiedDuration = Number.isFinite(Number(verifiedEvidenceDuration)) ? Number(verifiedEvidenceDuration) : targetDuration;
   return [
-    "You are the senior football writer. The observation timeline covers the complete source from beginning to end.",
-    "Read every observation before deciding the content. Do not choose timestamps or edit clips yet.",
-    "Write one engaging, evidence-based football analysis designed to speak for at least " + targetDuration + " seconds.",
+    "You are the senior football writer. The observation timeline covers the complete source from beginning to end and contains only locally tracked, frameable evidence.",
+    "The user requested approximately " + targetDuration + " seconds. The verified evidence budget is " + verifiedDuration.toFixed(1) + " seconds; write only claims that this supplied evidence can visibly support.",
+    "Read every verified observation before deciding the content. Do not choose timestamps or edit clips yet.",
+    "Write one engaging, evidence-based football analysis designed to speak for approximately " + targetDuration + " seconds.",
     "The source duration is " + sourceDuration.toFixed(2) + " seconds. The script must contain " + minimumWords + "-" + maximumWords + " words.",
     "Build a strong 0-3 second hook, a clear analytical question, connected explanation, visible evidence, tactical or technical reasoning, and a satisfying conclusion.",
     "The analysis may connect several related incidents under one clear thesis when one incident cannot support the full duration. Never join unrelated highlights merely to fill time.",
@@ -49,10 +51,12 @@ export function buildContentWritingPrompt({ sourceDuration, targetDuration }) {
   ].join(" ");
 }
 
-export function buildEvidenceAlignmentPrompt({ targetDuration, intensity }) {
+export function buildEvidenceAlignmentPrompt({ targetDuration, intensity, verifiedEvidenceDuration = targetDuration }) {
+  const verifiedDuration = Number.isFinite(Number(verifiedEvidenceDuration)) ? Number(verifiedEvidenceDuration) : targetDuration;
   return [
     "You are the evidence editor. The football analysis content is already approved and must remain the authority.",
-    "Do not rewrite the analysis. Map every content beat to visible evidence from the complete observation timeline.",
+    "Every supplied candidate already passed local ball, involved-player, joint-framing, and camera-stability verification. The user requested " + targetDuration + " seconds and the verified pool contains " + verifiedDuration.toFixed(1) + " seconds.",
+    "Do not rewrite the analysis. Map every content beat only to visible evidence from this verified observation timeline.",
     "Build a " + targetDuration + "- to " + (targetDuration + 3) + "-second visual timeline. Editing intensity is " + intensity + ".",
     "Use 5-12 second complete-action scenes and enough evidence to cover the duration. Prefer fewer finished scenes over many chopped fragments. Keep each chosen candidate's complete start and end boundaries; never trim a candidate to fill a timeline gap. Several related incidents may support the same thesis.",
     "Every gameplay segment must show the ball and currently involved player together in every tracked 9:16 sample. Follow possession from the initiating player through the receiver, defender, or goalkeeper until the action resolves. Reaction or celebration may be player-only.",
