@@ -66,7 +66,21 @@ if (-not $ballModelValid) {
 & $venvPython -c "from ultralytics import YOLO; m=YOLO(r'$ballModelPath'); assert m.names == {0: 'ball'}; print('Football-specific ball model ready.')"
 if ($LASTEXITCODE -ne 0) { throw "Could not load the football-specific ball model." }
 
-& $venvPython -c "import cv2, torch, ultralytics; print(f'Python tracking ready: torch={torch.__version__}, ultralytics={ultralytics.__version__}, opencv={cv2.__version__}')"
+$pitchModelPath = Join-Path $modelDirectory "yolo-football-pitch-detection.pt"
+$pitchHash = "06623B51F77F51695CDE731DA146596E6DF73C95A5B4776F6AFE7094389ED209"
+if (-not (Test-Path -LiteralPath $pitchModelPath)) {
+  $pitchDownload = Join-Path $modelDirectory "pitch-model.download"
+  Invoke-WebRequest -Uri "https://huggingface.co/martinjolif/yolo-football-pitch-detection/resolve/7e4e358d66715b1231260bf4a9ce68c542e04213/yolo-football-pitch-detection.pt?download=true" -OutFile $pitchDownload
+  if ((Get-FileHash -LiteralPath $pitchDownload -Algorithm SHA256).Hash -ne $pitchHash) {
+    throw "Pitch model checksum mismatch; downloaded file was not activated."
+  }
+  Move-Item -LiteralPath $pitchDownload -Destination $pitchModelPath
+}
+if ((Get-FileHash -LiteralPath $pitchModelPath -Algorithm SHA256).Hash -ne $pitchHash) {
+  throw "Existing pitch model differs from the pinned release; it was not overwritten."
+}
+
+& $venvPython -c "import cv2, torch, ultralytics, supervision, lap, scenedetect; print(f'Python tracking ready: torch={torch.__version__}, ultralytics={ultralytics.__version__}, opencv={cv2.__version__}, supervision={supervision.__version__}, scenedetect={scenedetect.__version__}')"
 if ($LASTEXITCODE -ne 0) { throw "Tracking dependency import verification failed." }
 
 Write-Output "Local football tracking is ready."

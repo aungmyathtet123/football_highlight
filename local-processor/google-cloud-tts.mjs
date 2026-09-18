@@ -2,11 +2,11 @@ import { writeFile } from "node:fs/promises";
 import { TextToSpeechClient } from "@google-cloud/text-to-speech";
 
 export const commentaryPrompt = [
-  "Use a natural adult male voice.",
-  "Speak like a confident football analyst explaining one connected incident to an intelligent fan.",
-  "Sound conversational, authoritative and energetic, but never shout like live play-by-play commentary.",
-  "Emphasize causal words about movement, space, timing, decisions and consequences.",
-  "Use punctuation for brief analytical pauses and maintain one consistent performance from hook through payoff.",
+  "Perform this as an energetic adult male football recap announcer with crisp broadcast-quality pronunciation and an audible vocal smile.",
+  "Use infectious enthusiasm, urgent forward momentum, athletic confidence, and the excitement of a major post-match recap from the opening word. Never sound like a calm documentary, audiobook, corporate explainer, or neutral newsreader.",
+  "Build tension quickly toward each decisive touch, use only a split-second dramatic pause before the strike, then deliver the goal, save, or outcome with an unmistakable lift in pitch, pace, force, and emotion.",
+  "Punch action verbs and football consequences. Vary pitch, stress, volume, and sentence rhythm; use sharp attacks, short breaths, and confident finishes. Reset the energy after each outcome and drive immediately into the next incident.",
+  "Average 165 to 175 words per minute with minimal dead air. Stay lively and compelling through the final sentence. Sound excited but controlled; never scream and never imitate live play-by-play.",
   "Do not imitate or clone any real football commentator.",
 ].join(" ");
 

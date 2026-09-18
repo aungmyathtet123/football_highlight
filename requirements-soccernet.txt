@@ -1,0 +1,13 @@
+numpy==1.23.5
+tensorflow==2.10.1
+torch==2.2.2
+torchvision==0.17.2
+SoccerNet==0.2.0
+scikit-video==1.1.11
+imutils==0.5.4
+opencv-python==4.8.1.78
+scikit-learn==1.2.2
+ffmpy==1.0.0
+tqdm==4.70.0
+matplotlib==3.10.9
+moviepy==1.0.3

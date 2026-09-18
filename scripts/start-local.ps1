@@ -52,7 +52,7 @@ if (-not (Test-Web)) {
   startedAt = (Get-Date).ToString("o")
 } | ConvertTo-Json | Set-Content -LiteralPath $pidPath -Encoding UTF8
 
-$deadline = (Get-Date).AddSeconds(60)
+$deadline = (Get-Date).AddSeconds(120)
 do {
   $processorReady = Test-Processor
   $webReady = Test-Web

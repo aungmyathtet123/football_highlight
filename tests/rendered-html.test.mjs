@@ -22,6 +22,15 @@ test("server-renders the Touchline AI upload studio", async () => {
   assert.match(html, /Drop your match footage here/);
   assert.match(html, /Full-video analysis/);
   assert.match(html, /Analyze football video/);
+  assert.match(html, /Adaptive highlight length/);
+  assert.match(html, /Recap request/);
+  assert.match(html, /Create a 2-minute recap covering every goal/);
+  assert.doesNotMatch(html, /Rennes|PSG|Ferran|2-2/i);
+  assert.match(html, /Based on source duration/);
+  assert.match(html, /16:9 original football analysis/);
+  assert.match(html, /cannot guarantee fair use or prevent claims/);
+  assert.match(html, /Broadcast commentary and source music are always removed/);
+  assert.doesNotMatch(html, /60–70s|70–80s|80–90s/);
   assert.match(html, /Logo \/ watermark masking/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Starter Project/i);
 });

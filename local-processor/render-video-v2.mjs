@@ -1,12 +1,20 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MIN_SCENE_SECONDS, splitCaptionChunks } from "./editorial-policy.mjs";
+import { MIN_SCENE_SECONDS, COMPLETE_HIGHLIGHT_MAX_PLAYBACK_RATE } from "./editorial-policy.mjs";
+import { captionAss, sparseCaptionCues, shortReactionCandidates } from "./short-form-policy.mjs";
+import { verifiedPayoffWindow } from "./payoff-evidence.mjs";
+import { trackedPositionExpression } from "./tracked-position.mjs";
+import { tacticalFreezeAnchor } from "./tactical-plan.mjs";
+import { assertIncidentCoverage } from "./incident-coverage.mjs";
+import { usesSafeStaticPresentation } from "./delivery-policy.mjs";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const outputWidth = 1080;
-const outputHeight = 1920;
+export function outputDimensions(settings) {
+  if (settings?.aspectRatio === "16:9") return { width: 1920, height: 1080 };
+  return settings?.aspectRatio === "4:5" ? { width: 1080, height: 1350 } : { width: 1080, height: 1920 };
+}
 
 export function synchronizationProblems(beats) {
   const problems = [];
@@ -30,12 +38,22 @@ export function synchronizationProblems(beats) {
   return problems;
 }
 
-export async function renderVideoV2(sourcePath, outputPath, moments, settings, media, ttsFiles, overlayMasks, tracking) {
-  const selected = fitSelectedMoments(moments, settings.targetDuration, ttsFiles, tracking);
+export async function renderVideoV2(sourcePath, outputPath, moments, settings, media, ttsFiles, overlayMasks, tracking, stadiumAudioPath = null) {
+  const { width: outputWidth, height: outputHeight } = outputDimensions(settings);
+  const narrationOnly = settings.commentary && settings.editStyle === "complete_highlights";
+  const reactionLimit = settings.editStyle === "complete_highlights" ? 1.6 : settings.editStyle === "viral_reel" ? 2.5 : 3;
+  const selected = fitSelectedMoments(shortReactionCandidates(moments, reactionLimit), settings.durationMode === "auto" ? Infinity : settings.targetDuration, ttsFiles, tracking).map((moment) => ({ ...moment, presentationVersion: 1,
+    tacticalFreezeSourceTime: usesSafeStaticPresentation(moment) ? undefined : tacticalFreezeAnchor(moment,trackingForMoment(tracking,moment)) }));
   if (selected.length === 0) throw new Error("No moments were selected for the final edit.");
-  const captionCues = settings.captions ? await makeCaptionCueFiles(selected, outputPath, tracking, ttsFiles) : new Map();
+  assertIncidentCoverage(moments.filter(m=>m.selectedForFinalVideo),selected);
+  const captionCues = settings.captions ? await makeCaptionCueFiles(selected, outputPath, tracking, outputWidth, outputHeight) : new Map();
   const calloutFiles = settings.captions ? await makeCalloutFiles(selected, outputPath) : new Map();
   const args = ["-hide_banner", "-y", "-i", sourcePath];
+  let stadiumAudioInputIndex = null;
+  if (stadiumAudioPath && !narrationOnly) {
+    stadiumAudioInputIndex = inputCount(args);
+    args.push("-i", stadiumAudioPath);
+  }
   const globalNarrationPath = ttsFiles.get("__narration__");
   let globalNarrationInputIndex = null;
   if (globalNarrationPath) {
@@ -51,70 +69,230 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     }
   }
   const annotationInputs = new Map();
-  if (settings.playerHighlight) selected.forEach((moment, index) => {
-    const trackedMoment = tracking?.moments?.[moment.id];
-    const annotation = trackedMoment?.annotation;
-    const markerPath = tracking?.markerPaths?.[annotation?.style];
-    const playerEligible = moment.playerHighlight !== false
+  const tacticalInputs = new Map();
+  const motionTacticalInputs = new Map();
+  const tacticalReport = [];
+  const motionTacticalReport = [];
+  const tacticalDirectory = resolve(dirname(outputPath), "tactical");
+  await mkdir(tacticalDirectory, {recursive:true});
+  if (settings.playerHighlight) for (const [index, moment] of selected.entries()) {
+    if (moment.effect !== "freeze_analysis" || !["ball", "run", "pass", "map"].includes(moment.tacticalDrawing)) continue;
+    const evidence = trackingForMoment(tracking, moment);
+    const rate = playbackRateFor(moment);
+    let freeze = freezePlan(moment, rate, moment.endTime - moment.startTime);
+    const evidencePath = resolve(tacticalDirectory, `${index}.json`);
+    await writeFile(evidencePath, JSON.stringify(evidence || {}));
+    const isMap = moment.tacticalDrawing === "map";
+    const report = JSON.parse(await run(resolveExecutable(process.env.TRACKING_PYTHON || "./.venv-tracking/Scripts/python.exe"), [
+      resolve(projectRoot,isMap ? "local-processor/pitch-map.py" : "local-processor/tactical-overlay.py"), "--source",sourcePath,"--evidence",evidencePath,
+      "--time",String(moment.startTime + freeze.outputTime * rate),
+      ...(isMap ? ["--model",resolveExecutable(process.env.TRACKING_PITCH_MODEL || "./tools/tracking/yolo-football-pitch-detection.pt")] : ["--kind",moment.tacticalDrawing]),
+      "--width",String(outputWidth),"--height",String(outputHeight),
+      ...(settings.aspectRatio === "16:9" ? ["--native-landscape"] : []),
+      "--output",resolve(tacticalDirectory,`${index}.png`),
+    ]));
+    tacticalReport.push({momentId:moment.id,...report});
+    if (report.approved) {
+      if (moment.tacticalDrawing === "pass" && Number.isFinite(Number(report.sourceTime))) {
+        moment.trackingBrief = { ...(moment.trackingBrief || {}), originTime: Number(report.sourceTime) };
+        freeze = freezePlan(moment, rate, moment.endTime - moment.startTime);
+      }
+      const stageInputIndices = Array.isArray(report.stages) && report.stages.length === 3
+        ? report.stages.map(stagePath => {
+            const stageInputIndex = inputCount(args);
+            args.push("-loop","1","-framerate","30","-i",stagePath);
+            return stageInputIndex;
+          })
+        : [];
+      if (stageInputIndices.length) {
+        tacticalInputs.set(index,{stageInputIndices,freeze,isMap:false});
+      } else {
+        const inputIndex = inputCount(args);
+        args.push("-loop","1","-framerate","30","-i",report.path);
+        tacticalInputs.set(index,{inputIndex,freeze,isMap});
+      }
+    }
+    if (settings.editStyle === "complete_highlights" && moment.tacticalDrawing === "pass") {
+      const motionReport = JSON.parse(await run(resolveExecutable(process.env.TRACKING_PYTHON || "./.venv-tracking/Scripts/python.exe"), [
+        resolve(projectRoot,"local-processor/moving-tactical-overlay.py"), "--evidence",evidencePath,
+        "--time",String(Number(report.sourceTime || moment.startTime + freeze.outputTime * rate)),
+        "--width",String(outputWidth),"--height",String(outputHeight),
+        ...(settings.aspectRatio === "16:9" ? ["--native-landscape"] : []),
+        "--output-dir",resolve(tacticalDirectory,`motion-${index}`),
+      ]));
+      motionTacticalReport.push({momentId:moment.id,...motionReport});
+      if (motionReport.approved) {
+        const inputIndex = inputCount(args);
+        args.push("-framerate","30","-start_number","0","-i",motionReport.pattern);
+        motionTacticalInputs.set(index,{
+          inputIndex,
+          sourceStartTime:Number(motionReport.sourceStartTime),
+          duration:Number(motionReport.duration),
+        });
+      } else {
+        // A plausible still frame is not enough to identify a passer and
+        // receiver. If their identities cannot survive the live sequence,
+        // suppress the static network too instead of circling nearby players.
+        tacticalInputs.delete(index);
+      }
+    }
+  }
+  await writeFile(resolve(tacticalDirectory,"report.json"),JSON.stringify(tacticalReport,null,2));
+  await writeFile(resolve(tacticalDirectory,"motion-report.json"),JSON.stringify(motionTacticalReport,null,2));
+  if (settings.playerHighlight) for (const [index, moment] of selected.entries()) {
+    const trackedMoment = trackingForMoment(tracking, moment);
+    const analysisKeyframes = activePlayerOverlayFrames(moment, trackedMoment?.keyframes || []);
+    const annotation = analysisAnnotationForMoment(moment, trackedMoment?.annotation, analysisKeyframes);
+    const reaction = moment.eventType === "celebration" || moment.storyPhase === "reaction" || moment.role === "reaction";
+    const style = ["viral_reel", "complete_highlights"].includes(settings.editStyle) || moment.effect === "freeze_analysis" ? "ring" : "arrow";
+    const markerPath = tracking?.markerPaths?.[style];
+    const verifiedAction = /^(?:phase|native_frame)_verified_(?:goal|action)$/.test(String(moment.trackingDecision || ""));
+    const minimumMarkerConfidence = verifiedAction ? 0.65 : 0.85;
+    const playerEligible = !reaction
+      && moment.playerHighlight !== false
       && annotation?.style !== "none"
-      && Number(annotation?.confidence) >= 0.54
+      && Number(annotation?.confidence) >= minimumMarkerConfidence
       && markerPath;
     if (playerEligible) {
       const inputIndex = inputCount(args);
       args.push("-loop", "1", "-framerate", "30", "-i", markerPath);
-      annotationInputs.set(index, { inputIndex, annotation });
+      const label = verifiedPlayerLabel(moment);
+      let labelPath = null;
+      if (label) {
+        labelPath = resolve(tacticalDirectory, `player-label-${index}.txt`);
+        await writeFile(labelPath, label);
+      }
+      annotationInputs.set(index, { inputIndex, annotation, style, analysisKeyframes, labelPath });
     }
 
-  });
+  }
 
   const filters = [];
-  const useOriginalAudio = !settings.commentary && media.hasAudio && settings.originalAudio !== "muted";
-  const gain = settings.originalAudio === "reduced" ? 0.28 : 1;
-  const masks = settings.logoMasking ? sourceMaskFilters(overlayMasks, media) : [];
+  const useOriginalAudio = !narrationOnly && !stadiumAudioPath && media.hasAudio && settings.originalAudio !== "muted" && (!settings.commentary || settings.editStyle === "viral_reel");
+  const gain = settings.editStyle === "viral_reel" && settings.commentary ? 0.20 : settings.originalAudio === "reduced" ? 0.28 : 1;
+  const masks = settings.logoMasking ? sourceMaskFilters(effectiveOverlayMasks(overlayMasks), media) : [];
   const masking = masks.length ? `${masks.join(",")},` : "";
   const clipDurations = [];
   const clipStarts = [0];
+  const first = selected[0];
+  const firstRate = playbackRateFor(first);
+  const firstPayoff = verifiedPayoffWindow(first, trackingForMoment(tracking, first), firstRate, freezePlan(first, firstRate, first.endTime - first.startTime));
+  // Complete recaps already contain one live action and at most one replay.
+  // Do not prepend a third payoff excerpt from the same incident.
+  const teaserEnabled = !["viral_reel", "complete_highlights"].includes(settings.editStyle) && settings.durationMode === "auto" && !first.isReplay
+    && ["goal", "shot_on_target", "shot_off_target", "save", "big_chance"].includes(first.eventType)
+    && Boolean(firstPayoff);
+  const teaserDuration = teaserEnabled ? Math.min(0.8, firstPayoff.end - firstPayoff.start) : 0;
+  const teaserCaptionPath = resolve(dirname(outputPath), "hook.ass");
+  if (teaserEnabled && settings.captions) await writeFile(teaserCaptionPath, captionAss([{ text: "HOW DID THAT HAPPEN?", start: 0, end: teaserDuration }], 400, outputWidth, outputHeight));
 
   selected.forEach((moment, index) => {
+    const nativeLandscape = settings.aspectRatio === "16:9";
     const sourceLength = Math.max(0.1, moment.endTime - moment.startTime);
-    const playbackRate = clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
+    const playbackRate = playbackRateFor(moment);
+    const freeze = freezePlan(moment, playbackRate, sourceLength);
+    const eventCue = eventCueWindow(moment, playbackRate, freeze, sourceLength);
     const annotationInput = annotationInputs.get(index);
     const cueDuration = 0;
-    const baseOutputLength = sourceLength / playbackRate;
+    const baseOutputLength = sourceLength / playbackRate + freeze.duration;
     const speechDuration = Number(ttsFiles.durations?.get(moment.id) || 0);
-    const outputLength = Math.max(baseOutputLength, speechDuration > 0 ? speechDuration + 0.16 : 0);
+    const narrationDelay = speechDuration > 0 ? clamp(Number(moment.narrationDelay || 0), 0, Math.max(0, baseOutputLength - speechDuration - 0.12)) : 0;
+    if (speechDuration > baseOutputLength + 0.35) throw new Error(`Narration for ${moment.id} is longer than its complete scene. Rewrite it more concisely instead of freezing the ending.`);
+    if (speechDuration + narrationDelay > baseOutputLength + 0.35) throw new Error(`Narration for ${moment.id} is longer than its complete scene. Rewrite it more concisely instead of freezing the ending.`);
+    const outputLength = Math.max(baseOutputLength, speechDuration > 0 ? speechDuration + narrationDelay + 0.16 : 0);
     clipDurations.push(outputLength);
 
     const fallbackX = clamp(moment.recommendedCrop?.[0]?.x ?? 0.5, 0, 1);
-    const trackedMoment = tracking?.moments?.[moment.id];
-    const keyframes = retimeKeyframes(trackedMoment?.keyframes || [], playbackRate);
-    const cameraX = keyframeExpression(keyframes, "cameraX", fallbackX);
-    const cameraY = keyframeExpression(keyframes, "cameraY", 0.5);
+    const trackedMoment = trackingForMoment(tracking, moment);
+    const cameraKeyframes = usesSafeStaticPresentation(moment) ? [] : trackedMoment?.keyframes || [];
+    const keyframes = retimeKeyframes(cameraKeyframes, playbackRate, freeze);
+    // Cropping happens before speed changes and freezes. Its clock must remain
+    // source-local; only overlays/captions use the retimed output clock.
+    // Complete 16:9 analysis keeps the broadcast camera intact. Tracking may
+    // verify subjects and position annotations, but it cannot steer or shake
+    // the rendered camera.
+    const cameraX = nativeLandscape ? "0.5" : keyframeExpression(cameraKeyframes, "cameraX", fallbackX);
+    const cameraY = nativeLandscape ? "0.5" : keyframeExpression(cameraKeyframes, "cameraY", 0.5);
+    // Keep scale fixed for the whole source shot. The crop itself is genuine
+    // full-bleed 9:16; only its horizontal position may change.
+    const sceneZoom = 1;
+    const nativeVerifiedAction = /^native_frame_verified_(?:goal|action)$/.test(String(moment.trackingDecision || ""));
+    const suppressPayoffAccent = usesSafeStaticPresentation(moment) && !nativeVerifiedAction;
+    const verifiedPayoff = suppressPayoffAccent ? null : verifiedPayoffWindow(moment, trackedMoment, playbackRate, freeze);
+    const sourcePayoff = suppressPayoffAccent ? null : (verifiedPayoffWindow(moment, trackedMoment) || nativePayoffWindow(moment, sourceLength));
     const sourcePrefix = `[0:v]trim=start=${moment.startTime.toFixed(3)}:duration=${sourceLength.toFixed(3)},setpts=PTS-STARTPTS,${masking}`;
-    const crop = media.width / media.height >= 9 / 16
-      ? `crop=ih*9/16:ih:x='max(0,min(iw-ow,iw*(${cameraX})-ow/2))':y=0`
-      : `crop=iw:iw*16/9:x=0:y='max(0,min(ih-oh,ih*(${cameraY})-oh/2))'`;
-    filters.push(`${sourcePrefix}${crop},scale=${outputWidth}:${outputHeight}:flags=lanczos,setsar=1${visualEffectFilter(moment, settings.intensity, Boolean(annotationInput))},setpts=PTS/${playbackRate.toFixed(5)},fps=30,settb=AVTB,format=yuv420p[baseclip${index}]`);
+    const targetRatio = outputWidth / outputHeight;
+    const crop = media.width / media.height >= targetRatio
+      ? `crop=ih*${targetRatio.toFixed(8)}/${sceneZoom.toFixed(4)}:ih/${sceneZoom.toFixed(4)}:x='max(0,min(iw-ow,iw*(${cameraX})-ow/2))':y='max(0,min(ih-oh,ih*(${cameraY})-oh/2))'`
+      : `crop=iw/${sceneZoom.toFixed(4)}:iw/${targetRatio.toFixed(8)}/${sceneZoom.toFixed(4)}:x='max(0,min(iw-ow,iw*(${cameraX})-ow/2))':y='max(0,min(ih-oh,ih*(${cameraY})-oh/2))'`;
+    const freezeFilter = freeze.duration > 0
+      ? `,loop=loop=${freeze.frames}:size=1:start=${freeze.frame},setpts=N/(30*TB)`
+      : "";
+    const entryTreatment = sceneEntryTransition(moment, index, outputLength);
+    filters.push(`${sourcePrefix}${crop},scale=${outputWidth}:${outputHeight}:flags=lanczos,setsar=1${visualEffectFilter(moment, settings.intensity, Boolean(annotationInput), sourcePayoff)},setpts=PTS/${playbackRate.toFixed(5)},fps=30${freezeFilter},settb=AVTB${entryTreatment.filter},format=yuv420p[baseclip${index}]`);
+    if (index === 0 && teaserEnabled) {
+      filters[filters.length - 1] = filters[filters.length - 1].replace("[baseclip0]", "[hookSource]");
+      filters.push("[hookSource]split=2[baseclip0][hookCopy]");
+      const hookStart = firstPayoff.start;
+      const hookText = settings.captions ? `,ass=filename='${escapeFilterPath(teaserCaptionPath)}'` : "";
+      filters.push(`[hookCopy]trim=start=${hookStart.toFixed(3)}:duration=${teaserDuration},setpts=PTS-STARTPTS${hookText}[hookVideo]`);
+      filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${teaserDuration},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[hookAudio]`);
+    }
 
+    let tacticalBaseLabel = `playerclip${index}`;
     if (annotationInput) {
-      const { inputIndex, annotation } = annotationInput;
-      const spotlight = annotation.style === "spotlight";
-      const playerAnchorX = spotlight ? 110 : 80;
-      const playerAnchorY = spotlight ? 122 : 176;
-      const playerYField = spotlight ? "playerCenterY" : "playerTopY";
-      const playerCenterX = keyframeExpression(keyframes, "playerCenterX", Number(annotation.x) + playerAnchorX);
-      const playerAnchorPositionY = keyframeExpression(keyframes, playerYField, Number(annotation.y) + playerAnchorY);
-      const playerVisible = visibilityExpression(keyframes, "markerVisible");
-      const cueTime = Math.max(0, Number(annotation.cueTime || 0) / playbackRate);
-      const trackDuration = clamp(Number(annotation.trackDuration || 1.25) / playbackRate, 0.70, 2.20);
-      const cueEnd = Math.min(baseOutputLength, cueTime + trackDuration);
+      const { inputIndex, annotation, style, analysisKeyframes, labelPath } = annotationInput;
+      const ring = style === "ring";
+      const playerAnchorX = ring ? 160 : 80;
+      const playerAnchorY = ring ? 160 : 176;
+      const playerYField = ring ? "playerCenterY" : "playerTopY";
+      const overlayKeyframes = retimeKeyframes(analysisKeyframes, playbackRate, freeze);
+      const playerCenterX = keyframeExpression(overlayKeyframes, "playerCenterX", Number(annotation.x) + playerAnchorX);
+      const playerAnchorPositionY = keyframeExpression(overlayKeyframes, playerYField, Number(annotation.y) + playerAnchorY);
+      const playerVisible = visibilityExpression(overlayKeyframes, "analysisMarkerVisible");
+      const visibleWindow = analysisOverlayWindow(overlayKeyframes, baseOutputLength);
+      const cueTime = visibleWindow.start;
+      const cueEnd = visibleWindow.end;
       filters.push(`[${inputIndex}:v]format=rgba[playerAsset${index}]`);
       filters.push(`[baseclip${index}][playerAsset${index}]overlay=x='(${playerCenterX})-${playerAnchorX}':y='(${playerAnchorPositionY})-${playerAnchorY}':enable='between(t,${cueTime.toFixed(3)},${cueEnd.toFixed(3)})*${playerVisible}':eval=frame:eof_action=repeat:shortest=1[playerclip${index}]`);
+      if (labelPath) {
+        const playerFont = escapeFilterPath(resolveSetting(process.env.PLAYER_FONT_PATH || "C:/Windows/Fonts/arialbd.ttf"));
+        filters.push(`[playerclip${index}]drawtext=fontfile='${playerFont}':textfile='${escapeFilterPath(labelPath)}':fontcolor=white:fontsize=42:borderw=5:bordercolor=black@0.92:box=1:boxcolor=black@0.48:boxborderw=12:x='max(12,min(w-text_w-12,(${playerCenterX})-text_w/2))':y='max(12,(${playerAnchorPositionY})-${playerAnchorY}-66)':enable='between(t,${cueTime.toFixed(3)},${cueEnd.toFixed(3)})*${playerVisible}'[namedplayerclip${index}]`);
+        tacticalBaseLabel = `namedplayerclip${index}`;
+      }
     } else {
       filters.push(`[baseclip${index}]null[playerclip${index}]`);
     }
+    if (motionTacticalInputs.has(index)) {
+      const motion = motionTacticalInputs.get(index);
+      const motionStart = Math.max(0, (motion.sourceStartTime - moment.startTime) / playbackRate);
+      const motionDuration = Math.max(.1, motion.duration / playbackRate);
+      const fadeOutStart = Math.max(.01, motionDuration - .12);
+      filters.push(`[${motion.inputIndex}:v]format=rgba,fade=t=in:st=0:d=0.12:alpha=1,fade=t=out:st=${fadeOutStart.toFixed(3)}:d=0.12:alpha=1,setpts=PTS/${playbackRate.toFixed(5)}+${motionStart.toFixed(3)}/TB[motionTacticalAsset${index}]`);
+      filters.push(`[${tacticalBaseLabel}][motionTacticalAsset${index}]overlay=0:0:eof_action=pass:shortest=0[motionclip${index}]`);
+      tacticalBaseLabel = `motionclip${index}`;
+    }
 
-    filters.push(`[playerclip${index}]null[clip${index}]`);
+    if (tacticalInputs.has(index)) {
+      const tactical = tacticalInputs.get(index);
+      const begin = tactical.freeze.outputTime, end = begin + tactical.freeze.duration;
+      if (tactical.stageInputIndices?.length === 3) {
+        const stageBoundaries = [begin, begin + tactical.freeze.duration * .28, begin + tactical.freeze.duration * .58, end];
+        let tacticalBase = tacticalBaseLabel;
+        tactical.stageInputIndices.forEach((inputIndex, stageIndex) => {
+          const asset = `tacticalAsset${index}_${stageIndex}`;
+          const output = `tacticalStage${index}_${stageIndex}`;
+          filters.push(`[${inputIndex}:v]format=rgba[${asset}]`);
+          filters.push(`[${tacticalBase}][${asset}]overlay=0:0:enable='between(t,${stageBoundaries[stageIndex].toFixed(3)},${stageBoundaries[stageIndex + 1].toFixed(3)})':eof_action=repeat:shortest=1[${output}]`);
+          tacticalBase = output;
+        });
+        filters.push(`[${tacticalBase}]null[clip${index}]`);
+      } else {
+        filters.push(`[${tactical.inputIndex}:v]${tactical.isMap ? "scale=720:-2," : ""}format=rgba[tacticalAsset${index}]`);
+        const mapY = outputHeight >= 1350 ? 180 : 90;
+        filters.push(`[${tacticalBaseLabel}][tacticalAsset${index}]overlay=${tactical.isMap ? `(W-w)/2:${mapY}` : "0:0"}:enable='between(t,${begin.toFixed(3)},${end.toFixed(3)})':shortest=1[clip${index}]`);
+      }
+    } else filters.push(`[${tacticalBaseLabel}]null[clip${index}]`);
 
     const extensionDuration = Math.max(0, outputLength - baseOutputLength);
     let captionLabel = `clip${index}`;
@@ -123,24 +301,36 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
       captionLabel = `timedclip${index}`;
     }
     const cues = captionCues.get(moment.id) || [];
+    if (cues[0]?.assPath) {
+      filters.push(`[${captionLabel}]ass=filename='${escapeFilterPath(cues[0].assPath)}'[sparseCaption${index}]`);
+      captionLabel = `sparseCaption${index}`;
+    }
     for (const [cueIndex, cue] of cues.entries()) {
+      if (cue.assPath) continue;
       const nextLabel = `caption${index}_${cueIndex}`;
       const captionFont = escapeFilterPath(resolveSetting(process.env.CAPTION_FONT_PATH || "C:/Windows/Fonts/arialbd.ttf"));
-      const color = cue.highlight ? "0x62D8FF" : "white";
-      filters.push(`[${captionLabel}]drawtext=fontfile='${captionFont}':textfile='${escapeFilterPath(cue.path)}':fontcolor=${color}:fontsize=${cue.fontSize}:borderw=7:bordercolor=black@0.92:shadowx=3:shadowy=4:shadowcolor=black@0.65:x=(w-text_w)/2:y=h*0.74:enable='between(t,${cue.start.toFixed(3)},${cue.end.toFixed(3)})'[${nextLabel}]`);
+      const color = "white";
+      const start = cue.start.toFixed(3);
+      const end = cue.end.toFixed(3);
+      const progress = `min(1,max(0,(t-${start})/0.16))`;
+      const alpha = `if(lt(t,${start}),0,if(lt(t,${start}+0.16),(t-${start})/0.16,if(gt(t,${end}-0.12),max(0,((${end})-t)/0.12),1)))`;
+      filters.push(`[${captionLabel}]drawtext=fontfile='${captionFont}':textfile='${escapeFilterPath(cue.path)}':fontcolor=${color}:fontsize='${cue.fontSize}*(0.92+0.08*${progress})':borderw=7:bordercolor=black@0.92:shadowx=3:shadowy=4:shadowcolor=black@0.65:alpha='${alpha}':x=(w-text_w)/2:y='${cue.y}+18*(1-${progress})':enable='between(t,${start},${end})'[${nextLabel}]`);
       captionLabel = nextLabel;
     }
     const calloutPath = calloutFiles.get(moment.id);
     if (calloutPath) {
       const eventFont = escapeFilterPath(resolveSetting(process.env.EVENT_FONT_PATH || "C:/Windows/Fonts/seguisym.ttf"));
       const color = eventCalloutColor(moment);
-      filters.push(`[${captionLabel}]drawtext=fontfile='${eventFont}':textfile='${escapeFilterPath(calloutPath)}':fontcolor=${color}:fontsize=68:borderw=5:bordercolor=black@0.92:shadowx=3:shadowy=4:shadowcolor=black@0.65:x=(w-text_w)/2:y=260:enable='between(t,0.10,1.05)'[v${index}]`);
+      const calloutStart = eventCue.start.toFixed(3);
+      const calloutEnd = eventCue.end.toFixed(3);
+      const calloutProgress = `min(1,max(0,(t-${calloutStart})/0.14))`;
+      filters.push(`[${captionLabel}]drawtext=fontfile='${eventFont}':textfile='${escapeFilterPath(calloutPath)}':fontcolor=${color}:fontsize='68*(0.88+0.12*${calloutProgress})':borderw=5:bordercolor=black@0.92:shadowx=3:shadowy=4:shadowcolor=black@0.65:alpha='min(1,max(0,(t-${calloutStart})/0.12))*min(1,max(0,((${calloutEnd})-t)/0.12))':x=(w-text_w)/2:y='250+16*(1-${calloutProgress})':enable='between(t,${calloutStart},${calloutEnd})'[v${index}]`);
     } else {
       filters.push(`[${captionLabel}]null[v${index}]`);
     }
     const speechIndex = ttsInputs.get(moment.id);
     if (speechIndex !== undefined) {
-      filters.push(`[${speechIndex}:a]aresample=48000,apad,atrim=duration=${outputLength.toFixed(3)},volume=1,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[speech${index}]`);
+      filters.push(`[${speechIndex}:a]aresample=48000,volume=1,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,adelay=${delayValue(narrationDelay)},apad,atrim=duration=${outputLength.toFixed(3)}[speech${index}]`);
       if (useOriginalAudio) {
         filters.push(`[0:a]atrim=start=${moment.startTime.toFixed(3)}:duration=${sourceLength.toFixed(3)},asetpts=PTS-STARTPTS,aresample=48000,atempo=${playbackRate.toFixed(5)},volume=${gain.toFixed(2)},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,adelay=${delayValue(cueDuration)},apad,atrim=duration=${outputLength.toFixed(3)}[delayedBase${index}]`);
         filters.push(`[delayedBase${index}][speech${index}]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[abase${index}]`);
@@ -152,7 +342,9 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     } else {
       filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${outputLength.toFixed(3)},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[abase${index}]`);
     }
-    const soundEffect = soundEffectSource(moment, index, outputLength);
+    const outcomeEvent = ["goal", "shot_on_target", "shot_off_target", "save", "big_chance"].includes(moment.eventType);
+    const verifiedOutcomeCue = Boolean(verifiedPayoff || nativeVerifiedAction);
+    const soundEffect = outcomeEvent && !verifiedOutcomeCue ? null : soundEffectSource(moment, index, outputLength, verifiedPayoff?.start ?? eventCue.start);
     if (soundEffect) {
       filters.push(soundEffect);
       filters.push(`[abase${index}][sfx${index}]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.96[a${index}]`);
@@ -170,20 +362,13 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     let audioLabel = "a0";
     let accumulated = clipDurations[0];
     for (let index = 1; index < selected.length; index += 1) {
-      const requestedTransition = String(selected[index].transitionIn || "cut");
-      const spokenBoundary = Boolean(selected[index - 1].commentary || selected[index].commentary);
-      if (requestedTransition === "cut" || spokenBoundary) {
-        clipStarts[index] = accumulated;
-        filters.push(`[${videoLabel}][${audioLabel}][v${index}][a${index}]concat=n=2:v=1:a=1[vx${index}][ax${index}]`);
-        accumulated += clipDurations[index];
-      } else {
-        const transition = transitionFilter(selected[index], clipDurations[index - 1], clipDurations[index]);
-        const offset = Math.max(0, accumulated - transition.duration);
-        clipStarts[index] = offset;
-        filters.push(`[${videoLabel}][v${index}]xfade=transition=${transition.name}:duration=${transition.duration.toFixed(3)}:offset=${offset.toFixed(3)}[vx${index}]`);
-        filters.push(`[${audioLabel}][a${index}]acrossfade=d=${transition.duration.toFixed(3)}:c1=tri:c2=tri[ax${index}]`);
-        accumulated += clipDurations[index] - transition.duration;
-      }
+      // Complete the current football action before revealing the next source
+      // shot. Cross-zoom/whip/fade overlaps make the next camera angle and
+      // scale appear before the previous payoff has finished. Scene-local
+      // effects remain available, but edit boundaries are frame-exact cuts.
+      clipStarts[index] = accumulated;
+      filters.push(`[${videoLabel}][${audioLabel}][v${index}][a${index}]concat=n=2:v=1:a=1[vx${index}][ax${index}]`);
+      accumulated += clipDurations[index];
       videoLabel = `vx${index}`;
       audioLabel = `ax${index}`;
     }
@@ -191,7 +376,9 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     filters.push(`[${videoLabel}]null[outvBase]`);
     filters.push(`[${audioLabel}]anull[outaUnpadded]`);
   }
-  const requestedDuration = Math.max(timelineDuration, Number(settings.targetDuration || timelineDuration));
+  const requestedDuration = settings.editStyle === "complete_highlights" || settings.durationMode === "auto"
+    ? timelineDuration
+    : Math.max(timelineDuration, Number(settings.targetDuration || timelineDuration));
   const endingPad = Math.max(0, requestedDuration - timelineDuration);
   if (endingPad > 0.01) {
     filters.push(`[outvBase]tpad=stop_mode=clone:stop_duration=${endingPad.toFixed(3)},trim=duration=${requestedDuration.toFixed(3)}[outv]`);
@@ -201,24 +388,53 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     filters.push("[outvBase]null[outv]");
     filters.push("[outaUnpadded]anull[outaBase]");
   }
+  let finalAudioBase = "outaBase";
+  if (stadiumAudioInputIndex !== null) {
+    filters.push(`[${stadiumAudioInputIndex}:a]aresample=48000,volume=0.30,apad,atrim=duration=${timelineDuration.toFixed(3)},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[stadiumBed]`);
+    filters.push("[outaBase][stadiumBed]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.96[outaWithStadium]");
+    finalAudioBase = "outaWithStadium";
+  }
+  if (settings.editStyle === "complete_highlights" && settings.commentary) {
+    // A fully synthetic, low-level pulse/texture bed avoids importing music
+    // with unknown rights. It remains deliberately quiet beneath narration.
+    filters.push(`aevalsrc=exprs='0.020*sin(2*PI*55*t)*exp(-8*mod(t\\,2))+0.010*sin(2*PI*82.41*t)*exp(-6*mod(t\\,4))':s=48000:d=${timelineDuration.toFixed(3)},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[analysisPulse]`);
+    filters.push(`anoisesrc=color=pink:amplitude=0.025:duration=${timelineDuration.toFixed(3)}:sample_rate=48000,highpass=f=70,lowpass=f=700,volume=0.035,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[analysisTexture]`);
+    filters.push(`[${finalAudioBase}][analysisPulse][analysisTexture]amix=inputs=3:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.92[outaWithAnalysisBed]`);
+    finalAudioBase = "outaWithAnalysisBed";
+  }
   if (globalNarrationInputIndex !== null) {
     const narrationDuration = Number(ttsFiles.narrationDuration || timelineDuration);
-    const tempo = clamp(narrationDuration / Math.max(0.1, timelineDuration), 0.82, 1.18);
+    // Preserve the energetic TTS performance. Script generation is responsible
+    // for filling the locked timeline; rendering permits only subtle correction.
+    const tempo = clamp(narrationDuration / Math.max(0.1, timelineDuration), 0.94, 1.10);
     filters.push(`[${globalNarrationInputIndex}:a]aresample=48000,atempo=${tempo.toFixed(5)},apad,atrim=duration=${timelineDuration.toFixed(3)},volume=1,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[narration]`);
-    filters.push("[outaBase][narration]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.96[outa]");
+    filters.push(`[${finalAudioBase}][narration]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.96[outa]`);
   } else {
-    filters.push("[outaBase]anull[outa]");
+    filters.push(`[${finalAudioBase}]anull[outa]`);
   }
 
-  const synchronization = selected.map((moment, index) => ({
+  if (teaserEnabled) {
+    for (let index = 0; index < filters.length; index += 1) {
+      filters[index] = filters[index].replaceAll("[outv]", "[storyVideo]").replaceAll("[outa]", "[storyAudio]");
+    }
+    filters.push("[hookVideo][hookAudio][storyVideo][storyAudio]concat=n=2:v=1:a=1[outv][outa]");
+    timelineDuration += teaserDuration;
+  }
+  const synchronization = globalNarrationPath ? [{
+    beatId: "__narration__",
+    momentId: "__continuous_master__",
+    narration: ttsFiles.narrationScript || "Continuous narration",
+    visualStart: Number(teaserDuration.toFixed(3)),
+    visualDuration: Number(timelineDuration.toFixed(3)),
+    speechDuration: Number(timelineDuration.toFixed(3)),
+  }] : selected.map((moment, index) => ({
     beatId: moment.beatId || null,
     momentId: moment.id,
     narration: moment.commentary || null,
-    visualStart: Number((clipStarts[index] || 0).toFixed(3)),
+    visualStart: Number(((clipStarts[index] || 0) + teaserDuration).toFixed(3)),
     visualDuration: Number(clipDurations[index].toFixed(3)),
-    speechDuration: Number(Number(ttsFiles.durations?.get(moment.id) || 0).toFixed(3)),
-  }));
-  const syncProblems = settings.commentary ? synchronizationProblems(synchronization) : [];
+    speechDuration: Number((Number(ttsFiles.durations?.get(moment.id) || 0) + Number(moment.narrationDelay || 0)).toFixed(3)),
+  }));  const syncProblems = settings.commentary ? synchronizationProblems(synchronization) : [];
   if (syncProblems.length) throw new Error(`Narration/visual synchronization validation failed: ${syncProblems.join(", ")}`);
   await writeFile(resolve(dirname(outputPath), "synchronization.json"), JSON.stringify({
     version: 1,
@@ -227,17 +443,24 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
   }, null, 2));
   const filterScriptPath = resolve(dirname(outputPath), "filtergraph-v2.txt");
   await writeFile(filterScriptPath, filters.join(";\n"));
+  const premixPath = resolve(dirname(outputPath), "premix.mp4");
   args.push(
     "-/filter_complex", filterScriptPath, "-map", "[outv]", "-map", "[outa]",
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-    "-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart", outputPath,
+    "-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart", premixPath,
   );
   await run(resolveExecutable(process.env.FFMPEG_PATH || "ffmpeg"), args);
-  return { timelineDuration, synchronization };
+  const loudness = await normalizeFinishedAudio(premixPath, outputPath);
+  return { timelineDuration, synchronization, teaserDuration, loudness };
 }
 
 function inputCount(args) {
   return args.filter((item) => item === "-i").length;
+}
+
+function trackingForMoment(tracking, moment) {
+  const key = String(moment?.trackingSourceId || moment?.id || "");
+  return tracking?.moments?.[key] || tracking?.moments?.[moment?.id];
 }
 
 function delayValue(seconds) {
@@ -247,12 +470,14 @@ function delayValue(seconds) {
 
 function fitSelectedMoments(moments, targetDuration, ttsFiles, tracking) {
   const ordered = moments
+    .map(ensureMinimumSelectedDuration)
     .filter((item) => item.selectedForFinalVideo && sceneOutputDuration(item) >= minimumSceneSeconds(item))
     .sort((a, b) => Number(a.editOrder ?? Number.MAX_SAFE_INTEGER) - Number(b.editOrder ?? Number.MAX_SAFE_INTEGER) || a.startTime - b.startTime);
   const estimatedDuration = (moment) => {
-    const playbackRate = clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
-    const sourceDuration = (moment.endTime - moment.startTime) / playbackRate;
-    const annotation = tracking?.moments?.[moment.id]?.annotation;
+    const playbackRate = playbackRateFor(moment);
+    const sourceLength = moment.endTime - moment.startTime;
+    const sourceDuration = sourceLength / playbackRate + freezePlan(moment, playbackRate, sourceLength).duration;
+    const annotation = trackingForMoment(tracking, moment)?.annotation;
     const cueDuration = annotation?.style !== "none" ? clamp(Number(annotation?.duration), 0.45, 0.75) : 0;
     const speechDuration = Number(ttsFiles.durations?.get(moment.id) || 0);
     return Math.max(sourceDuration + cueDuration, speechDuration > 0 ? speechDuration + 0.16 : 0);
@@ -269,45 +494,257 @@ function fitSelectedMoments(moments, targetDuration, ttsFiles, tracking) {
   return ordered.flatMap((moment) => chosen.has(moment.id) ? [chosen.get(moment.id)] : []);
 }
 
+function ensureMinimumSelectedDuration(moment) {
+  if (!moment.selectedForFinalVideo) return moment;
+  const minimum = minimumSceneSeconds(moment);
+  if (sceneOutputDuration(moment) >= minimum) return moment;
+  const sourceLength = Number(moment.endTime) - Number(moment.startTime);
+  const decisive = ["goal", "disallowed_goal", "save", "shot_on_target", "shot_off_target", "big_chance"].includes(moment.eventType);
+  if (!(sourceLength > 0) || !decisive) return moment;
+  const freezeDuration = moment.effect === "freeze_analysis"
+    ? clamp(Number(moment.freezeDuration || 0.65), 0.4, 1) : 0;
+  const playbackRate = clamp(sourceLength / Math.max(0.1, minimum - freezeDuration), 0.72, playbackRateUpper(moment));
+  return { ...moment, playbackRate: Math.min(Number(moment.playbackRate || 1), playbackRate) };
+}
 function sceneOutputDuration(moment) {
-  return (moment.endTime - moment.startTime) / clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
+  const playbackRate = playbackRateFor(moment);
+  const sourceLength = moment.endTime - moment.startTime;
+  return sourceLength / playbackRate + freezePlan(moment, playbackRate, sourceLength).duration;
 }
 
-function minimumSceneSeconds(moment) {
-  const reactionOnly = moment.eventType === "celebration" || moment.storyPhase === "reaction" || moment.role === "reaction";
-  return reactionOnly ? 2 : MIN_SCENE_SECONDS;
+function minimumSceneSeconds() {
+  return MIN_SCENE_SECONDS;
 }
-function retimeKeyframes(keyframes, playbackRate) {
-  return keyframes.map((frame) => ({ ...frame, time: Number(frame.time) / playbackRate }));
+function playbackRateUpper(moment) {
+  return moment?.completeActionCompressed ? COMPLETE_HIGHLIGHT_MAX_PLAYBACK_RATE : 1.18;
 }
-
-function visualEffectFilter(moment, intensity, annotationActive = false) {
-  const allowed = new Set(["clean", "dramatic", "goal_gold", "replay_blue"]);
-  const grade = allowed.has(moment.colorGrade)
-    ? moment.colorGrade
-    : moment.isReplay || moment.effect === "replay_treatment"
-      ? "replay_blue"
-      : moment.eventType === "goal"
-        ? "goal_gold"
-        : moment.role === "hook"
-          ? "dramatic"
-          : "clean";
-  const gradeFilters = {
-    clean: ["eq=saturation=1.07:contrast=1.055:brightness=0.004:gamma=1.01", "unsharp=5:5:0.20:5:5:0"],
-    dramatic: ["eq=saturation=1.06:contrast=1.12:brightness=-0.012:gamma=0.98", "vignette=PI/9"],
-    goal_gold: ["eq=saturation=1.13:contrast=1.09:brightness=0.014:gamma=1.02", "colorbalance=rs=0.045:gs=0.018:bs=-0.025", "unsharp=5:5:0.30:5:5:0"],
-    replay_blue: ["eq=saturation=0.86:contrast=1.11:brightness=-0.014:gamma=0.98", "colorbalance=bs=0.040:bm=0.015"],
+function playbackRateFor(moment) {
+  return clamp(Number(moment?.playbackRate || 1), 0.72, playbackRateUpper(moment));
+}
+function freezePlan(moment, playbackRate, sourceLength) {
+  if (moment.effect !== "freeze_analysis") return { duration: 0, outputTime: 0, frames: 0, frame: 0 };
+  const duration = clamp(Number(moment.freezeDuration || 0.65), 0.4, 1);
+  const field = moment.freezeAtPhase === "origin" ? "originTime" : moment.freezeAtPhase === "payoff" ? "payoffStartTime" : "contactTime";
+  const absolute = Number(moment.tacticalFreezeSourceTime ?? moment.trackingBrief?.[field]);
+  const fallback = moment.freezeAtPhase === "payoff" ? sourceLength * 0.72 : sourceLength * 0.38;
+  const sourceTime = clamp(Number.isFinite(absolute) ? absolute - moment.startTime : fallback, 0.2, Math.max(0.2, sourceLength - 0.2));
+  const outputTime = sourceTime / playbackRate;
+  return {
+    duration,
+    outputTime,
+    frames: Math.max(1, Math.round(duration * 30)),
+    frame: Math.max(0, Math.round(outputTime * 30)),
   };
-  const filters = [...gradeFilters[grade]];
+}
+
+function eventCueWindow(moment, playbackRate, freeze, sourceLength) {
+  const field = moment.eventType === "goal" || moment.eventCallout === "goal"
+    ? "payoffStartTime"
+    : ["shot_on_target", "shot_off_target", "save", "big_chance"].includes(String(moment.eventType))
+      || ["shot", "save", "close"].includes(String(moment.eventCallout))
+      ? "payoffStartTime"
+    : ["shot", "save", "foul", "card"].includes(String(moment.eventCallout))
+      ? "contactTime"
+      : "annotationStartTime";
+  const absolute = Number(moment.trackingBrief?.[field]);
+  const fallbackRatio = field === "payoffStartTime" ? 0.72 : field === "contactTime" ? 0.38 : 0.12;
+  const sourceTime = clamp(Number.isFinite(absolute) ? absolute - moment.startTime : sourceLength * fallbackRatio, 0.08, Math.max(0.08, sourceLength - 0.08));
+  let outputTime = sourceTime / playbackRate;
+  if (freeze.duration > 0 && outputTime >= freeze.outputTime) outputTime += freeze.duration;
+  const duration = moment.eventCallout === "goal" ? 1.25 : 0.95;
+  return { start: outputTime, end: outputTime + duration };
+}
+
+export function nativePayoffWindow(moment, sourceLength) {
+  if (!/^native_frame_verified_(?:goal|action)$/.test(String(moment?.trackingDecision || ""))) return null;
+  const start = Number(moment?.trackingBrief?.payoffStartTime) - Number(moment?.startTime);
+  const end = Number(moment?.trackingBrief?.payoffEndTime) - Number(moment?.startTime);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+  return {
+    start: clamp(start, 0, sourceLength),
+    end: clamp(end, 0, sourceLength),
+  };
+}
+
+export function activePlayerOverlayFrames(moment, keyframes) {
+  const source = (Array.isArray(keyframes) ? keyframes : []).map((frame) => ({ ...frame }));
+  const reaction = moment?.eventType === "celebration"
+    || moment?.storyPhase === "reaction"
+    || moment?.role === "reaction";
+  if (reaction) return source.map((frame) => ({ ...frame, analysisMarkerVisible: 0 }));
+
+  const scorerOnly = ["goal", "disallowed_goal"].includes(String(moment?.eventType));
+  const eligible = source.map((frame) => {
+    return Number(frame?.markerVisible) >= 0.5
+      && frame?.directBall === true
+      && frame?.ballInFrame === true
+      && frame?.playerInFrame === true
+      && Number(frame?.jointFit) >= 0.5
+      && Number(frame?.subjectConfidence || 0) >= (scorerOnly ? 0.68 : 0.52)
+      && frame?.playerTrackId !== undefined
+      && frame?.playerTrackId !== null
+      && Number.isFinite(Number(frame?.playerCenterX))
+      && Number.isFinite(Number(frame?.playerCenterY));
+  });
+
+  // Detector samples arrive roughly every 0.1-0.2 seconds. Require a short
+  // sustained run so a one-frame false match cannot flash a ring on an
+  // unrelated player; verified possession handoffs remain continuous.
+  const visible = Array(source.length).fill(false);
+  for (let start = 0; start < eligible.length;) {
+    if (!eligible[start]) { start += 1; continue; }
+    const trackId = source[start]?.playerTrackId;
+    let end = start + 1;
+    while (end < eligible.length && eligible[end]
+      && source[end]?.playerTrackId === trackId) end += 1;
+    if (end - start >= 3) {
+      for (let index = start; index < end; index += 1) visible[index] = true;
+    }
+    start = end;
+  }
+  const marked = source.map((frame, index) => ({ ...frame, analysisMarkerVisible: visible[index] ? 1 : 0 }));
+  let previous = null;
+  return marked.map((frame) => {
+    if (Number(frame.analysisMarkerVisible) < 0.5) { previous = null; return frame; }
+    const trackId = frame.playerTrackId;
+    const currentX = Number(frame.playerCenterX);
+    const currentY = Number(frame.playerCenterY);
+    if (!previous || previous.trackId !== trackId || frame.sceneCut || !Number.isFinite(currentX) || !Number.isFinite(currentY)) {
+      previous = { trackId, time: Number(frame.time), x: currentX, y: currentY };
+      return frame;
+    }
+    const elapsed = Math.max(0.02, Number(frame.time) - previous.time);
+    const alpha = clamp(elapsed * 5.5, 0.22, 0.62);
+    const maximumStep = clamp(elapsed * 480, 16, 58);
+    const smoothAxis = (from, to) => {
+      const delta = Math.abs(to - from) < 3 ? 0 : (to - from) * alpha;
+      return from + clamp(delta, -maximumStep, maximumStep);
+    };
+    const x = smoothAxis(previous.x, currentX);
+    const y = smoothAxis(previous.y, currentY);
+    previous = { trackId, time: Number(frame.time), x, y };
+    return { ...frame, playerCenterX: x, playerCenterY: y };
+  });
+}
+
+export function analysisOverlayWindow(keyframes, outputLength = Infinity) {
+  const visible = (Array.isArray(keyframes) ? keyframes : [])
+    .filter((frame) => Number(frame?.analysisMarkerVisible) >= 0.5 && Number.isFinite(Number(frame?.time)));
+  if (!visible.length) return { start: 0, end: 0 };
+  const start = Math.max(0, Number(visible[0].time));
+  const end = Math.min(Number(outputLength), Math.max(start + 0.1, Number(visible.at(-1).time) + 0.12));
+  return { start, end };
+}
+
+export function analysisAnnotationForMoment(moment, annotation, keyframes) {
+  const visible = (Array.isArray(keyframes) ? keyframes : [])
+    .filter((frame) => Number(frame?.analysisMarkerVisible) >= 0.5);
+  if (!visible.length) return { style: "none", confidence: 0, duration: 0 };
+  const first = visible[0];
+  const confidences = visible.map((frame) => Number(frame?.subjectConfidence || 0)).sort((a, b) => a - b);
+  const confidence = confidences.length ? confidences[Math.floor(confidences.length / 2)] : 0;
+  const supplied = annotation && annotation.style !== "none" ? annotation : {};
+  return {
+    ...supplied,
+    style: "ring",
+    confidence: Math.max(Number(supplied.confidence || 0), confidence),
+    duration: Math.max(0.1, Number(visible.at(-1).time) - Number(first.time)),
+    cueTime: Number(first.time),
+    trackDuration: Math.max(0.1, Number(visible.at(-1).time) - Number(first.time) + 0.12),
+    x: Number.isFinite(Number(supplied.x)) ? Number(supplied.x) : Number(first.playerCenterX) - 160,
+    y: Number.isFinite(Number(supplied.y)) ? Number(supplied.y) : Number(first.playerCenterY) - 160,
+  };
+}
+
+export function verifiedPlayerLabel(moment) {
+  if (!["goal", "disallowed_goal"].includes(String(moment?.eventType))) return "";
+  const name = String(moment?.verifiedIdentity?.scorer || "").replace(/\s+/g, " ").trim();
+  return name.length >= 2 && name.length <= 48 ? name.toLocaleUpperCase("en-US") : "";
+}
+
+function retimeKeyframes(keyframes, playbackRate, freeze = { duration: 0, outputTime: 0 }) {
+  const scaled = keyframes.map((frame) => ({ ...frame, time: Number(frame.time) / playbackRate }));
+  if (!(freeze.duration > 0) || scaled.length === 0) return scaled;
+  const anchor = scaled.reduce((best, frame) => (
+    Math.abs(frame.time - freeze.outputTime) < Math.abs(best.time - freeze.outputTime) ? frame : best
+  ), scaled[0]);
+  const shifted = scaled.map((frame) => ({
+    ...frame,
+    time: frame.time > freeze.outputTime ? frame.time + freeze.duration : frame.time,
+  }));
+  shifted.push(
+    { ...anchor, time: freeze.outputTime },
+    { ...anchor, time: freeze.outputTime + freeze.duration },
+  );
+  return shifted.sort((a, b) => a.time - b.time);
+}
+
+export function editorialGrade(moment) {
+  const replay = moment?.isReplay || moment?.storyPhase === "replay" || moment?.effect === "replay_treatment";
+  if (replay) return "replay_blue";
+  if (moment?.eventType === "goal" && !["reaction", "celebration"].includes(String(moment?.storyPhase))) return "goal_gold";
+  if (moment?.eventType === "celebration" || moment?.storyPhase === "reaction" || moment?.role === "reaction") return "warm";
+  if (["setup", "build_up", "analysis"].includes(String(moment?.role)) || moment?.storyPhase === "build_up") return "cool";
+  if (["action", "evidence", "proof", "turn"].includes(String(moment?.role))) return "dramatic";
+  if (["consequence", "payoff", "conclusion"].includes(String(moment?.role)) || moment?.storyPhase === "payoff") return "warm";
+  const requested = String(moment?.colorGrade || "");
+  return ["cool", "clean", "warm", "dramatic", "goal_gold", "replay_blue"].includes(requested) ? requested : "clean";
+}
+
+export function sceneEntryTransition(moment, index, outputLength) {
+  if (index === 0) return { kind: "cut", duration: 0, filter: "" };
+  const requested = clamp(Number(moment?.transitionDuration || 0.10), 0.06, 0.22);
+  const duration = Math.min(requested, Math.max(0.06, Number(outputLength || 0) / 8));
+  const replay = moment?.isReplay || moment?.storyPhase === "replay" || moment?.effect === "replay_treatment";
+  const goalAction = moment?.eventType === "goal" && moment?.storyPhase !== "reaction";
+  const kind = replay || moment?.transitionIn === "flash" || goalAction ? "white" : "black";
+  return {
+    kind,
+    duration,
+    // This is a scene-local reveal, not an overlap: the preceding football
+    // action always reaches its payoff before this scene begins.
+    filter: `,fade=t=in:st=0:d=${duration.toFixed(3)}:color=${kind}`,
+  };
+}
+
+function visualEffectFilter(moment, intensity, annotationActive = false, sourcePayoff = null) {
+  const replay = moment.isReplay || moment.storyPhase === "replay" || moment.effect === "replay_treatment";
+  const grade = editorialGrade(moment);
+  const filters = naturalEditorialGradeFilters(grade);
   if (intensity === "natural" && !["goal_gold", "replay_blue"].includes(grade)) {
-    filters.splice(0, filters.length, "eq=saturation=1.035:contrast=1.035:brightness=0.002");
+    filters.splice(0, filters.length, "eq=saturation=1.08:contrast=1.07:brightness=0.010:gamma=1.01", "unsharp=5:5:0.20:5:5:0");
+  }
+  // A restrained full-scene exposure shape is present on every included
+  // frame. Event-specific grades remain visibly distinct without destroying
+  // natural team colours or obscuring the football.
+  filters.push("vignette=PI/18");
+  if (sourcePayoff && grade === "goal_gold") {
+    filters.push(`eq=saturation=1.17:contrast=1.11:brightness=0.020:gamma=1.02:enable='between(t,${sourcePayoff.start.toFixed(3)},${sourcePayoff.end.toFixed(3)})'`);
+  } else if (sourcePayoff && ["shot_on_target", "shot_off_target", "save", "big_chance"].includes(String(moment.eventType))) {
+    filters.push(`eq=saturation=1.14:contrast=1.10:brightness=0.012:gamma=1.01:enable='between(t,${sourcePayoff.start.toFixed(3)},${sourcePayoff.end.toFixed(3)})'`);
   }
   if (moment.effect === "punch_zoom" && !annotationActive) {
-    filters.push("scale=1134:2016:flags=lanczos", "crop=1080:1920:x=(iw-ow)/2:y=(ih-oh)/2");
+    // Preserve the validated ball/player crop; a decorative zoom can hide them.
   } else if (moment.effect === "slow_motion") {
     filters.push("unsharp=5:5:0.28:5:5:0");
+  } else if (moment.effect === "freeze_analysis") {
+    const rate = playbackRateFor(moment);
+    const freezeAt = freezePlan(moment, rate, moment.endTime - moment.startTime).outputTime * rate;
+    filters.push(`eq=saturation=0.72:contrast=1.16:brightness=-0.010:gamma=0.99:enable='between(t,${Math.max(0, freezeAt - 0.05).toFixed(3)},${(freezeAt + 0.05).toFixed(3)})'`, "unsharp=5:5:0.30:5:5:0");
   }
   return "," + filters.join(",");
+}
+
+export function naturalEditorialGradeFilters(grade) {
+  const grades = {
+    clean: ["eq=saturation=1.12:contrast=1.09:brightness=0.012:gamma=1.02", "unsharp=5:5:0.23:5:5:0"],
+    cool: ["eq=saturation=1.02:contrast=1.14:brightness=0.004:gamma=1.00", "colorbalance=bs=0.055:bm=0.025:rs=-0.018", "unsharp=5:5:0.24:5:5:0"],
+    warm: ["eq=saturation=1.17:contrast=1.12:brightness=0.016:gamma=1.02", "colorbalance=rs=0.052:rm=0.025:bs=-0.020", "unsharp=5:5:0.24:5:5:0"],
+    dramatic: ["eq=saturation=1.08:contrast=1.21:brightness=-0.006:gamma=0.98", "colorbalance=bs=0.026:bm=0.012:rs=-0.010", "unsharp=5:5:0.30:5:5:0"],
+    goal_gold: ["eq=saturation=1.20:contrast=1.15:brightness=0.020:gamma=1.02", "colorbalance=rs=0.050:rm=0.024:bs=-0.018", "unsharp=5:5:0.32:5:5:0"],
+    replay_blue: ["eq=saturation=0.86:contrast=1.18:brightness=-0.008:gamma=0.98", "colorbalance=bs=0.080:bm=0.038:rs=-0.025", "unsharp=5:5:0.32:5:5:0"],
+  };
+  return [...(grades[grade] || grades.clean)];
 }
 
 function eventCalloutColor(moment) {
@@ -325,19 +762,27 @@ function eventCalloutColor(moment) {
   return colors[moment.eventCallout] || "white";
 }
 
-function soundEffectSource(moment, index, outputLength) {
+function soundEffectSource(moment, index, outputLength, cueTime = 0.12) {
   const duration = outputLength.toFixed(3);
   const effect = String(moment.soundEffect || "none");
+  if (effect === "goal") {
+    const delay = Math.max(0, Math.round(cueTime * 1000));
+    return [
+      `anoisesrc=color=pink:amplitude=0.30:duration=0.82:sample_rate=48000,highpass=f=180,lowpass=f=5200,afade=t=in:st=0:d=0.04,afade=t=out:st=0.30:d=0.52,volume=0.18[goalCrowd${index}]`,
+      `aevalsrc=exprs='0.10*(sin(2*PI*523.25*t)+sin(2*PI*659.25*t)+sin(2*PI*783.99*t))*exp(-3.2*t)':s=48000:d=0.82,aecho=0.8:0.35:35|70:0.16|0.08,volume=0.34[goalTone${index}]`,
+      `[goalCrowd${index}][goalTone${index}]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.88,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,adelay=${delay}|${delay},apad,atrim=duration=${duration}[sfx${index}]`,
+    ].join(";\n");
+  }
   const sources = {
     whoosh: "anoisesrc=color=pink:amplitude=0.35:duration=0.22:sample_rate=48000,highpass=f=550,lowpass=f=4800,afade=t=out:st=0.02:d=0.20,volume=0.20",
     impact: "anoisesrc=color=white:amplitude=0.38:duration=0.12:sample_rate=48000,lowpass=f=1800,afade=t=out:st=0.01:d=0.11,volume=0.24",
-    goal: "sine=frequency=880:duration=0.34:sample_rate=48000,afade=t=out:st=0.10:d=0.24,volume=0.18",
     whistle: "sine=frequency=2100:duration=0.30:sample_rate=48000,afade=t=out:st=0.12:d=0.18,volume=0.16",
     sparkle: "sine=frequency=1450:duration=0.16:sample_rate=48000,afade=t=out:st=0.03:d=0.13,volume=0.13",
   };
   const source = sources[effect];
   if (!source) return null;
-  return `${source},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,adelay=120|120,apad,atrim=duration=${duration}[sfx${index}]`;
+  const delay = Math.max(0, Math.round(cueTime * 1000));
+  return `${source},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,adelay=${delay}|${delay},apad,atrim=duration=${duration}[sfx${index}]`;
 }
 
 function transitionFilter(moment, previousDuration, currentDuration) {
@@ -347,7 +792,7 @@ function transitionFilter(moment, previousDuration, currentDuration) {
   return { name: names[moment.transitionIn] || "fade", duration: Math.max(0.04, duration) };
 }
 
-function captionFontSize(text) {
+export function captionFontSize(text) {
   const widthUnits = [...String(text || "")].reduce((total, character) => {
     if (/\s/.test(character)) return total + 0.30;
     if (/[MW@#%&]/.test(character)) return total + 0.82;
@@ -357,41 +802,33 @@ function captionFontSize(text) {
   }, 0);
   return Math.round(clamp(900 / Math.max(8, widthUnits), 52, 72));
 }
-async function makeCaptionCueFiles(moments, outputPath, tracking, ttsFiles) {
+async function makeCaptionCueFiles(moments, outputPath, tracking, outputWidth, outputHeight) {
   const files = new Map();
   const captionDir = resolve(dirname(outputPath), "captions");
   await mkdir(captionDir, { recursive: true });
   for (const [index, moment] of moments.entries()) {
-    const chunks = splitCaptionChunks(moment.commentary || moment.onScreenText, 3, 18);
-    if (chunks.length === 0) continue;
     const sourceLength = Math.max(0.1, moment.endTime - moment.startTime);
-    const playbackRate = clamp(Number(moment.playbackRate || 1), 0.72, 1.18);
-    const baseOutputLength = sourceLength / playbackRate;
-    const speechDuration = Number(ttsFiles.durations?.get(moment.id) || 0);
-    const outputLength = Math.max(baseOutputLength, speechDuration > 0 ? speechDuration + 0.16 : 0);
-    const weights = chunks.map((chunk) => Math.max(2, chunk.replace(/\s+/g, "").length));
-    const totalWeight = weights.reduce((total, weight) => total + weight, 0);
-    const available = Math.max(0.6, outputLength - 0.16);
-    let cursor = 0.08;
-    const cues = [];
-    for (const [cueIndex, chunk] of chunks.entries()) {
-      const duration = cueIndex === chunks.length - 1
-        ? Math.max(0.18, outputLength - 0.08 - cursor)
-        : Math.max(0.28, available * weights[cueIndex] / totalWeight);
-      const path = resolve(captionDir, index + "-" + cueIndex + ".txt");
-      await writeFile(path, chunk);
-      cues.push({
-        path,
-        start: cursor,
-        end: Math.min(outputLength - 0.04, cursor + duration - 0.001),
-        highlight: cueIndex % 2 === 1 || (moment.role === "hook" && cueIndex === 0),
-        fontSize: captionFontSize(chunk),
-      });
-      cursor += duration;
-    }
-    files.set(moment.id, cues);
+    const playbackRate = playbackRateFor(moment);
+    const freeze = freezePlan(moment, playbackRate, sourceLength);
+    const outputLength = sourceLength / playbackRate + freeze.duration;
+    const payoff = verifiedPayoffWindow(moment, trackingForMoment(tracking, moment), playbackRate, freeze);
+    const cues = sparseCaptionCues(moment, outputLength, payoff);
+    if (!cues.length) continue;
+    const y = moment.tacticalDrawing === "map" ? Math.round(outputHeight * 0.755) : safeCaptionY(trackingForMoment(tracking, moment)?.keyframes || [], outputHeight);
+    const assPath = resolve(captionDir, `${index}.ass`);
+    await writeFile(assPath, captionAss(cues, y, outputWidth, outputHeight));
+    files.set(moment.id, [{ assPath }]);
   }
   return files;
+}
+
+function safeCaptionY(keyframes, outputHeight = 1920) {
+  const subjectY = keyframes
+    .flatMap((frame) => [Number(frame.ballCenterY), Number(frame.playerCenterY)])
+    .filter((value) => Number.isFinite(value) && value >= 0 && value <= outputHeight);
+  if (!subjectY.length) return Math.round(outputHeight * 0.74);
+  const median = [...subjectY].sort((a, b) => a - b)[Math.floor(subjectY.length / 2)];
+  return median > outputHeight * 0.58 ? Math.round(outputHeight * 0.20) : Math.round(outputHeight * 0.74);
 }
 
 async function makeCalloutFiles(moments, outputPath) {
@@ -399,6 +836,7 @@ async function makeCalloutFiles(moments, outputPath) {
   const directory = resolve(dirname(outputPath), "callouts");
   await mkdir(directory, { recursive: true });
   for (const [index, moment] of moments.entries()) {
+    if (moment.presentationVersion === 1) continue; // One caption layer, never stacked event graphics.
     const label = eventCalloutLabel(moment.eventCallout);
     if (!label) continue;
     const path = resolve(directory, `${index}.txt`);
@@ -423,7 +861,25 @@ function eventCalloutLabel(value) {
 }
 
 
-function sourceMaskFilters(masks, media) {
+export function effectiveOverlayMasks(masks) {
+  const detected = Array.isArray(masks) ? masks.filter((mask) => mask && Number(mask.width) > 0 && Number(mask.height) > 0) : [];
+  if (detected.length) return detected;
+  // Creator/channel marks are commonly anchored in this corner. This conservative
+  // fallback keeps logo masking deterministic when the semantic pass misses one;
+  // it is applied only when the user has enabled logoMasking.
+  return [{
+    id: "fallback-top-right-watermark",
+    kind: "watermark",
+    x: 0.875,
+    y: 0.012,
+    width: 0.115,
+    height: 0.145,
+    confidence: 0.7,
+    fallback: true,
+  }];
+}
+
+export function sourceMaskFilters(masks, media) {
   return masks.map((mask) => {
     const left = Math.round(mask.x * media.width);
     const top = Math.round(mask.y * media.height);
@@ -439,27 +895,7 @@ function sourceMaskFilters(masks, media) {
 }
 
 function keyframeExpression(keyframes, field, fallback) {
-  let values = keyframes
-    .map((frame) => ({ time: Number(frame.time), value: Number(frame[field]) }))
-    .filter((frame) => Number.isFinite(frame.time) && Number.isFinite(frame.value))
-    .sort((a, b) => a.time - b.time);
-  let tolerance = field.startsWith("camera") ? 0.003 : 5;
-  values = simplifySeries(values, tolerance);
-  while (values.length > 48) {
-    tolerance *= 1.4;
-    values = simplifySeries(values, tolerance);
-  }
-  if (values.length === 0) return Number(fallback).toFixed(5);
-  if (values.length === 1) return values[0].value.toFixed(5);
-  let expression = values.at(-1).value.toFixed(5);
-  for (let index = values.length - 2; index >= 0; index -= 1) {
-    const current = values[index];
-    const next = values[index + 1];
-    const duration = Math.max(0.001, next.time - current.time);
-    const segment = `${current.value.toFixed(5)}+(${(next.value - current.value).toFixed(5)})*clip((t-${current.time.toFixed(3)})/${duration.toFixed(3)},0,1)`;
-    expression = `if(lt(t,${next.time.toFixed(3)}),${segment},${expression})`;
-  }
-  return expression;
+  return trackedPositionExpression(keyframes, field, fallback);
 }
 
 function visibilityExpression(keyframes, field) {
@@ -474,29 +910,6 @@ function visibilityExpression(keyframes, field) {
     expression = `if(lt(t,${values[index + 1].time.toFixed(3)}),${values[index].value},${expression})`;
   }
   return expression;
-}
-
-function simplifySeries(values, tolerance) {
-  if (values.length <= 2) return values;
-  const first = values[0];
-  const last = values.at(-1);
-  const duration = Math.max(0.001, last.time - first.time);
-  let maximumError = -1;
-  let splitIndex = -1;
-  for (let index = 1; index < values.length - 1; index += 1) {
-    const ratio = (values[index].time - first.time) / duration;
-    const expected = first.value + (last.value - first.value) * ratio;
-    const error = Math.abs(values[index].value - expected);
-    if (error > maximumError) {
-      maximumError = error;
-      splitIndex = index;
-    }
-  }
-  if (maximumError <= tolerance || splitIndex < 1) return [first, last];
-  return [
-    ...simplifySeries(values.slice(0, splitIndex + 1), tolerance).slice(0, -1),
-    ...simplifySeries(values.slice(splitIndex), tolerance),
-  ];
 }
 
 function escapeFilterPath(path) {
@@ -515,7 +928,45 @@ function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, Number.isFinite(value) ? value : minimum));
 }
 
-function run(command, args) {
+export async function normalizeFinishedAudio(premixPath, outputPath) {
+  const executable = resolveExecutable(process.env.FFMPEG_PATH || "ffmpeg");
+  const measure = async (path) => {
+    const diagnostics = await run(executable, ["-hide_banner", "-i", path, "-vn", "-af", "loudnorm=I=-15:TP=-2.0:LRA=9:print_format=json", "-f", "null", "-"], true);
+    const match = diagnostics.match(/\{\s*"input_i"[\s\S]*?\}/);
+    if (!match) throw new Error("Could not measure the finished audio loudness.");
+    return JSON.parse(match[0]);
+  };
+  let result;
+  let loudness;
+  // The premix belongs to this render attempt. Always normalize and promote it;
+  // an older final.mp4 must never satisfy validation for a newly encoded edit.
+  const measured = await measure(premixPath);
+  if (!Number.isFinite(Number(measured.input_i))) {
+    await rename(premixPath, outputPath);
+    return { normalized: false, reason: "silent_mix" };
+  }
+  const filter = `loudnorm=I=-15:TP=-2.0:LRA=9:measured_I=${measured.input_i}:measured_TP=${measured.input_tp}:measured_LRA=${measured.input_lra}:measured_thresh=${measured.input_thresh}:offset=${measured.target_offset}:linear=false`;
+  await run(executable, ["-hide_banner", "-y", "-i", premixPath, "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-af", filter, "-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart", outputPath]);
+  result = await measure(outputPath);
+  loudness = { normalized: true, targetLufs: -15, integratedLufs: Number(result.input_i), truePeakDb: Number(result.input_tp) };
+  // AAC can introduce a small inter-sample overshoot after loudnorm. Correct the
+  // encoded result by the measured amount instead of rejecting an otherwise good
+  // render or re-encoding its video stream.
+  if (loudness.truePeakDb > -1) {
+    const correctionDb = Math.max(0.25, loudness.truePeakDb + 1.25);
+    const correctedPath = `${outputPath}.peak-corrected.mp4`;
+    await run(executable, ["-hide_banner", "-y", "-i", outputPath, "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-af", `volume=-${correctionDb.toFixed(2)}dB`, "-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart", correctedPath]);
+    await rename(correctedPath, outputPath);
+    result = await measure(outputPath);
+    loudness = { normalized: true, targetLufs: -15, integratedLufs: Number(result.input_i), truePeakDb: Number(result.input_tp), peakCorrectionDb: correctionDb };
+  }
+  await writeFile(resolve(dirname(outputPath), "loudness.json"), JSON.stringify(loudness, null, 2));
+  if (loudness.integratedLufs < -17.2 || loudness.integratedLufs > -13.8 || loudness.truePeakDb > -1) throw new Error("The final audio mix failed its measured loudness/peak check.");
+  await unlink(premixPath);
+  return loudness;
+}
+
+function run(command, args, captureDiagnostics = false) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, { cwd: projectRoot, windowsHide: true, shell: false });
     let stdout = "";
@@ -527,7 +978,7 @@ function run(command, args) {
     });
     child.on("error", reject);
     child.on("close", (code) => code === 0
-      ? resolvePromise(stdout)
+      ? resolvePromise(captureDiagnostics ? stderr : stdout)
       : reject(new Error(`${basename(command)} exited with code ${code}: ${stderr.slice(-2400)}`)));
   });
 }

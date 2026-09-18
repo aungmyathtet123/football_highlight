@@ -18,16 +18,16 @@ export const metadata: Metadata = {
     default: "Touchline AI · Football video analysis editor",
     template: "%s · Touchline AI",
   },
-  description: "Turn full football matches into concise vertical analysis videos with intelligent moment selection, reframing and commentary.",
+  description: "Turn football footage into concise native-frame analysis videos with evidence-led selection, original commentary and tactical graphics.",
   openGraph: {
     title: "Touchline AI",
-    description: "Turn full matches into vertical football analysis.",
+    description: "Turn football footage into native-frame tactical analysis.",
     images: [{ url: "/og.png", width: 1734, height: 907, alt: "Touchline AI football analysis editor" }],
   },
   twitter: {
     card: "summary_large_image",
     title: "Touchline AI",
-    description: "Turn full matches into vertical football analysis.",
+    description: "Turn football footage into native-frame tactical analysis.",
     images: ["/og.png"],
   },
   icons: {

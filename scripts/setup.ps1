@@ -3,7 +3,8 @@ param(
   [switch]$ConfigureCloud,
   [switch]$SkipNpm,
   [switch]$SkipFfmpeg,
-  [switch]$SkipTracking
+  [switch]$SkipTracking,
+  [switch]$SkipSoccerNet
 )
 
 Set-StrictMode -Version Latest
@@ -153,6 +154,10 @@ try {
     & (Join-Path $PSScriptRoot "setup-tracking.ps1")
     if ($LASTEXITCODE -ne 0) { throw "Local tracking setup failed." }
   }
+  if (-not $SkipSoccerNet) {
+    & (Join-Path $PSScriptRoot "setup-soccernet.ps1")
+    if ($LASTEXITCODE -ne 0) { throw "SoccerNet CALF setup failed." }
+  }
   if ($ConfigureCloud) { Configure-GoogleCloud }
 
   & (Join-Path $PSScriptRoot "verify-setup.ps1") -RequireCloud:$ConfigureCloud
@@ -162,7 +167,7 @@ try {
   Write-Output "Setup complete."
   if (-not $ConfigureCloud) {
     Write-Output "Cloud credentials were not configured. Edit .env, then run:"
-    Write-Output "  powershell -ExecutionPolicy Bypass -File scripts/setup.ps1 -SkipNpm -SkipFfmpeg -SkipTracking -ConfigureCloud"
+    Write-Output "  powershell -ExecutionPolicy Bypass -File scripts/setup.ps1 -SkipNpm -SkipFfmpeg -SkipTracking -SkipSoccerNet -ConfigureCloud"
   }
   Write-Output "Start the application with: npm run local:start"
   Write-Output "Then open: http://localhost:3000"

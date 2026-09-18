@@ -45,6 +45,8 @@ yarn-error.log*
 /tools/ffmpeg/
 /tools/ffmpeg-download/
 /.venv-tracking/
+/.venv-soccernet/
+/tools/external/soccernet-sn-spotting/
 /tools/tracking/*.pt
 
 # generated local processor artifacts

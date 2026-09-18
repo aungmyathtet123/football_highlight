@@ -15,6 +15,8 @@ export type JobStage =
 
 export type EventType =
   | "goal"
+  | "disallowed_goal"
+  | "offside"
   | "penalty"
   | "assist"
   | "big_chance"
@@ -67,9 +69,15 @@ export type FootballMoment = {
   role?: string;
   transitionIn?: "cut" | "crossfade" | "crosszoom" | "whip" | "flash";
   playerHighlight?: boolean;
+  tacticalDrawing?: "none" | "ball" | "run" | "pass" | "map";
   transitionDuration?: number;
-  effect?: "none" | "punch_zoom" | "slow_motion" | "speed_up" | "replay_treatment";
+  effect?: "none" | "punch_zoom" | "slow_motion" | "speed_up" | "replay_treatment" | "freeze_analysis";
   playbackRate?: number;
+  freezeAtPhase?: "origin" | "contact" | "payoff";
+  freezeDuration?: number;
+  narrationDelay?: number;
+  suppressPayoffCaption?: boolean;
+  identityLabel?: string;
   analysisPurpose?: string;
   onScreenText?: string;
   eventCallout?: "none" | "amazing" | "goal" | "shot" | "save" | "foul" | "card" | "close" | "pass" | "celebration";
@@ -87,8 +95,13 @@ export type FootballMoment = {
 };
 
 export type EditSettings = {
+  editStyle?: "complete_highlights" | "viral_reel" | "tactical_analysis";
+  durationMode?: "auto" | "requested";
+  recapBrief?: string;
   targetDuration: 60 | 65 | 70 | 80 | number;
-  aspectRatio: "9:16";
+  durationMin?: number;
+  durationMax?: number;
+  aspectRatio: "4:5" | "9:16" | "16:9";
   commentary: boolean;
   playerHighlight: boolean;
   captions: boolean;

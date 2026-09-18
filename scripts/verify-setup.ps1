@@ -35,6 +35,17 @@ function Fail([string]$message) {
   Write-Output "[MISSING] $message"
 }
 
+function Get-Sha256([string]$path) {
+  $stream = [IO.File]::OpenRead($path)
+  $algorithm = [Security.Cryptography.SHA256]::Create()
+  try {
+    return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace("-", "")
+  } finally {
+    $algorithm.Dispose()
+    $stream.Dispose()
+  }
+}
+
 $values = Read-ProjectEnv
 $node = Get-Command node.exe -ErrorAction SilentlyContinue
 if ($node) {
@@ -76,7 +87,7 @@ if (Test-Path -LiteralPath $ffprobe) {
 $pythonSetting = if ($values.ContainsKey("TRACKING_PYTHON")) { $values["TRACKING_PYTHON"] } else { "./.venv-tracking/Scripts/python.exe" }
 $trackingPython = Resolve-ProjectPath $pythonSetting
 if (Test-Path -LiteralPath $trackingPython) {
-  & $trackingPython -c "import cv2, torch, ultralytics" *> $null
+  & $trackingPython -c "import cv2, torch, ultralytics, mplsoccer" *> $null
   if ($LASTEXITCODE -eq 0) {
     Pass "Python tracking environment"
   } else {
@@ -86,6 +97,21 @@ if (Test-Path -LiteralPath $trackingPython) {
   Fail "Tracking Python is missing at $trackingPython"
 }
 
+$soccerNetPythonSetting = if ($values.ContainsKey("SOCCERNET_CALF_PYTHON")) { $values["SOCCERNET_CALF_PYTHON"] } else { "./.venv-soccernet/Scripts/python.exe" }
+$soccerNetPython = Resolve-ProjectPath $soccerNetPythonSetting
+$soccerNetRepoSetting = if ($values.ContainsKey("SOCCERNET_CALF_REPO")) { $values["SOCCERNET_CALF_REPO"] } else { "./tools/external/soccernet-sn-spotting" }
+$soccerNetRepo = Resolve-ProjectPath $soccerNetRepoSetting
+$soccerNetModel = Join-Path $soccerNetRepo "Benchmarks/CALF/models/CALF_benchmark/model.pth.tar"
+if ((Test-Path -LiteralPath $soccerNetPython) -and (Test-Path -LiteralPath $soccerNetModel)) {
+  $previousTfLogLevel = $env:TF_CPP_MIN_LOG_LEVEL
+  $env:TF_CPP_MIN_LOG_LEVEL = "3"
+  & $soccerNetPython -c "import tensorflow, torch, SoccerNet" 2>$null
+  $soccerNetImportExitCode = $LASTEXITCODE
+  $env:TF_CPP_MIN_LOG_LEVEL = $previousTfLogLevel
+  if ($soccerNetImportExitCode -eq 0) { Pass "SoccerNet CALF environment and pretrained model" } else { Fail "SoccerNet CALF packages cannot be imported." }
+} else {
+  Fail "SoccerNet CALF is missing. Run npm run setup:soccernet."
+}
 $modelSetting = if ($values.ContainsKey("TRACKING_MODEL")) { $values["TRACKING_MODEL"] } else { "./tools/tracking/yolo11n.pt" }
 $trackingModel = Resolve-ProjectPath $modelSetting
 if (Test-Path -LiteralPath $trackingModel) {
@@ -97,13 +123,20 @@ if (Test-Path -LiteralPath $trackingModel) {
 $ballModelSetting = if ($values.ContainsKey("TRACKING_BALL_MODEL")) { $values["TRACKING_BALL_MODEL"] } else { "./tools/tracking/yolo-football-ball-detection.pt" }
 $trackingBallModel = Resolve-ProjectPath $ballModelSetting
 $expectedBallModelHash = "FB37942448E7DE08745E8AAB148D0794F680A738DDD55E5F17ABE9AB2D6313FB"
-if ((Test-Path -LiteralPath $trackingBallModel) -and ((Get-FileHash -Algorithm SHA256 -LiteralPath $trackingBallModel).Hash -eq $expectedBallModelHash)) {
+if ((Test-Path -LiteralPath $trackingBallModel) -and ((Get-Sha256 $trackingBallModel) -eq $expectedBallModelHash)) {
   Pass "Football-specific ball tracking model"
 } else {
   Fail "Football-specific ball model is missing or invalid at $trackingBallModel"
 }
 
 $cloudProblems = [Collections.Generic.List[string]]::new()
+$pitchModelSetting = if ($values.ContainsKey("TRACKING_PITCH_MODEL")) { $values["TRACKING_PITCH_MODEL"] } else { "./tools/tracking/yolo-football-pitch-detection.pt" }
+$pitchModel = Resolve-ProjectPath $pitchModelSetting
+if (Test-Path -LiteralPath $pitchModel) {
+  Pass "Tactical pitch model"
+} else {
+  Fail "Tactical pitch model is missing. Run npm run setup:tracking."
+}
 if (-not $values.ContainsKey("GEMINI_API_KEY") -or -not $values["GEMINI_API_KEY"]) {
   $cloudProblems.Add("GEMINI_API_KEY is empty in .env.")
 }

@@ -27,10 +27,16 @@ export async function processVideoJob(jobId: string, dependencies: ProcessingDep
     await stage(dependencies, jobId, "analyzing", 12);
     let moments = await dependencies.analyzer.analyze({ sourceUrl, durationSeconds: 0, settings: job.settings, signal });
     await stage(dependencies, jobId, "detecting_moments", 34, moments);
-    moments = packTimeline(moments, job.settings.targetDuration);
+    if (job.settings.durationMode !== "auto") moments = packTimeline(moments, job.settings.targetDuration);
     await stage(dependencies, jobId, "ranking", 46, moments);
     await stage(dependencies, jobId, "tracking", 55, moments);
     moments = await dependencies.tracker.track({ sourceUrl, moments, signal });
+    const minimumDuration = job.settings.editStyle === "complete_highlights" ? 60 : 30;
+    if (job.settings.durationMode === "auto") {
+      const selectedDuration = moments.filter((moment) => moment.selectedForFinalVideo).reduce((total, moment) => total + (moment.endTime - moment.startTime) / (moment.playbackRate || 1) - (moment.transitionDuration || 0), 0);
+      if (selectedDuration < minimumDuration) throw new ProviderError("INSUFFICIENT_EVIDENCE", `The AI-selected complete story must provide at least ${minimumDuration} seconds of verified footage.`);
+      job.settings = { ...job.settings, targetDuration: selectedDuration };
+    }
     if (job.settings.commentary) {
       await stage(dependencies, jobId, "generating_commentary", 68, moments);
       moments = await dependencies.commentary.generate({ sourceUrl, moments, signal });
@@ -39,6 +45,7 @@ export async function processVideoJob(jobId: string, dependencies: ProcessingDep
     await stage(dependencies, jobId, "rendering", 86, moments);
     const outputKey = `exports/${jobId}/touchline-final.mp4`;
     const result = await dependencies.renderer.render({ sourceUrl, moments, settings: job.settings, outputKey, signal });
+    if (job.settings.durationMode === "auto" && (!Number.isFinite(result.durationSeconds) || result.durationSeconds < (job.settings.editStyle === "complete_highlights" ? 60 : 30))) throw new ProviderError("SHORT_RENDER", `The rendered highlight must be at least ${job.settings.editStyle === "complete_highlights" ? 60 : 30} seconds.`);
     await dependencies.jobs.update(jobId, { stage: "completed", progress: 100, moments, outputKey: result.outputKey, error: undefined, updatedAt: new Date().toISOString() });
     log.info("video_job_completed", { jobId, durationSeconds: result.durationSeconds });
   } catch (error) {
@@ -54,12 +61,12 @@ async function stage(dependencies: ProcessingDependencies, id: string, next: Job
 }
 
 export function validateSettings(input: Partial<EditSettings>): EditSettings {
-  const allowedDurations = new Set([60, 65, 70, 80]);
-  const targetDuration = Number(input.targetDuration ?? 60);
-  if (!allowedDurations.has(targetDuration)) throw new ProviderError("INVALID_DURATION", "Final length must be 60, 65, 70, or 80 seconds.");
   const originalAudio = input.originalAudio ?? "reduced";
   const intensity = input.intensity ?? "dynamic";
+  const editStyle = input.editStyle ?? "complete_highlights";
   if (!["normal", "reduced", "muted"].includes(originalAudio)) throw new ProviderError("INVALID_AUDIO_MODE", "Original audio mode is not supported.");
   if (!["natural", "dynamic", "high_energy"].includes(intensity)) throw new ProviderError("INVALID_INTENSITY", "Editing intensity is not supported.");
-  return { targetDuration, aspectRatio: "9:16", commentary: input.commentary ?? true, playerHighlight: input.playerHighlight ?? true, captions: input.captions ?? true, logoMasking: input.logoMasking ?? true, originalAudio, intensity };
+  if (!["complete_highlights", "viral_reel", "tactical_analysis"].includes(editStyle)) throw new ProviderError("INVALID_EDIT_STYLE", "Edit style is not supported.");
+  const viral = editStyle === "viral_reel";
+  return { editStyle, durationMode: "auto", targetDuration: viral ? 36 : editStyle === "complete_highlights" ? 60 : 30, durationMin: editStyle === "complete_highlights" ? 60 : 30, aspectRatio: viral ? "4:5" : "9:16", commentary: input.commentary ?? true, playerHighlight: input.playerHighlight ?? true, captions: input.captions ?? true, logoMasking: input.logoMasking ?? true, originalAudio: viral && input.originalAudio === undefined ? "reduced" : originalAudio, intensity };
 }

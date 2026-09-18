@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import videoIntelligence from "@google-cloud/video-intelligence";
 
-const DEFAULT_FEATURES = ["SHOT_CHANGE_DETECTION", "OBJECT_TRACKING"];
-const SUPPORTED_FEATURES = new Set([...DEFAULT_FEATURES, "PERSON_DETECTION"]);
+const DEFAULT_FEATURES = ["SHOT_CHANGE_DETECTION", "OBJECT_TRACKING", "TEXT_DETECTION"];
+const SUPPORTED_FEATURES = new Set([...DEFAULT_FEATURES, "PERSON_DETECTION", "SPEECH_TRANSCRIPTION"]);
 const RELEVANT_OBJECT = /ball|football|soccer|person|player|athlete|goal/i;
 let client;
 
@@ -21,19 +21,28 @@ export function configuredVideoIntelligenceFeatures() {
 export async function analyzeVideoIntelligenceFile(path, sourceOffset = 0) {
   const inputContent = await readFile(path);
   const features = configuredVideoIntelligenceFeatures();
-  const [operation] = await getClient().annotateVideo({
-    inputContent,
-    features,
-    locationId: process.env.VIDEO_INTELLIGENCE_LOCATION || "us-east1",
-    videoContext: features.includes("PERSON_DETECTION") ? {
-      personDetectionConfig: {
-        includeBoundingBoxes: true,
-        includeAttributes: false,
-        includePoseLandmarks: false,
-      },
-    } : undefined,
+  const timeoutMs = Math.max(30000, Math.min(300000, Number(process.env.VIDEO_INTELLIGENCE_TIMEOUT_MS || 120000)));
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Video Intelligence exceeded its ${Math.round(timeoutMs / 1000)}-second supporting-evidence timeout.`)), timeoutMs);
   });
-  const [response] = await operation.promise();
+  let response;
+  try {
+    [response] = await Promise.race([
+      (async () => {
+        const [operation] = await getClient().annotateVideo({
+          inputContent,
+          features,
+          locationId: process.env.VIDEO_INTELLIGENCE_LOCATION || "us-east1",
+          videoContext: buildVideoContext(features),
+        });
+        return operation.promise();
+      })(),
+      timeout,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
   const result = response.annotationResults?.[0];
   if (!result) throw new Error("Video Intelligence returned no annotation results.");
   if (result.error?.message) throw new Error(result.error.message);
@@ -56,17 +65,46 @@ export async function analyzeVideoIntelligenceFile(path, sourceOffset = 0) {
     .sort((a, b) => b.confidence - a.confidence)
     .slice(0, 40);
 
+  const textAnnotations = (result.textAnnotations || [])
+    .flatMap((annotation) => (annotation.segments || []).map((segment) => ({
+      text: String(annotation.text || "").replace(/\s+/g, " ").trim().slice(0, 160),
+      confidence: Number(segment.confidence || 0),
+      startTime: sourceOffset + durationToSeconds(segment.segment?.startTimeOffset),
+      endTime: sourceOffset + durationToSeconds(segment.segment?.endTimeOffset),
+    })))
+    .filter((annotation) => annotation.text && annotation.confidence >= 0.25)
+    .sort((a, b) => a.startTime - b.startTime)
+    .slice(0, 240);
+
+  const speechTranscriptions = (result.speechTranscriptions || [])
+    .flatMap((transcription) => (transcription.alternatives || []).slice(0, 1).map((alternative) => {
+      const words = alternative.words || [];
+      return {
+        transcript: String(alternative.transcript || "").replace(/\s+/g, " ").trim().slice(0, 500),
+        confidence: Number(alternative.confidence || 0),
+        startTime: sourceOffset + durationToSeconds(words[0]?.startTime),
+        endTime: sourceOffset + durationToSeconds(words.at(-1)?.endTime),
+      };
+    }))
+    .filter((item) => item.transcript)
+    .sort((a, b) => a.startTime - b.startTime)
+    .slice(0, 120);
+
   const labels = {};
   for (const track of objectTracks) labels[track.label] = (labels[track.label] || 0) + 1;
   return {
     shots,
     objectTracks,
     personTracks,
+    textAnnotations,
+    speechTranscriptions,
     summary: {
       features,
       shotCount: shots.length,
       objectTrackCount: objectTracks.length,
       personTrackCount: personTracks.length,
+      textAnnotationCount: textAnnotations.length,
+      speechTranscriptionCount: speechTranscriptions.length,
       labels,
     },
   };
@@ -88,6 +126,12 @@ export function enrichMomentsWithVideoIntelligence(moments, evidence) {
     const focusSamples = ballSamples.length ? ballSamples : personSamples;
     const focusX = focusSamples.length ? median(focusSamples.map((sample) => sample.x)) : moment.focusX;
     const overlappingShots = evidence.shots.filter((shot) => shot.startTime < moment.endTime && shot.endTime > moment.startTime).length;
+    const detectedText = (evidence.textAnnotations || [])
+      .filter((item) => item.startTime < moment.endTime && item.endTime > moment.startTime)
+      .map((item) => item.text).filter(Boolean).slice(0, 12);
+    const transcript = (evidence.speechTranscriptions || [])
+      .filter((item) => item.startTime < moment.endTime && item.endTime > moment.startTime)
+      .map((item) => item.transcript).filter(Boolean).join(" ").slice(0, 700);
     return {
       ...moment,
       focusX,
@@ -97,6 +141,8 @@ export function enrichMomentsWithVideoIntelligence(moments, evidence) {
         ballSamples: ballSamples.length,
         personSamples: personSamples.length,
         shotCount: overlappingShots,
+        detectedText,
+        transcript,
       },
     };
   });
@@ -108,6 +154,8 @@ export function compactVideoIntelligenceEvidence(evidence) {
     shots: evidence.shots.slice(0, 160),
     objectTracks: evidence.objectTracks.slice(0, 16).map(compactTrack),
     personTracks: evidence.personTracks.slice(0, 8).map(compactTrack),
+    textAnnotations: (evidence.textAnnotations || []).slice(0, 80),
+    speechTranscriptions: (evidence.speechTranscriptions || []).slice(0, 30),
     summary: evidence.summary,
   };
 }
@@ -121,6 +169,25 @@ export async function verifyVideoIntelligenceConnection() {
     location: process.env.VIDEO_INTELLIGENCE_LOCATION || "us-east1",
     features: configuredVideoIntelligenceFeatures(),
   };
+}
+
+function buildVideoContext(features) {
+  const context = {};
+  if (features.includes("PERSON_DETECTION")) {
+    context.personDetectionConfig = {
+      includeBoundingBoxes: true,
+      includeAttributes: false,
+      includePoseLandmarks: false,
+    };
+  }
+  if (features.includes("SPEECH_TRANSCRIPTION")) {
+    context.speechTranscriptionConfig = {
+      languageCode: process.env.VIDEO_INTELLIGENCE_SPEECH_LANGUAGE || "en-US",
+      enableAutomaticPunctuation: true,
+      filterProfanity: false,
+    };
+  }
+  return Object.keys(context).length ? context : undefined;
 }
 
 function getClient() {

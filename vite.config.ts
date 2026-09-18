@@ -46,7 +46,9 @@ export default defineConfig(async () => {
   return {
     server: {
       allowedHosts: ["football_highlight.test"],
-      hmr: { protocol: "ws", host: "localhost", clientPort: 3000 },
+      // Let the browser reuse the port that served @vite/client. Hard-coding
+      // 3000 breaks HMR whenever the studio is intentionally started on 3001.
+      hmr: { protocol: "ws", host: "localhost" },
       ...(isCodexSeatbeltSandbox
         ? { watch: { useFsEvents: false, usePolling: true } }
         : {}),
