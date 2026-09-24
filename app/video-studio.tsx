@@ -276,7 +276,27 @@ type ResultProps = { file: File | null; videoUrl: string | null; outputUrl: stri
 
 function ResultView({ file, videoUrl, outputUrl, warnings, selected, allMoments, finalDuration, sourceDuration, videoTitle, editStyle, downloadPlan }: ResultProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [copied, setCopied] = useState<"title" | "hashtags" | "all" | null>(null);
+  const hashtags = publishingHashtags(selected, editStyle);
   function seek(moment: FootballMoment) { if (videoRef.current) { videoRef.current.currentTime = moment.startTime; void videoRef.current.play(); } }
+  async function copyPublishingText(kind: "title" | "hashtags" | "all") {
+    const text = kind === "title" ? videoTitle : kind === "hashtags" ? hashtags : `${videoTitle}\n\n${hashtags}`;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const fallback = document.createElement("textarea");
+      fallback.value = text;
+      fallback.setAttribute("readonly", "");
+      fallback.style.position = "fixed";
+      fallback.style.opacity = "0";
+      document.body.appendChild(fallback);
+      fallback.select();
+      document.execCommand("copy");
+      fallback.remove();
+    }
+    setCopied(kind);
+    window.setTimeout(() => setCopied((current) => current === kind ? null : current), 1800);
+  }
   return <div className="result-page">
     <header className="topbar result-topbar"><div><div className="eyebrow"><span className="pulse-dot" /> EDIT READY</div><h1>{videoTitle}</h1></div><div className="result-actions"><button className="secondary-button" onClick={downloadPlan}>Download edit plan</button>{outputUrl && <a className="primary-compact" href={outputUrl} download={`${file?.name.replace(/\.[^.]+$/, "") || "touchline"}-vertical.mp4`}>Download MP4 ↓</a>}</div></header>
     <div className="result-grid">
@@ -296,6 +316,13 @@ function ResultView({ file, videoUrl, outputUrl, warnings, selected, allMoments,
         <div className="summary-strip"><span><small>SOURCE</small><b>{formatTime(sourceDuration)}</b></span><span><small>FINAL</small><b>{formatTime(finalDuration)}</b></span><span><small>FORMAT</small><b>{editStyle === "complete_highlights" ? "16:9" : "9:16"} MP4</b></span></div>
       </aside>
     </div>
+    <section className="publishing-card" aria-labelledby="publishing-title">
+      <div className="publishing-head"><div><span className="mini-label">READY TO PUBLISH</span><h2 id="publishing-title">Title and hashtags</h2><p>Generated from the verified recap so you can copy and paste them when uploading.</p></div><button className="primary-compact" onClick={() => void copyPublishingText("all")}>{copied === "all" ? "Copied!" : "Copy title + hashtags"}</button></div>
+      <div className="publishing-fields">
+        <div className="publishing-field"><div><label htmlFor="publishing-video-title">Video title</label><button onClick={() => void copyPublishingText("title")}>{copied === "title" ? "Copied!" : "Copy title"}</button></div><textarea id="publishing-video-title" readOnly rows={2} value={videoTitle} /></div>
+        <div className="publishing-field"><div><label htmlFor="publishing-hashtags">Hashtags</label><button onClick={() => void copyPublishingText("hashtags")}>{copied === "hashtags" ? "Copied!" : "Copy hashtags"}</button></div><textarea id="publishing-hashtags" readOnly rows={3} value={hashtags} /></div>
+      </div>
+    </section>
     <div className="render-banner"><div><span className="mini-label">PRIVATE LOCAL OUTPUT</span><strong>{file?.name}</strong><p>The source, job data and finished video are stored only in this project&apos;s local-data folder.</p></div>{outputUrl ? <a href={outputUrl} download>Download MP4</a> : <button onClick={downloadPlan}>Export JSON plan</button>}</div>
   </div>;
 }
@@ -305,5 +332,15 @@ function Toggle({ label, detail, checked, disabled = false, onChange }: { label:
 function formatBytes(bytes: number) { if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`; return `${(bytes / 1024 / 1024).toFixed(1)} MB`; }
 function formatTime(seconds: number) { const safe = Number.isFinite(seconds) ? Math.max(0, Math.round(seconds)) : 0; return `${Math.floor(safe / 60)}:${String(safe % 60).padStart(2, "0")}`; }
 function titleCase(value: string) { return value.charAt(0).toUpperCase() + value.slice(1); }
+function publishingHashtags(moments: FootballMoment[], editStyle: EditStyle) {
+  const events = new Set(moments.map((moment) => moment.eventType));
+  const tags = ["#GoalVision", "#Football", "#FootballHighlights", "#MatchRecap", "#FootballAnalysis"];
+  if (events.has("goal") || events.has("disallowed_goal")) tags.push("#Goals");
+  if (events.has("save")) tags.push("#Goalkeeper");
+  if (events.has("assist")) tags.push("#Assists");
+  if (events.has("shot_on_target") || events.has("shot_off_target") || events.has("big_chance")) tags.push("#MatchHighlights");
+  if (editStyle === "tactical_analysis") tags.push("#TacticalAnalysis");
+  return [...new Set(tags)].join(" ");
+}
 function stageIndexFor(stage: JobStage) { const index = stages.findIndex((item) => item.key === stage); if (index >= 0) return index; if (stage === "ranking") return stages.findIndex((item) => item.key === "aligning_content"); return stages.length - 1; }
 function toBase64Url(value: string) { const bytes = new TextEncoder().encode(value); let binary = ""; bytes.forEach((byte) => { binary += String.fromCharCode(byte); }); return window.btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""); }

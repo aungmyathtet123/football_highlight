@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 async function render() {
@@ -33,4 +34,12 @@ test("server-renders the Touchline AI upload studio", async () => {
   assert.doesNotMatch(html, /60–70s|70–80s|80–90s/);
   assert.match(html, /Logo \/ watermark masking/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Starter Project/i);
+});
+
+test("completed edits expose copyable publishing metadata", () => {
+  const source = readFileSync(new URL("../app/video-studio.tsx", import.meta.url), "utf8");
+  assert.match(source, /READY TO PUBLISH/);
+  assert.match(source, /Copy title \+ hashtags/);
+  assert.match(source, /#GoalVision/);
+  assert.match(source, /navigator\.clipboard\.writeText/);
 });

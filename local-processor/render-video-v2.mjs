@@ -52,6 +52,9 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
   const captionCues = settings.captions ? await makeCaptionCueFiles(selected, outputPath, tracking, outputWidth, outputHeight) : new Map();
   const calloutFiles = settings.captions ? await makeCalloutFiles(selected, outputPath) : new Map();
   const args = ["-hide_banner", "-y", "-i", sourcePath];
+  const brandWatermarkPath = resolveSetting(process.env.BRAND_WATERMARK_PATH || resolve(projectRoot, "assets/channels4_profile.jpg"));
+  const brandWatermarkInputIndex = inputCount(args);
+  args.push("-loop", "1", "-i", brandWatermarkPath);
   let stadiumAudioInputIndex = null;
   if (stadiumAudioPath && !narrationOnly) {
     stadiumAudioInputIndex = inputCount(args);
@@ -423,6 +426,10 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     filters.push("[hookVideo][hookAudio][storyVideo][storyAudio]concat=n=2:v=1:a=1[outv][outa]");
     timelineDuration += teaserDuration;
   }
+  const watermarkWidth = settings.aspectRatio === "16:9" ? 220 : 180;
+  const watermarkMargin = settings.aspectRatio === "16:9" ? 32 : 28;
+  filters.push(`[${brandWatermarkInputIndex}:v]scale=${watermarkWidth}:-1:flags=lanczos,format=rgba,colorkey=0x25262A:0.08:0.035,colorchannelmixer=aa=0.86[goalVisionBrand]`);
+  filters.push(`[outv][goalVisionBrand]overlay=x=W-w-${watermarkMargin}:y=H-h-${watermarkMargin}:eval=init:eof_action=repeat:shortest=1[brandedv]`);
   const synchronization = globalNarrationPath ? [{
     beatId: "__narration__",
     momentId: "__continuous_master__",
@@ -448,7 +455,7 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
   await writeFile(filterScriptPath, filters.join(";\n"));
   const premixPath = resolve(dirname(outputPath), "premix.mp4");
   args.push(
-    "-/filter_complex", filterScriptPath, "-map", "[outv]", "-map", "[outa]",
+    "-/filter_complex", filterScriptPath, "-map", "[brandedv]", "-map", "[outa]",
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
     "-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart", premixPath,
   );
