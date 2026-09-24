@@ -1,0 +1,20 @@
+__DOMAIN__ {
+	encode zstd gzip
+
+	# The editor accepts large source-match uploads. Caddy streams the body;
+	# the processor enforces its own 2 GiB maximum.
+	request_body {
+		max_size 2GB
+	}
+
+	basic_auth {
+		__BASIC_USER__ __BASIC_PASSWORD_HASH__
+	}
+
+	@processor path /health /jobs /jobs/* /outputs/*
+	reverse_proxy @processor 127.0.0.1:8787 {
+		flush_interval -1
+	}
+
+	reverse_proxy 127.0.0.1:3000
+}

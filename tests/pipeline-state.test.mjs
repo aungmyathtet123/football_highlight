@@ -148,7 +148,7 @@ test("cached semantic approval preserves a newer framing rejection and edit sett
 });
 test("signatures ignore JSON key ordering", () => assert.equal(stableSignature({b:2,a:1}), stableSignature({a:1,b:2})));
 test("review is reused only for unchanged event evidence", () => {
-  const reviewed = {...goal, semanticVerificationVersion:8, semanticSignature:semanticSignature(goal)};
+  const reviewed = {...goal, semanticVerificationVersion:9, semanticSignature:semanticSignature(goal)};
   assert.equal(needsSemanticReview(reviewed), false);
   assert.equal(needsSemanticReview({...reviewed, endTime:18}), true);
   assert.equal(needsSemanticReview({...reviewed, description:"A save"}), true);

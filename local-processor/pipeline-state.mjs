@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+export const SEMANTIC_VERIFICATION_VERSION = 9;
+
 export function stableSignature(value) {
   const canonical = (item) => Array.isArray(item) ? item.map(canonical)
     : item && typeof item === "object" ? Object.fromEntries(Object.keys(item).sort().filter(key => item[key] !== undefined).map(key => [key, canonical(item[key])])) : item;
@@ -12,7 +14,7 @@ export function semanticSignature(moment) {
 }
 
 export function needsSemanticReview(moment) {
-  return moment.semanticVerificationVersion !== 8 || moment.semanticSignature !== semanticSignature(moment);
+  return moment.semanticVerificationVersion !== SEMANTIC_VERIFICATION_VERSION || moment.semanticSignature !== semanticSignature(moment);
 }
 
 export function mergeSemanticReview(moment, review) {

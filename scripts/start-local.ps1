@@ -9,6 +9,8 @@ $runRoot = Join-Path $projectRoot "work\run"
 $node = (Get-Command node.exe -ErrorAction Stop).Source
 $processorScript = Join-Path $projectRoot "local-processor\server.mjs"
 $webCli = Join-Path $projectRoot "node_modules\vinext\dist\cli.js"
+$webPort = if ($env:LOCAL_WEB_PORT) { [int]$env:LOCAL_WEB_PORT } else { 3001 }
+$webUrl = "http://localhost:$webPort"
 $pidPath = Join-Path $runRoot "processes.json"
 $quote = [char]34
 $processorArgument = "$quote$processorScript$quote"
@@ -31,7 +33,8 @@ function Test-Processor {
 
 function Test-Web {
   try {
-    return (Invoke-WebRequest -Uri "http://localhost:3000/" -UseBasicParsing -TimeoutSec 3).StatusCode -eq 200
+    $response = Invoke-WebRequest -Uri "$webUrl/" -UseBasicParsing -TimeoutSec 3
+    return $response.StatusCode -eq 200 -and $response.Content -match "Touchline AI"
   } catch {
     return $false
   }
@@ -43,7 +46,7 @@ if (-not (Test-Processor)) {
   $processorProcess = Start-Process -FilePath $node -ArgumentList @($processorArgument) -WorkingDirectory $projectRoot -RedirectStandardOutput (Join-Path $runRoot "processor.out.log") -RedirectStandardError (Join-Path $runRoot "processor.err.log") -WindowStyle Hidden -PassThru
 }
 if (-not (Test-Web)) {
-  $webProcess = Start-Process -FilePath $node -ArgumentList @($webArgument, "dev") -WorkingDirectory $projectRoot -RedirectStandardOutput (Join-Path $runRoot "web.out.log") -RedirectStandardError (Join-Path $runRoot "web.err.log") -WindowStyle Hidden -PassThru
+  $webProcess = Start-Process -FilePath $node -ArgumentList @($webArgument, "dev", "--port", "$webPort") -WorkingDirectory $projectRoot -RedirectStandardOutput (Join-Path $runRoot "web.out.log") -RedirectStandardError (Join-Path $runRoot "web.err.log") -WindowStyle Hidden -PassThru
 }
 
 @{
@@ -72,7 +75,7 @@ if (-not $processorReady -or -not $webReady) {
 }
 
 Write-Output "Touchline AI is running."
-Write-Output "Open: http://localhost:3000"
+Write-Output "Open: $webUrl"
 Write-Output "Processor health: http://127.0.0.1:8787/health"
 Write-Output "Logs: $runRoot"
 Write-Output "Stop both services with: npm run local:stop"

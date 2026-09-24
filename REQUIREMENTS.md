@@ -1,6 +1,8 @@
 # Touchline AI requirements
 
-This project is designed to run locally on 64-bit Windows 10 or Windows 11. Laragon is optional.
+This project runs locally on 64-bit Windows 10/11 and can be deployed on Ubuntu
+24.04 ARM64 or x86_64. Laragon is optional. The production deployment guide is
+in `deploy/oracle/README.md`.
 
 ## Required software
 
@@ -70,7 +72,27 @@ Start the processor and website:
 npm run local:start
 ```
 
-Open <http://localhost:3000>. Stop both services with `npm run local:stop`.
+Open <http://localhost:3001>. Stop both services with `npm run local:stop`.
+
+## Install on an Ubuntu server
+
+For Oracle Cloud Ampere ARM64, use the checked-in installer and production
+templates:
+
+```bash
+git clone https://github.com/aungmyathtet123/football_highlight.git
+cd football_highlight
+bash scripts/setup-linux.sh
+cp deploy/oracle/env.production.example .env
+# Add the public hostname and cloud credentials, then:
+bash scripts/verify-linux.sh
+bash deploy/oracle/install.sh your-name.duckdns.org touchline
+```
+
+Production data is stored outside the Git checkout in `/srv/touchline-data`.
+Caddy terminates HTTPS and proxies only the application routes; ports 3000 and
+8787 remain private. Systemd restarts the web and processor services after a
+failure or reboot.
 
 ## Current recap behavior
 
@@ -78,6 +100,8 @@ Open <http://localhost:3000>. Stop both services with `npm run local:stop`.
 - Selected gameplay and reactions render at the source's normal 1.0× speed.
 - Original broadcast commentary is muted when generated narration is enabled.
 - The final duration expands when needed instead of accelerating or cutting a complete incident.
+- Complete-match recaps establish a 60-120 second output contract before footage discovery; verified reserve scenes are retained so local tracking losses do not cause a false sub-60-second failure.
+- Temporary Gemini quota, timeout, and service-capacity responses save job progress and retry automatically. An incomplete structured response cannot silently reject omitted scene IDs.
 - Player names and score claims are used only when external match research agrees with the visible incident inventory.
 
 Only use footage you own or have permission to edit. Editing and commentary do not guarantee fair use or prevent copyright claims.

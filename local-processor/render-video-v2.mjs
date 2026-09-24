@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MIN_SCENE_SECONDS, COMPLETE_HIGHLIGHT_MAX_PLAYBACK_RATE } from "./editorial-policy.mjs";
-import { captionAss, sparseCaptionCues, shortReactionCandidates } from "./short-form-policy.mjs";
+import { captionAss, narrationSubtitleCues, sparseCaptionCues, shortReactionCandidates } from "./short-form-policy.mjs";
 import { verifiedPayoffWindow } from "./payoff-evidence.mjs";
 import { trackedPositionExpression } from "./tracked-position.mjs";
 import { tacticalFreezeAnchor } from "./tactical-plan.mjs";
@@ -42,7 +42,10 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
   const { width: outputWidth, height: outputHeight } = outputDimensions(settings);
   const narrationOnly = settings.commentary && settings.editStyle === "complete_highlights";
   const reactionLimit = settings.editStyle === "complete_highlights" ? 1.6 : settings.editStyle === "viral_reel" ? 2.5 : 3;
-  const selected = fitSelectedMoments(shortReactionCandidates(moments, reactionLimit), settings.durationMode === "auto" ? Infinity : settings.targetDuration, ttsFiles, tracking).map((moment) => ({ ...moment, presentationVersion: 1,
+  const selected = fitSelectedMoments(shortReactionCandidates(moments, reactionLimit), settings.durationMode === "auto" ? Infinity : settings.targetDuration, ttsFiles, tracking).map((moment) => ({ ...moment,
+    // Presentation v2 uses phrase-timed narration subtitles plus one short,
+    // evidence-linked event callout. They occupy separate safe zones.
+    presentationVersion: settings.editStyle === "complete_highlights" ? 2 : 1,
     tacticalFreezeSourceTime: usesSafeStaticPresentation(moment) ? undefined : tacticalFreezeAnchor(moment,trackingForMoment(tracking,moment)) }));
   if (selected.length === 0) throw new Error("No moments were selected for the final edit.");
   assertIncidentCoverage(moments.filter(m=>m.selectedForFinalVideo),selected);
@@ -719,9 +722,9 @@ function visualEffectFilter(moment, intensity, annotationActive = false, sourceP
   // natural team colours or obscuring the football.
   filters.push("vignette=PI/18");
   if (sourcePayoff && grade === "goal_gold") {
-    filters.push(`eq=saturation=1.17:contrast=1.11:brightness=0.020:gamma=1.02:enable='between(t,${sourcePayoff.start.toFixed(3)},${sourcePayoff.end.toFixed(3)})'`);
+    filters.push(`eq=saturation=1.20:contrast=1.13:brightness=0.026:gamma=1.025:enable='between(t,${sourcePayoff.start.toFixed(3)},${sourcePayoff.end.toFixed(3)})'`);
   } else if (sourcePayoff && ["shot_on_target", "shot_off_target", "save", "big_chance"].includes(String(moment.eventType))) {
-    filters.push(`eq=saturation=1.14:contrast=1.10:brightness=0.012:gamma=1.01:enable='between(t,${sourcePayoff.start.toFixed(3)},${sourcePayoff.end.toFixed(3)})'`);
+    filters.push(`eq=saturation=1.16:contrast=1.12:brightness=0.018:gamma=1.015:enable='between(t,${sourcePayoff.start.toFixed(3)},${sourcePayoff.end.toFixed(3)})'`);
   }
   if (moment.effect === "punch_zoom" && !annotationActive) {
     // Preserve the validated ball/player crop; a decorative zoom can hide them.
@@ -737,12 +740,12 @@ function visualEffectFilter(moment, intensity, annotationActive = false, sourceP
 
 export function naturalEditorialGradeFilters(grade) {
   const grades = {
-    clean: ["eq=saturation=1.12:contrast=1.09:brightness=0.012:gamma=1.02", "unsharp=5:5:0.23:5:5:0"],
-    cool: ["eq=saturation=1.02:contrast=1.14:brightness=0.004:gamma=1.00", "colorbalance=bs=0.055:bm=0.025:rs=-0.018", "unsharp=5:5:0.24:5:5:0"],
-    warm: ["eq=saturation=1.17:contrast=1.12:brightness=0.016:gamma=1.02", "colorbalance=rs=0.052:rm=0.025:bs=-0.020", "unsharp=5:5:0.24:5:5:0"],
-    dramatic: ["eq=saturation=1.08:contrast=1.21:brightness=-0.006:gamma=0.98", "colorbalance=bs=0.026:bm=0.012:rs=-0.010", "unsharp=5:5:0.30:5:5:0"],
-    goal_gold: ["eq=saturation=1.20:contrast=1.15:brightness=0.020:gamma=1.02", "colorbalance=rs=0.050:rm=0.024:bs=-0.018", "unsharp=5:5:0.32:5:5:0"],
-    replay_blue: ["eq=saturation=0.86:contrast=1.18:brightness=-0.008:gamma=0.98", "colorbalance=bs=0.080:bm=0.038:rs=-0.025", "unsharp=5:5:0.32:5:5:0"],
+    clean: ["eq=saturation=1.13:contrast=1.10:brightness=0.014:gamma=1.02", "unsharp=5:5:0.25:5:5:0"],
+    cool: ["eq=saturation=1.04:contrast=1.16:brightness=0.006:gamma=1.00", "colorbalance=bs=0.065:bm=0.030:rs=-0.020", "unsharp=5:5:0.27:5:5:0"],
+    warm: ["eq=saturation=1.19:contrast=1.14:brightness=0.020:gamma=1.025", "colorbalance=rs=0.060:rm=0.030:bs=-0.022", "unsharp=5:5:0.27:5:5:0"],
+    dramatic: ["eq=saturation=1.10:contrast=1.23:brightness=-0.004:gamma=0.985", "colorbalance=bs=0.032:bm=0.015:rs=-0.012", "unsharp=5:5:0.33:5:5:0"],
+    goal_gold: ["eq=saturation=1.23:contrast=1.17:brightness=0.024:gamma=1.025", "colorbalance=rs=0.060:rm=0.030:bs=-0.020", "unsharp=5:5:0.35:5:5:0"],
+    replay_blue: ["eq=saturation=0.84:contrast=1.20:brightness=-0.006:gamma=0.985", "colorbalance=bs=0.095:bm=0.045:rs=-0.030", "unsharp=5:5:0.35:5:5:0"],
   };
   return [...(grades[grade] || grades.clean)];
 }
@@ -762,15 +765,16 @@ function eventCalloutColor(moment) {
   return colors[moment.eventCallout] || "white";
 }
 
-function soundEffectSource(moment, index, outputLength, cueTime = 0.12) {
+export function soundEffectSource(moment, index, outputLength, cueTime = 0.12) {
   const duration = outputLength.toFixed(3);
   const effect = String(moment.soundEffect || "none");
   if (effect === "goal") {
     const delay = Math.max(0, Math.round(cueTime * 1000));
     return [
-      `anoisesrc=color=pink:amplitude=0.30:duration=0.82:sample_rate=48000,highpass=f=180,lowpass=f=5200,afade=t=in:st=0:d=0.04,afade=t=out:st=0.30:d=0.52,volume=0.18[goalCrowd${index}]`,
-      `aevalsrc=exprs='0.10*(sin(2*PI*523.25*t)+sin(2*PI*659.25*t)+sin(2*PI*783.99*t))*exp(-3.2*t)':s=48000:d=0.82,aecho=0.8:0.35:35|70:0.16|0.08,volume=0.34[goalTone${index}]`,
-      `[goalCrowd${index}][goalTone${index}]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.88,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,adelay=${delay}|${delay},apad,atrim=duration=${duration}[sfx${index}]`,
+      `anoisesrc=color=pink:amplitude=0.32:duration=1.05:sample_rate=48000,highpass=f=160,lowpass=f=6200,afade=t=in:st=0:d=0.035,afade=t=out:st=0.34:d=0.71,volume=0.18[goalCrowd${index}]`,
+      `aevalsrc=exprs='0.10*(sin(2*PI*523.25*t)+sin(2*PI*659.25*t)+sin(2*PI*783.99*t))*exp(-2.8*t)':s=48000:d=0.92,aecho=0.8:0.35:35|70:0.16|0.08,volume=0.32[goalTone${index}]`,
+      `sine=frequency=82:duration=0.28:sample_rate=48000,afade=t=out:st=0.03:d=0.25,volume=0.22[goalImpact${index}]`,
+      `[goalCrowd${index}][goalTone${index}][goalImpact${index}]amix=inputs=3:duration=longest:normalize=0,alimiter=limit=0.88,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,adelay=${delay}|${delay},apad,atrim=duration=${duration}[sfx${index}]`,
     ].join(";\n");
   }
   const sources = {
@@ -812,7 +816,9 @@ async function makeCaptionCueFiles(moments, outputPath, tracking, outputWidth, o
     const freeze = freezePlan(moment, playbackRate, sourceLength);
     const outputLength = sourceLength / playbackRate + freeze.duration;
     const payoff = verifiedPayoffWindow(moment, trackingForMoment(tracking, moment), playbackRate, freeze);
-    const cues = sparseCaptionCues(moment, outputLength, payoff);
+    const cues = Number(moment.presentationVersion || 1) >= 2
+      ? narrationSubtitleCues(moment, outputLength)
+      : sparseCaptionCues(moment, outputLength, payoff);
     if (!cues.length) continue;
     const y = moment.tacticalDrawing === "map" ? Math.round(outputHeight * 0.755) : safeCaptionY(trackingForMoment(tracking, moment)?.keyframes || [], outputHeight);
     const assPath = resolve(captionDir, `${index}.ass`);
@@ -828,7 +834,11 @@ function safeCaptionY(keyframes, outputHeight = 1920) {
     .filter((value) => Number.isFinite(value) && value >= 0 && value <= outputHeight);
   if (!subjectY.length) return Math.round(outputHeight * 0.74);
   const median = [...subjectY].sort((a, b) => a - b)[Math.floor(subjectY.length / 2)];
-  return median > outputHeight * 0.58 ? Math.round(outputHeight * 0.20) : Math.round(outputHeight * 0.74);
+  // Landscape callouts occupy the upper quarter around y=250. Keep a
+  // top-routed subtitle below that band; portrait has enough vertical room to
+  // retain the higher mobile-safe position.
+  const topSafeRatio = outputHeight <= 1200 ? 0.35 : 0.20;
+  return median > outputHeight * 0.58 ? Math.round(outputHeight * topSafeRatio) : Math.round(outputHeight * 0.74);
 }
 
 async function makeCalloutFiles(moments, outputPath) {
@@ -836,7 +846,7 @@ async function makeCalloutFiles(moments, outputPath) {
   const directory = resolve(dirname(outputPath), "callouts");
   await mkdir(directory, { recursive: true });
   for (const [index, moment] of moments.entries()) {
-    if (moment.presentationVersion === 1) continue; // One caption layer, never stacked event graphics.
+    if (Number(moment.presentationVersion || 1) < 2) continue;
     const label = eventCalloutLabel(moment.eventCallout);
     if (!label) continue;
     const path = resolve(directory, `${index}.txt`);

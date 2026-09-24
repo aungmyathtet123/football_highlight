@@ -21,7 +21,9 @@ const stages: { key: JobStage; label: string; detail: string }[] = [
   { key: "validating", label: "Quality checking", detail: "Reviewing framing, tracking, audio and transitions" },
 ];
 
-const processorUrl = process.env.NEXT_PUBLIC_PROCESSOR_URL || "http://127.0.0.1:8787";
+// Production points this at the public HTTPS origin. Caddy forwards the API
+// paths to the private processor, so browsers never need access to port 8787.
+const processorUrl = (process.env.NEXT_PUBLIC_PROCESSOR_URL || "http://127.0.0.1:8787").replace(/\/+$/, "");
 
 type LocalJob = {
   id: string; stage: JobStage; progress: number; moments: FootballMoment[];

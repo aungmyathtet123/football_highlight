@@ -282,6 +282,22 @@ export function editableEvidenceDuration(candidates) {
   return gameplay + Math.min(18, reaction) + Math.min(4, freezes);
 }
 
+// Conservative capacity shared by complete-recap planning and delivery gates.
+// It counts only unique source time that the renderer can actually place on the
+// timeline. It deliberately does not assume speculative slow motion or a freeze
+// on every scene, which previously let a 40-50 second pool masquerade as 60+.
+export function renderableEvidenceCapacity(candidates, transitionSeconds = 0.08) {
+  const unique = uniqueEvidenceCandidates(Array.isArray(candidates) ? candidates : []);
+  const durations = unique.flatMap((moment) => {
+    const length = sourceLength(moment);
+    if (!(length > 0)) return [];
+    return [isReactionOnly(moment) ? Math.min(3, length) : Math.min(MAX_SCENE_SECONDS, length)];
+  });
+  if (!durations.length) return 0;
+  return Math.max(0, durations.reduce((sum, length) => sum + length, 0)
+    - Math.max(0, durations.length - 1) * Math.max(0, Number(transitionSeconds) || 0));
+}
+
 export function expandVerifiedTimeline(moments, targetDuration) {
   const source = (Array.isArray(moments) ? moments : []).map((moment) => ({ ...moment }));
   const savedSyntheticReplays = source

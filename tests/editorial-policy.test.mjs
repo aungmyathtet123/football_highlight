@@ -28,6 +28,7 @@ import {
   normalizeContentPlan,
   plannedSegmentDuration,
   rankSemanticBackups,
+  renderableEvidenceCapacity,
   selectDirectorCandidates,
   semanticBackupScore,
   splitCaptionChunks,
@@ -35,8 +36,8 @@ import {
 } from "../local-processor/editorial-policy.mjs";
 import { commentaryPrompt } from "../local-processor/google-cloud-tts.mjs";
 import { activePlayerOverlayFrames, analysisAnnotationForMoment, analysisOverlayWindow, editorialGrade, effectiveOverlayMasks, naturalEditorialGradeFilters, nativePayoffWindow, sceneEntryTransition, sourceMaskFilters, synchronizationProblems, verifiedPlayerLabel } from "../local-processor/render-video-v2.mjs";
-import { adaptiveHighlightDurationBounds, automaticDurationSettings, automaticStoryPrompt, validateAutomaticStory } from "../local-processor/automatic-duration.mjs";
-import { captionAss, conciseCaption, normalizeCaptionHeadline, sparseCaptionCues, shortReactionCandidates, obviousIdentityProblems, unverifiedNamedEntities } from "../local-processor/short-form-policy.mjs";
+import { adaptiveHighlightDurationBounds, automaticDurationSettings, automaticStoryPrompt, completeRecapDurationBounds, validateAutomaticStory } from "../local-processor/automatic-duration.mjs";
+import { captionAss, conciseCaption, narrationSubtitleCues, normalizeCaptionHeadline, sparseCaptionCues, subtitlePhraseChunks, shortReactionCandidates, obviousIdentityProblems, unverifiedNamedEntities } from "../local-processor/short-form-policy.mjs";
 import { bindVerifiedIdentitiesToIncidents, claimedResearchSources, discoverVerifiedResearchSources, identityBindingProblems, matchReportPageSupports, matchResearchPrompt, normalizeMatchContext, scoreClaimIsVerified, verifiedIdentityNames, verifyClaimedResearchSources } from "../local-processor/match-research.mjs";
 import {
   FOOTBALL_EDITOR_SKILL_VERSION,
@@ -218,7 +219,8 @@ test("complete-highlight selection minimizes broadcast usage before adding lower
   const server = readFileSync(new URL("../local-processor/server.mjs", import.meta.url), "utf8");
   const renderer = readFileSync(new URL("../local-processor/render-video-v2.mjs", import.meta.url), "utf8");
   const policy = readFileSync(new URL("../local-processor/editorial-policy.mjs", import.meta.url), "utf8");
-  assert.match(server, /minimum \+ Math\.min\(8, Math\.max\(4, minimum \* 0\.10\)\)/);
+  assert.match(server, /const reserveSeconds = Math\.max\(30, desired \* 0\.50\)/);
+  assert.match(server, /desired \+ reserveSeconds/);
   assert.match(server, /save: 5, shot_on_target: 5, big_chance: 4, shot_off_target: 2/);
   assert.match(server, /completeActionRate\(freezeEligible \? 0\.82 : 0\)/);
   assert.match(server, /compressedCapacity/);
@@ -901,17 +903,18 @@ test("verified decisive actions can support the target through restrained editor
   assert.equal(generatedReplays.length, 0);
   assert.equal(selected.some((moment) => /--analysis-replay$/.test(moment.id)), false);
 });
-test("processor learns the target, verifies footage, writes content, then aligns the edit", () => {
+test("processor learns the target, verifies footage, locks the visual edit, then writes final recap copy", () => {
   const source = readFileSync(new URL("../local-processor/server.mjs", import.meta.url), "utf8");
   const analyze = source.indexOf('updateJob(job, "analyzing", 12');
   const track = source.indexOf('updateJob(job, "tracking", 34');
   const verify = source.indexOf("await prepareIncidentEvidence", track);
   const durationGate = source.indexOf("editableDuration < requiredPlannedDuration", verify);
-  const write = source.indexOf('updateJob(job, "writing_content", 40');
-  const align = source.indexOf('updateJob(job, "aligning_content", 48', write);
+  const outline = source.indexOf("buildLockedVisualOutline(scriptCandidates", durationGate);
+  const visualCheckpoint = source.indexOf('"locked-visual-timeline.json"', outline);
+  const write = source.indexOf('updateJob(job, "writing_content", 46', visualCheckpoint);
   assert.ok(analyze >= 0 && analyze < track);
   assert.ok(track < verify && verify < durationGate);
-  assert.ok(durationGate < write && write < align);
+  assert.ok(durationGate < outline && outline < visualCheckpoint && visualCheckpoint < write);
   assert.match(source, /Math\.ceil\(targetDuration \* 1\.5 \/ Math\.max\(1, chunkCount\)\)/);
   assert.match(source, /editableEvidenceDuration\(candidates\)/);
   assert.match(source, /expandVerifiedTimeline\(selected, job\.settings\.targetDuration\)/);
@@ -921,6 +924,7 @@ test("processor learns the target, verifies footage, writes content, then aligns
   assert.match(source, /savedDuration > planningCeiling\(job\.settings\) \+ 3/);
   assert.match(source, /fitContentPlanToEvidenceSlots\(contentPlan, verifiedDirectorSlots/);
   assert.match(source, /fitSegmentPlaybackToDuration\(alignment\.segments, settings\.targetDuration\)/);
+  assert.match(source, /durationMode: "requested", targetDuration: selectedDuration/);
   assert.match(source, /selectedBeatCount < contentPlan\.contentBeats\.length/);
   assert.match(source, /Split an overlong 13-plus-second interval/);
   assert.match(source, /trackLockedSceneUntilVerified/);
@@ -993,7 +997,7 @@ test("source semantics validate before scene lock, portrait repair follows lock,
   assert.match(server, /lead_in_trim_preserving_verified_possession_chain/);
   assert.match(server, /semanticOrigin - Number\(scene\.startTime\)/);
   assert.doesNotMatch(server, /locked_scene_repair_required/);
-  assert.match(server, /seconds \+ duration > 105/);
+  assert.match(server, /seconds \+ duration > 45/);
   assert.match(server, /compact batch \$\{batchIndex \+ 1\}\/\$\{batches\.length\}/);
   assert.match(server, /TRACKING_SAMPLE_FPS \|\| 10/);
   assert.doesNotMatch(server, /directive\.commentary \|\| candidate\.commentary/);
@@ -1050,7 +1054,7 @@ test("complete recaps preserve observed decisions and show disallowed-goal conte
   assert.match(server, /incidentCoverage\(incidentRequirementCandidates\(candidates\)/);
   assert.match(server, /assertIncidentCoverage\(incidentRequirementCandidates\(candidates\), frameable\)/);
   assert.match(server, /!\["goal", "disallowed_goal"\]\.includes\(moment\.eventType\)/);
-  assert.match(server, /incidentContext: 4/);
+  assert.match(server, /incidentContext: 5/);
 });
 
 test("verified replays get only a narrow origin-cut tolerance", () => {
@@ -1199,7 +1203,8 @@ test("locked scenes use bounded parallel repair and reactions cannot carry marke
   assert.match(server, /trackFootball\(sourcePath, \[\{ \.\.\.scene, selectedForFinalVideo: true \}\]/);
   assert.match(server, /passed \$\{nativeLandscape \? "native-frame action" : "9:16 keyframe"\} verification/);
   assert.match(server, /const trackingOnlyRetry = reusableCandidates/);
-  assert.match(server, /\["tracking", "writing_content", "aligning", "generating_commentary", "rendering", "completed"\]\.includes\(job\.stage\)/);
+  assert.match(server, /Number\(job\.progress \|\| 0\) >= 34/);
+  assert.match(server, /"locked-visual-timeline\.json", "alignment-review\.json"/);
   assert.match(server, /resumeTrackingOnly/);
   assert.match(server, /const savedTracking = JSON\.parse/);
   assert.match(server, /cachedAssessment\.usable/);
@@ -1273,6 +1278,31 @@ test("automatic story length comes from verified selection, not a fixed preset",
   assert.match(automaticStoryPrompt(240, 60), /AT LEAST 60 seconds/);
 });
 
+test("complete recaps establish a 60-120 second contract before discovery", () => {
+  assert.deepEqual(completeRecapDurationBounds(161.92), { minimum: 60, maximum: 120 });
+  assert.deepEqual(completeRecapDurationBounds(75), { minimum: 60, maximum: 75 });
+  assert.deepEqual(completeRecapDurationBounds(45), { minimum: 45, maximum: 45 });
+  const server = readFileSync(new URL("../local-processor/server.mjs", import.meta.url), "utf8");
+  const probe = server.indexOf("media = await probe(job.sourceKey)");
+  const bounds = server.indexOf("job.settings = applyCompleteDurationBounds(job.settings, media.duration)", probe);
+  const discovery = server.indexOf("await analyzePassageInventoryWithGemini", probe);
+  assert.ok(probe >= 0 && bounds > probe && discovery > bounds);
+  assert.match(server, /targetDuration: COMPLETE_RECAP_MINIMUM_SECONDS/);
+});
+
+test("complete recap capacity counts renderable unique time without speculative padding", () => {
+  const candidates = [
+    { id: "action-a", startTime: 0, endTime: 20, eventType: "goal" },
+    { id: "action-b", startTime: 25, endTime: 45, eventType: "shot_on_target" },
+    { id: "reaction", startTime: 46, endTime: 56, eventType: "celebration", storyPhase: "reaction" },
+  ];
+  const capacity = renderableEvidenceCapacity(candidates);
+  assert.ok(capacity > 42.7 && capacity < 43.1);
+  const server = readFileSync(new URL("../local-processor/server.mjs", import.meta.url), "utf8");
+  assert.match(server, /applyEditPlan\(candidates, editPlan, planningCeiling\(job\.settings\), job\.settings\)/);
+  assert.match(server, /settings\.aspectRatio === "16:9" && canRenderLockedNativeAction\(candidate\)/);
+});
+
 test("automatic prompts and renderer do not stretch to an estimated target", () => {
   const input = { durationMode: "auto", sourceDuration: 500, targetDuration: 42, expectedBeatCount: 5 };
   assert.match(buildContentWritingPrompt(input), /not a user-imposed deadline/);
@@ -1286,6 +1316,7 @@ test("renderer uses uppercase motion captions and phase-timed editorial accents"
   const renderer = readFileSync(new URL("../local-processor/render-video-v2.mjs", import.meta.url), "utf8");
   assert.match(conciseCaption("the decisive touch"), /^THE DECISIVE TOUCH$/);
   assert.match(renderer, /function safeCaptionY/);
+  assert.match(renderer, /outputHeight <= 1200 \? 0\.35 : 0\.20/);
   assert.match(renderer, /const progress = .*min\(1,max\(0/);
   assert.match(renderer, /function eventCueWindow/);
   assert.match(renderer, /payoffStartTime/);
@@ -1315,6 +1346,31 @@ test("short-form captions are sparse complete headlines, never chopped narration
   assert.doesNotMatch(ass,/62D8FF/);
 });
 
+test("complete recaps use animated uppercase narration subtitles with event colors", () => {
+  const chunks = subtitlePhraseChunks("Morgan Rogers cuts inside and places a low finish beyond the goalkeeper");
+  assert.ok(chunks.length >= 2);
+  assert.ok(chunks.every(words => words.length >= 2 && words.length <= 6));
+  const rhythmic = subtitlePhraseChunks("Chelsea push forward again down the right and cross into the box");
+  assert.ok(rhythmic.slice(0, -1).every(words => !/^(?:THE|A|AN|AND|TO|OF|IN|ON|AT|BY|FOR|WITH|FROM|INTO|DOWN)$/i.test(words.at(-1).replace(/[^A-Z]/gi, ""))));
+  assert.deepEqual(subtitlePhraseChunks("Into the net for his second goal"), [["INTO", "THE", "NET"], ["FOR", "HIS", "SECOND", "GOAL"]]);
+  assert.deepEqual(subtitlePhraseChunks("The first-time strike takes a heavy deflection"), [["THE", "FIRST-TIME", "STRIKE"], ["TAKES", "A", "HEAVY", "DEFLECTION"]]);
+  const cues = narrationSubtitleCues({
+    eventType: "goal",
+    commentary: "Morgan Rogers cuts inside and places a low finish beyond the goalkeeper.",
+    verifiedIdentity: { scorer: "Morgan Rogers" },
+  }, 7);
+  assert.ok(cues.length >= 2);
+  assert.ok(cues.every(cue => cue.text === cue.text.toLocaleUpperCase("en-US")));
+  assert.ok(cues.every(cue => cue.accent === "&H004DD8FF&" && cue.animatedSubtitle));
+  assert.equal(cues[0].start, 0.16);
+  assert.equal(cues.at(-1).end, 6.88);
+  const ass = captionAss(cues, 800, 1920, 1080);
+  assert.match(ass, /\\fscx92\\fscy92/);
+  assert.match(ass, /\\t\(0,150,\\fscx100\\fscy100\)/);
+  assert.match(ass, /\\N/);
+  assert.match(ass, /004DD8FF/);
+});
+
 test("reactions are short, and narration identity guards reject unverified names", () => {
   const source=[{startTime:20,endTime:27,eventType:"celebration",playbackRate:.8}];
   const [reaction]=shortReactionCandidates(source);
@@ -1336,6 +1392,8 @@ test("finished exports require measured loudness and scene-by-scene quality evid
   assert.match(renderer,/older final\.mp4 must never satisfy validation/);
   assert.doesNotMatch(renderer,/result = await measure\(outputPath\);\s*const existing/);
   assert.match(server,/Re-normalizing the saved final audio mix without re-encoding video/);
+  assert.match(server,/loudness: renderResult\.loudness/);
+  assert.match(server,/warnings: \[\.\.\.new Set\(job\.warnings\)\]/);
   assert.match(renderer,/measured_I=/);
   assert.match(renderer,/speechDuration > baseOutputLength \+ 0.35/);
   assert.match(renderer,/const teaserDuration = teaserEnabled \? Math.min\(0.8, firstPayoff.end - firstPayoff.start\)/);
@@ -1344,7 +1402,7 @@ test("finished exports require measured loudness and scene-by-scene quality evid
 test("complete recaps use a 60-second floor without padding to a two-minute guide", () => {
   const server = readFileSync(new URL("../local-processor/server.mjs", import.meta.url), "utf8");
   const renderer = readFileSync(new URL("../local-processor/render-video-v2.mjs", import.meta.url), "utf8");
-  assert.match(server, /durationMode: "requested", targetDuration: requestedTarget, durationMin: 60/);
+  assert.match(server, /durationMode: "requested", targetDuration: requestedTarget, durationMin: COMPLETE_RECAP_MINIMUM_SECONDS, durationMax: COMPLETE_RECAP_MAXIMUM_SECONDS/);
   assert.match(server, /Math\.min\(requestedGuide, editableDuration\)/);
   assert.match(server, /requiredPlannedDuration = Number\(job\.settings\.durationMin \|\| 60\)/);
   assert.match(server, /isCompleteHighlights\(job\.settings\) \? planningCeiling\(job\.settings\) : job\.settings\.targetDuration/);
@@ -1389,7 +1447,7 @@ test("studio sends the recap brief and displays the generated video title", () =
   assert.match(server, /requestedRecapSeconds\(recapBrief\)/);
   assert.match(server, /durationMode: "requested"/);
   assert.match(server, /applyCompleteDurationBounds/);
-  assert.match(server, /const naturalMinimum = Math.min\(60, bounds.maximum\)/);
+  assert.match(server, /const bounds = completeRecapDurationBounds\(sourceDuration\)/);
   assert.doesNotMatch(server, /durationMode: "narration_fitted"/);
   assert.match(server, /The visual edit is locked\. Recording narration as the final production stage/);
   assert.match(server, /fitContinuousNarrationToLockedTimeline\(masterTtsFiles, selectedDuration/);
@@ -1615,11 +1673,14 @@ test("Video Intelligence supplies OCR evidence before Gemini writes the recap", 
   assert.match(source, /detectedText/);
 });
 
-test("script writing precedes alignment and weak tracking downgrades effects", () => {
+test("complete recap script writing follows the locked visual timeline and weak tracking downgrades effects", () => {
   const server = readFileSync(new URL("../local-processor/server.mjs", import.meta.url), "utf8");
   const renderer = readFileSync(new URL("../local-processor/render-video-v2.mjs", import.meta.url), "utf8");
   const newJobFlow = server.slice(server.indexOf("async function processJob"));
-  assert.ok(newJobFlow.indexOf('"writing_content"') < newJobFlow.indexOf('"aligning_content"'));
+  const checkpoint = newJobFlow.indexOf('"locked-visual-timeline.json"');
+  const finalWriting = newJobFlow.indexOf('updateJob(job, "writing_content", 46', checkpoint);
+  assert.ok(checkpoint >= 0 && finalWriting > checkpoint);
+  assert.match(newJobFlow, /contentPlan = buildLockedVisualOutline\(scriptCandidates/);
   assert.match(server, /recoverSafeStaticCandidates/);
   assert.match(renderer, /usesSafeStaticPresentation/);
   assert.match(server, /Gemini recap script/);

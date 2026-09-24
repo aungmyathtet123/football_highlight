@@ -16,8 +16,8 @@ import { downgradeToSafeStatic, recoverSafeStaticCandidates, safeStaticFallbackE
 import { restoreContentBeatOrder } from "./pipeline-state.mjs";
 import { incidentCoverage, assertIncidentCoverage } from "./incident-coverage.mjs";
 import { alignActionToShot, linkImmediateGoalReplays, trimToVerifiedActionOrigin } from "./action-boundaries.mjs";
-import { stableSignature, semanticSignature, needsSemanticReview, mergeSemanticReview, incidentManifest, evidenceReport, parseTrackingProgress, matchingTrackingEvidence, summarizeTracking } from "./pipeline-state.mjs";
-import { adaptiveHighlightDurationBounds, automaticDurationSettings, naturalStoryCapacity, uniqueEvidenceCandidates } from "./automatic-duration.mjs";
+import { SEMANTIC_VERIFICATION_VERSION, stableSignature, semanticSignature, needsSemanticReview, mergeSemanticReview, incidentManifest, evidenceReport, parseTrackingProgress, matchingTrackingEvidence, summarizeTracking } from "./pipeline-state.mjs";
+import { COMPLETE_RECAP_MINIMUM_SECONDS, COMPLETE_RECAP_MAXIMUM_SECONDS, completeRecapDurationBounds, automaticDurationSettings, naturalStoryCapacity, uniqueEvidenceCandidates } from "./automatic-duration.mjs";
 import { obviousIdentityProblems, shortReactionCandidates, unverifiedNamedEntities } from "./short-form-policy.mjs";
 import { buildViralReelPlan, isViralReel, viralReelDurationBounds } from "./viral-reel-policy.mjs";
 import { analysisProxyWindows, buildBroadcastShotInventory, inventoryForExcerpt, passageFitsShotSequence } from "./passage-inventory.mjs";
@@ -51,6 +51,7 @@ import {
   normalizeContentPlan,
   plannedSegmentDuration,
   rankSemanticBackups,
+  renderableEvidenceCapacity,
   selectDirectorCandidates,
   semanticBackupScore,
 } from "./editorial-policy.mjs";
@@ -85,6 +86,7 @@ const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 await loadDotEnv(join(projectRoot, ".env"));
 
 const port = Number(process.env.LOCAL_PROCESSOR_PORT || 8787);
+const publicBaseUrl = String(process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${port}`).replace(/\/+$/, "");
 const dataRoot = resolveSetting(process.env.LOCAL_DATA_DIR || "./local-data");
 const uploadRoot = join(dataRoot, "uploads");
 const outputRoot = join(dataRoot, "outputs");
@@ -236,9 +238,14 @@ async function retryAnalysisJob(response, id) {
     && !/Gemini video analysis failed|could not return numeric football scenes/i.test(String(job.error?.message || ""));
   const trackingOnlyRetry = reusableCandidates
     && job.moments.some(moment => moment.selectionLocked === true)
-    && (["tracking", "writing_content", "aligning", "generating_commentary", "rendering", "completed"].includes(job.stage)
+    && (Number(job.progress || 0) >= 34
+      || ["tracking", "writing_content", "aligning", "aligning_content", "generating_commentary", "editing", "rendering", "validating", "completed"].includes(job.stage)
       || /Locked scene|keyframe|tracking or framing repair|incident\(s\).*tracking has not passed|Complete-match coverage is missing/i.test(String(job.error?.message || "")));
-  const savedStep1Scenes = reusableCandidates ? await loadStep1SceneManifest(id, job.settings) : [];
+  // Only a job that passed Step 1 may be restored from the immutable lock
+  // manifest. A pre-lock semantic failure must resume from its saved inventory
+  // so the newer verifier can re-review it; attempting to synthesize a locked
+  // manifest here repeats the old duration failure inside the HTTP request.
+  const savedStep1Scenes = trackingOnlyRetry ? await loadStep1SceneManifest(id, job.settings) : [];
   const restarted = reusableCandidates
     ? { ...job, moments: savedStep1Scenes.length ? savedStep1Scenes : (job.observedMoments?.length ? job.observedMoments : job.moments), resumeFromCandidates: true }
     : { ...job, moments: [], warnings: [], overlayMasks: [], discoveryPassesCompleted: 0 };
@@ -280,7 +287,7 @@ async function resumeRender(id) {
       delete job.retryRenderReason;
       await updateJob(job, "completed", 100, {
         outputKey: outputPath,
-        outputUrl: `http://127.0.0.1:${port}/outputs/${id}/final.mp4`,
+        outputUrl: publicOutputUrl(id),
         renderValidation,
         qualityReview: job.qualityReview,
         completedAt: new Date().toISOString(),
@@ -439,7 +446,7 @@ async function resumeRender(id) {
         },
       });
       const resumedEditPlan = await alignContentReliably(contentPlan, job.moments, job.settings, verifiedEvidenceDuration, editableDuration);
-      originalSavedPlan = applyEditPlan(job.moments, resumedEditPlan, planningCeiling(job.settings));
+      originalSavedPlan = applyEditPlan(job.moments, resumedEditPlan, planningCeiling(job.settings), job.settings);
       originalSavedPlan = restoreContentBeatOrder(originalSavedPlan, contentPlan.contentBeats);
       job = await updateJob(job, "tracking", 56, {
         moments: originalSavedPlan,
@@ -539,7 +546,7 @@ async function resumeRender(id) {
     }
     await updateJob(job, "completed", 100, {
       outputKey: outputPath,
-      outputUrl: `http://127.0.0.1:${port}/outputs/${id}/final.mp4`,
+      outputUrl: publicOutputUrl(id),
       renderValidation,
       qualityReview,
       completedAt: new Date().toISOString(),
@@ -618,13 +625,20 @@ async function processJob(id) {
       overlayMasks = Array.isArray(job.overlayMasks) ? job.overlayMasks : [];
       delete job.resumeFromCandidates;
       delete job.resumeTrackingOnly;
-      job.warnings.push(resumeTrackingOnly
+      const resumeWarning = resumeTrackingOnly
         ? "Resumed the locked Step 2 scene manifest for keyframe repair; Gemini discovery was not restarted."
-        : "Resumed from saved whole-video candidates after the local processor restarted.");
+        : "Resumed from saved whole-video candidates after the local processor restarted.";
+      if (!job.warnings.includes(resumeWarning)) job.warnings.push(resumeWarning);
     } else {
       job = await updateJob(job, "analyzing", 12);
       media = await probe(job.sourceKey);
       job.media = media;
+      // Complete-recap discovery must receive the same 60-120 second contract
+      // enforced later. Previously it searched with a 30-second target and the
+      // pipeline raised the minimum to 60 only after the inventory was built.
+      if (isCompleteHighlights(job.settings)) {
+        job.settings = applyCompleteDurationBounds(job.settings, media.duration);
+      }
       overlayMasks = [];
       await ensureShotBoundaries(job.sourceKey, id);
       if (process.env.GEMINI_API_KEY) {
@@ -784,9 +798,23 @@ async function processJob(id) {
     // split. Trim stale player-only/empty-field pre-roll before any 9:16 work.
     candidates = candidates.map(trimToVerifiedActionOrigin);
     job = await updateJob(job, "tracking", 34, {moments:candidates});
-    const prepared = await prepareIncidentEvidence(job.sourceKey, candidates, media, id);
+    let prepared = await prepareIncidentEvidence(job.sourceKey, candidates, media, id);
     candidates = linkImmediateGoalReplays(prepared.candidates);
-    const tracking = prepared.tracking;
+    let tracking = prepared.tracking;
+    const firstTrackedCapacity = planningEvidenceCapacity(candidates, job.settings);
+    const requiredBeforePlanning = minimumPlannedDuration(job.settings);
+    if (firstTrackedCapacity + 0.01 < requiredBeforePlanning
+      && candidates.some(moment => moment.selectionLocked !== true && moment.semanticVerified === true && moment.keepDecision !== "reject")) {
+      job = await updateJob(job, "tracking", 36, {
+        moments: candidates,
+        observedMoments: candidates,
+        progressDetail: `Verified primary scenes provide ${firstTrackedCapacity.toFixed(1)} seconds. Promoting the already-discovered reserve pool without restarting Gemini discovery.`,
+      });
+      candidates = promoteRemainingScenesForLock(candidates);
+      prepared = await prepareIncidentEvidence(job.sourceKey, candidates, media, id);
+      candidates = linkImmediateGoalReplays(prepared.candidates);
+      tracking = prepared.tracking;
+    }
     // Each verified goal may have two source angles in the Step 1 probe set.
     // Compare their real local player-and-ball tracks now, keep exactly one
     // complete action angle per incident, and retain its separate reaction.
@@ -901,9 +929,12 @@ async function processJob(id) {
       verifiedEvidenceDuration = availableVerifiedEvidenceDuration(candidates);
       editableDuration = planningEvidenceCapacity(candidates, job.settings);
     }
-    job = await updateJob(job, "writing_content", 40, {
+    job = await updateJob(job, isCompleteHighlights(job.settings) ? "aligning_content" : "writing_content", 40, {
       moments: candidates,
       trackingSummary: tracking.summary,
+      progressDetail: isCompleteHighlights(job.settings)
+        ? "Locking the exact visual timeline and duration before Gemini writes the final recap script."
+        : "Writing analysis against the verified football evidence.",
       editPlan: {
         requestedDuration: job.settings.durationMode === "auto" ? null : job.settings.targetDuration,
         aiSelectedDuration: automaticStory?.targetDuration,
@@ -919,22 +950,26 @@ async function processJob(id) {
     const verifiedDirectorSlots = scriptCandidates.length;
     const verifiedGoalActionCount = verifiedLiveGoalActions(scriptCandidates).length;
     let contentPlan;
-    if (process.env.GEMINI_API_KEY) {
+    if (isCompleteHighlights(job.settings)) {
+      // The complete-recap script is final production copy, not an input to
+      // scene selection. Use a local evidence outline to lock trims, order,
+      // transitions and duration first; Gemini writes only after that visual
+      // timeline is immutable.
+      contentPlan = buildLockedVisualOutline(scriptCandidates, job.settings, matchContext);
+    } else if (process.env.GEMINI_API_KEY) {
       try {
         contentPlan = await writeAnalysisContentWithGemini(scriptCandidates, media, job.settings, verifiedEvidenceDuration, editableDuration, verifiedDirectorSlots, verifiedGoalActionCount, matchContext);
       } catch (error) {
-        if (isCompleteHighlights(job.settings)) {
-          throw new Error("Gemini recap-script validation failed; complete recaps do not use a fallback script: " + sanitizeProviderError(String(error?.message || error)));
-        }
         job.warnings.push("Gemini recap-script validation did not complete; a conservative evidence-based script was used: " + sanitizeProviderError(String(error?.message || error)));
         contentPlan = buildDeterministicContentPlan(scriptCandidates, job.settings);
       }
     } else {
-      if (isCompleteHighlights(job.settings)) throw new Error("Gemini is required to write a complete recap script; no fallback script is allowed.");
       contentPlan = buildDeterministicContentPlan(scriptCandidates, job.settings);
     }
     const originalBeatCount = contentPlan.contentBeats.length;
-    contentPlan = fitContentPlanToEvidenceSlots(contentPlan, verifiedDirectorSlots, job.settings.targetDuration);
+    if (!isCompleteHighlights(job.settings)) {
+      contentPlan = fitContentPlanToEvidenceSlots(contentPlan, verifiedDirectorSlots, job.settings.targetDuration);
+    }
     contentPlan = sanitizeUnverifiedContentPlan(contentPlan, matchContext, job.settings);
     let masterTtsFiles = new Map();
     if (contentPlan.contentBeats.length < originalBeatCount) {
@@ -957,7 +992,7 @@ async function processJob(id) {
       },
     });
     editPlan = await alignContentReliably(contentPlan, candidates, job.settings, verifiedEvidenceDuration, editableDuration);
-    let planned = applyEditPlan(candidates, editPlan, planningCeiling(job.settings));
+    let planned = applyEditPlan(candidates, editPlan, planningCeiling(job.settings), job.settings);
     planned = restoreContentBeatOrder(planned, contentPlan.contentBeats);
     let selected = applyCompleteHighlightTreatment(applyTrackingQuality(planned, tracking, job.settings), job.settings);
     let selectedDuration = selectedTimelineDuration(selected);
@@ -981,26 +1016,38 @@ async function processJob(id) {
       .filter((moment) => moment.selectedForFinalVideo)
       .filter(narratableEvidence);
     let lockedBindingProblems = contentEvidenceBindingProblems(contentPlan.contentBeats, lockedNarrationCandidates);
-    if (lockedBindingProblems.length) {
+    await writeFile(join(outputRoot, id, "locked-visual-timeline.json"), JSON.stringify({
+      version: 1,
+      savedAt: new Date().toISOString(),
+      selectedDuration,
+      matchContext,
+      trackingSummary: tracking.summary,
+      moments: selected,
+    }, null, 2));
+    if (isCompleteHighlights(job.settings) || lockedBindingProblems.length) {
       if (!process.env.GEMINI_API_KEY) {
         throw new Error(`The locked visual timeline requires an exact narration rewrite: ${lockedBindingProblems.join(", ")}.`);
       }
       job = await updateJob(job, "writing_content", 46, {
-        progressDetail: "Tracking changed the locked visual evidence. Rewriting every narration beat against the exact surviving scenes before voice recording.",
+        progressDetail: "The visual edit is locked. Writing every narration beat against the exact scenes and final duration before voice recording.",
       });
       const lockedEvidenceDuration = availableVerifiedEvidenceDuration(lockedNarrationCandidates);
       const lockedEditableDuration = planningEvidenceCapacity(lockedNarrationCandidates, job.settings);
       const lockedGoalCount = verifiedLiveGoalActions(lockedNarrationCandidates).length;
+      const narrationSettings = isCompleteHighlights(job.settings)
+        ? { ...job.settings, durationMode: "requested", targetDuration: selectedDuration }
+        : job.settings;
       contentPlan = await writeAnalysisContentWithGemini(
         lockedNarrationCandidates,
         media,
-        job.settings,
+        narrationSettings,
         lockedEvidenceDuration,
         lockedEditableDuration,
         lockedNarrationCandidates.length,
         lockedGoalCount,
         matchContext,
       );
+      contentPlan = fitContentPlanToEvidenceSlots(contentPlan, lockedNarrationCandidates.length, selectedDuration);
       contentPlan = sanitizeUnverifiedContentPlan(contentPlan, matchContext, job.settings);
       lockedBindingProblems = contentEvidenceBindingProblems(contentPlan.contentBeats, lockedNarrationCandidates);
       if (lockedBindingProblems.length) {
@@ -1141,9 +1188,11 @@ async function processJob(id) {
     }
     job = await updateJob(job, "completed", 100, {
       outputKey: outputPath,
-      outputUrl: `http://127.0.0.1:${port}/outputs/${id}/final.mp4`,
+      outputUrl: publicOutputUrl(id),
       renderValidation,
       qualityReview,
+      loudness: renderResult.loudness,
+      warnings: [...new Set(job.warnings)],
       completedAt: new Date().toISOString(),
     });
   } catch (error) {
@@ -1158,6 +1207,19 @@ async function processJob(id) {
 }
 
 async function loadStep1SceneManifest(id, settings) {
+  // A later visual checkpoint is more authoritative than the original Step-1
+  // probe set. In particular, a script/TTS retry must preserve the exact
+  // post-tracking scene boundaries and must never run scene selection again.
+  for (const checkpointName of ["locked-visual-timeline.json", "alignment-review.json"]) {
+    try {
+      const checkpoint = JSON.parse(await readFile(join(outputRoot, id, checkpointName), "utf8"));
+      if (Array.isArray(checkpoint?.moments)
+        && checkpoint.moments.some(moment => moment.selectionLocked === true)
+        && checkpoint.moments.some(moment => moment.selectedForFinalVideo === true)) {
+        return checkpoint.moments;
+      }
+    } catch { /* The job may not have reached this checkpoint yet. */ }
+  }
   const manifestPath = join(outputRoot, id, "step1-scene-manifest.json");
   try {
     const saved = JSON.parse(await readFile(manifestPath, "utf8"));
@@ -1235,6 +1297,7 @@ function applyCompleteHighlightTreatment(moments, settings) {
     );
     const base = {
       ...moment,
+      presentationVersion: 2,
       colorGrade: gradeForScene(moment),
       transitionIn,
       transitionDuration,
@@ -1336,7 +1399,7 @@ async function finishViralReelJob(job, candidates, media, overlayMasks, tracking
   }
   await updateJob(job, "completed", 100, {
     outputKey: outputPath,
-    outputUrl: `http://127.0.0.1:${port}/outputs/${id}/final.mp4`,
+    outputUrl: publicOutputUrl(id),
     renderValidation,
     qualityReview,
     completedAt: new Date().toISOString(),
@@ -1399,7 +1462,7 @@ async function generateGeminiContent(ai, request, label, attempts = 3) {
           );
         }),
       ]));
-      if (quotaAttempt) await clearGeminiCapacityWait();
+      if (quotaAttempt || transientAttempt) await clearGeminiCapacityWait();
       return response;
     } catch (error) {
       const raw = String(error?.message || error);
@@ -1416,13 +1479,13 @@ async function generateGeminiContent(ai, request, label, attempts = 3) {
         await new Promise(resolvePromise => setTimeout(resolvePromise, retryDelayMs));
         continue;
       }
-      transientAttempt += 1;
       const deadline = /504|deadline[_ ]exceeded|deadline expired/i.test(raw);
-      const transient = deadline || /503|temporarily unavailable|internal error/i.test(raw);
-      const exhausted = transientAttempt >= attempts || (deadline && transientAttempt >= 2);
-      if (!transient || exhausted) throw error;
-      const retryDelayMs = 1500 * transientAttempt;
-      console.warn(`${label} received a transient service response on attempt ${transientAttempt}; retrying after ${Math.round(retryDelayMs / 1000)} seconds.`);
+      const transient = deadline || /408|502|503|temporarily unavailable|internal error|socket hang up|ECONNRESET|ETIMEDOUT|fetch failed/i.test(raw);
+      if (!transient) throw error;
+      transientAttempt += 1;
+      const retryDelayMs = Math.min(60_000, 5_000 * (2 ** Math.min(4, transientAttempt - 1)));
+      await recordGeminiCapacityWait(label, transientAttempt, retryDelayMs);
+      console.warn(`${label} received a temporary timeout/service response on attempt ${transientAttempt}; saved progress and retrying after ${Math.round(retryDelayMs / 1000)} seconds.`);
       await new Promise(resolvePromise => setTimeout(resolvePromise, retryDelayMs));
     } finally {
       clearTimeout(timer);
@@ -2584,7 +2647,7 @@ function restorePossessionChainStarts(scenes) {
     const approved = {
       ...restored,
       semanticVerified: true,
-      semanticVerificationVersion: 8,
+      semanticVerificationVersion: SEMANTIC_VERIFICATION_VERSION,
       keepDecision: restored.selectionKeepDecision || (restored.isReplay ? "replay" : "keep"),
       selectedForFinalVideo: true,
       rejectReason: undefined,
@@ -2850,8 +2913,17 @@ async function verifyCandidateSemanticsWithGemini(sourcePath, candidates, id, on
     && moment.semanticVerified === false
     && moment.semanticDecisionContextVersion !== 1
   );
+  // A verifier upgrade must be able to re-open scenes rejected by an older
+  // semantic version. selectDirectorCandidates intentionally excludes rejects,
+  // which previously made poisoned/incomplete cache decisions permanent.
+  const staleSemanticReview = candidates.filter(moment =>
+    needsSemanticReview(moment)
+    && moment.selectionLocked !== true
+    && Boolean(moment.ballVisible || playerOnlyAllowed(moment))
+  );
   const reviewPool = [...new Map([
     ...selectDirectorCandidates(candidates),
+    ...staleSemanticReview,
     ...forcedDecisionReview,
   ].map(moment => [moment.id, moment])).values()];
   const eligible = reviewPool.filter(framingEligible)
@@ -2869,7 +2941,7 @@ async function verifyCandidateSemanticsWithGemini(sourcePath, candidates, id, on
     let seconds = 0;
     for (const moment of eligible) {
       const duration = Math.max(0.5, Number(moment.endTime) - Number(moment.startTime));
-      if (batch.length && (seconds + duration > 105 || batch.length >= 8)) {
+      if (batch.length && (seconds + duration > 45 || batch.length >= 4)) {
         batches.push(batch);
         batch = [];
         seconds = 0;
@@ -2896,7 +2968,8 @@ async function verifyCandidateSemanticsWithGemini(sourcePath, candidates, id, on
   // Review all eligible incidents in one labeled evidence reel to avoid quota-heavy per-incident calls.
   const sourceInfo = await stat(sourcePath);
   const reviewKey = stableSignature({ sourcePath, size: sourceInfo.size, modified: sourceInfo.mtimeMs,
-    model: process.env.GEMINI_MODEL, prompt: FOOTBALL_EDITOR_SKILL_VERSION, geometry: 1, incidentContext: 4, candidates: eligible.map(semanticSignature) });
+    model: process.env.GEMINI_MODEL, prompt: FOOTBALL_EDITOR_SKILL_VERSION, geometry: 1, incidentContext: 5,
+    semanticVersion: SEMANTIC_VERIFICATION_VERSION, candidates: eligible.map(semanticSignature) });
   const reviewDir = join(outputRoot, id, "semantic-cache");
   await mkdir(reviewDir, { recursive: true });
   const reviewPath = join(reviewDir, `${reviewKey}.json`);
@@ -2920,6 +2993,21 @@ async function verifyCandidateSemanticsWithGemini(sourcePath, candidates, id, on
   };
   const reviewWindows = eligible.map(reviewWindow);
   const reviewWindowById = new Map(eligible.map((moment, index) => [String(moment.id), reviewWindows[index]]));
+  let reviewReelCursor = 0;
+  const reviewClipManifest = eligible.map((moment, index) => {
+    const window = reviewWindows[index];
+    const duration = Math.max(0, Number(window.end) - Number(window.start));
+    const clip = {
+      id: String(moment.id),
+      reelStartTime: Number(reviewReelCursor.toFixed(3)),
+      reelEndTime: Number((reviewReelCursor + duration).toFixed(3)),
+      sourceStartTime: Number(Number(window.start).toFixed(3)),
+      sourceEndTime: Number(Number(window.end).toFixed(3)),
+      claimedEventType: String(moment.eventType || "normal_play"),
+    };
+    reviewReelCursor += duration;
+    return clip;
+  });
   const filters = eligible.map((moment, index) => {
     const label = String(moment.id).replace(/[^a-zA-Z0-9_-]/g, "-");
     const window = reviewWindows[index];
@@ -2939,6 +3027,7 @@ async function verifyCandidateSemanticsWithGemini(sourcePath, candidates, id, on
   const prompt = [
     "Act as a strict football evidence verifier. Watch every labeled candidate clip completely. The existing event names and descriptions are untrusted hypotheses; trust only the pixels in the labeled clip.",
     "Return JSON only with candidates array. Return exactly one item for every supplied id with id, semanticMatch boolean, correctedEventType, correctedDescription, actionComplete boolean, narrationFacts array, and reason.",
+    `The exact required ids are: ${eligible.map((moment) => moment.id).join(", ")}. Omitting an id is an invalid incomplete response. The supplied clipManifest gives each labeled clip's boundaries inside the concatenated review reel.`,
     "semanticMatch is true only when the clip visibly supports a complete, resolved version of its claimed event and description. A clip labeled save must visibly show the shot, ball travel, goalkeeper contact, and outcome. A goal must visibly show setup, scorer and ball before contact, decisive touch, ball travel, and goalmouth payoff. Midfield build-up alone is not a save or goal.",
     "A celebration or reaction supports emotion and urgency only. It never proves the scoring action, the technique of a finish, a save, or the tactical cause of a goal.",
     "For an ambiguous live goal, the labeled clip may continue through its same-incident reaction and replay so you can resolve whether the earlier live touch scored. Use that later context to disambiguate the result, but semanticMatch remains true only when the live scoring action itself is present at the beginning of the labeled clip. A visible scoreboard transition plus a matching replay may confirm an otherwise ambiguous goalmouth result; neither may replace missing live action.",
@@ -2954,14 +3043,47 @@ async function verifyCandidateSemanticsWithGemini(sourcePath, candidates, id, on
     contents: [
       { inlineData: { data: proxy.toString("base64"), mimeType: "video/mp4" }, videoMetadata: { fps: 8 } },
       { text: prompt },
-      { text: JSON.stringify({ candidateHypotheses: compactPlanningCandidates(eligible) }) },
+      { text: JSON.stringify({ clipManifest: reviewClipManifest, candidateHypotheses: compactPlanningCandidates(eligible) }) },
     ],
-    config: { responseMimeType: "application/json", temperature: 0.03 },
+    config: { responseMimeType: "application/json", temperature: 0.03, maxOutputTokens: 16384 },
   };
   const reviewClient = createGeminiClient();
   let semanticJson = await generateGeminiJson(reviewClient, reviewRequest, "Gemini semantic verification", 3);
   let response = semanticJson.response;
   let parsed = semanticJson.parsed;
+  const expectedReviewIds = eligible.map((moment) => String(moment.id));
+  const incompleteReviewIds = (value) => {
+    const returned = new Map((Array.isArray(value?.candidates) ? value.candidates : [])
+      .filter((item) => item && typeof item.id === "string")
+      .map((item) => [String(item.id), item]));
+    return expectedReviewIds.filter((candidateId) => {
+      const item = returned.get(candidateId);
+      return !item || typeof item.semanticMatch !== "boolean" || typeof item.actionComplete !== "boolean";
+    });
+  };
+  for (let correctionAttempt = 1; correctionAttempt <= 3; correctionAttempt += 1) {
+    const missingIds = incompleteReviewIds(parsed);
+    if (!missingIds.length) break;
+    const current = await readJob(id);
+    await updateJob(current, current.stage, current.progress, {
+      progressDetail: `Gemini omitted ${missingIds.length} scene review(s). Requesting the complete labeled response without rejecting omitted footage (attempt ${correctionAttempt}/3).`,
+    });
+    semanticJson = await generateGeminiJson(reviewClient, {
+      ...reviewRequest,
+      contents: [...reviewRequest.contents, { text: `Your previous response was incomplete. Return a candidates item for every exact id: ${expectedReviewIds.join(", ")}. The missing or invalid ids were: ${missingIds.join(", ")}. Keep the response concise, preserve each exact id, and include semanticMatch and actionComplete as JSON booleans. Return the complete JSON object again.` }],
+    }, `Gemini semantic completeness correction ${correctionAttempt}`, 3);
+    response = semanticJson.response;
+    parsed = semanticJson.parsed;
+  }
+  const stillIncomplete = incompleteReviewIds(parsed);
+  if (stillIncomplete.length) {
+    throw new Error(`Gemini semantic validation remained incomplete for ${stillIncomplete.join(", ")}; saved candidates were not falsely rejected. Retry will reuse the inventory and request only the missing review batch.`);
+  }
+  await writeFile(join(reviewDir, `${reviewKey}.response.json`), JSON.stringify({
+    expectedIds: expectedReviewIds,
+    clipManifest: reviewClipManifest,
+    responseText: String(response?.text || ""),
+  }, null, 2));
   const oversized = (parsed.candidates || []).filter(item => {
     const box = (item.payoffEvidence || item.trackingBrief?.payoffEvidence)?.targetBox;
     return Array.isArray(box) && box[2] - box[0] > portraitWidth;
@@ -2985,7 +3107,7 @@ async function verifyCandidateSemanticsWithGemini(sourcePath, candidates, id, on
         keepDecision: "reject",
       selectedForFinalVideo: false,
         trackingDecision: "semantic_mismatch",
-        semanticVerificationVersion: 8,
+        semanticVerificationVersion: SEMANTIC_VERIFICATION_VERSION,
         semanticDecisionContextVersion: moment.eventType === "disallowed_goal" ? 1 : moment.semanticDecisionContextVersion,
         semanticVerified: false,
         rejectReason: String(review?.reason || "Gemini could not verify the claimed complete event from the labeled clip.").slice(0, 240),
@@ -3005,7 +3127,7 @@ async function verifyCandidateSemanticsWithGemini(sourcePath, candidates, id, on
       role: correctedEventType === "celebration" ? "reaction" : moment.role === "reaction" ? "evidence" : moment.role,
       description: String(review.correctedDescription || moment.description || "").slice(0, 420),
       actionComplete: true,
-      semanticVerificationVersion: 8,
+      semanticVerificationVersion: SEMANTIC_VERIFICATION_VERSION,
       semanticDecisionContextVersion: moment.eventType === "disallowed_goal" ? 1 : moment.semanticDecisionContextVersion,
       keepDecision: moment.trackingDecision === "semantic_mismatch" ? "keep" : moment.keepDecision,
       trackingDecision: moment.trackingDecision === "semantic_mismatch" ? "not_tracked" : moment.trackingDecision,
@@ -3379,6 +3501,38 @@ function buildFallbackMoments(duration, targetDuration) {
   });
 }
 
+function buildLockedVisualOutline(candidates, settings, matchContext) {
+  const ordered = analysisFirstIncidentOrder((Array.isArray(candidates) ? candidates : [])
+    .filter((moment) => moment.selectionLocked === true && narratableEvidence(moment)));
+  const identityBindings = bindVerifiedIdentitiesToIncidents(matchContext, ordered);
+  const identityByStory = new Map(identityBindings.map((binding) => [String(binding.storyId), binding]));
+  const beats = ordered.map((moment, index) => {
+    const identity = identityByStory.get(String(moment.storyId || moment.id));
+    const subject = identity?.scorer || identity?.team || "The attacking side";
+    const visibleFact = (Array.isArray(moment.semanticNarrationFacts) && moment.semanticNarrationFacts[0])
+      || moment.description
+      || "The move reaches its visible outcome.";
+    return {
+      beatId: `visual-${index + 1}`,
+      role: index === 0 ? "hook" : index === ordered.length - 1 ? "conclusion" : "analysis",
+      narration: `${subject}: ${visibleFact}`,
+      evidenceNeed: String(moment.id),
+      captionText: moment.onScreenText || eventHeadline(moment),
+    };
+  });
+  const home = matchContext?.status === "verified" ? matchContext.homeTeam : "Football";
+  const away = matchContext?.status === "verified" ? matchContext.awayTeam : "Match";
+  const outline = normalizeContentPlan({
+    title: `${home} vs ${away} visual timeline`,
+    editorialThesis: "Lock the verified football actions before narration is authored.",
+    contentAngle: "A scene-bound visual outline used only for deterministic editing.",
+    storyQuestion: "Which verified actions form the complete match recap?",
+    storyAnswer: "The locked scenes preserve every verified incident and its visible outcome.",
+    contentBeats: beats,
+  }, settings.targetDuration);
+  return { ...outline, verifiedIdentityBindings: identityBindings, visualOutline: true };
+}
+
 function buildDeterministicContentPlan(candidates, settings) {
   const evidence = [...candidates]
     .filter((moment) => moment.keepDecision !== "reject" && framingEligible(moment))
@@ -3573,9 +3727,11 @@ function chooseInitialScenesForLock(candidates, settings) {
     if (reaction) return Math.min(1.6, sourceLength);
     return sourceLength / completeActionPlaybackRate(sourceLength, 0);
   };
+  const desired = Math.max(minimum, Math.min(Number(settings?.targetDuration || minimum), planningCeiling(settings)));
+  const reserveSeconds = Math.max(30, desired * 0.50);
   const target = Math.min(
     source.reduce((sum, moment) => sum + compressedCapacity(moment), 0),
-    minimum + Math.min(8, Math.max(4, minimum * 0.10)),
+    desired + reserveSeconds,
   );
   const decisiveEvents = new Set(["goal", "disallowed_goal", "offside", "var"]);
   const requiredStories = new Set(source.filter(moment => decisiveEvents.has(moment.eventType))
@@ -3635,6 +3791,28 @@ function chooseInitialScenesForLock(candidates, settings) {
       ...(angleRank >= 0 ? { incidentAngleCandidate: true, incidentAngleRank: angleRank + 1 } : {}),
       sceneSelectionApproved: selected.has(moment.id),
       selectionDecision: selected.has(moment.id) ? "approved_in_step_1" : "removed_during_scene_selection",
+    };
+  });
+}
+
+function promoteRemainingScenesForLock(candidates) {
+  return (Array.isArray(candidates) ? candidates : []).map((moment) => {
+    const duration = Number(moment.endTime) - Number(moment.startTime);
+    const promotable = moment.selectionLocked !== true
+      && moment.keepDecision !== "reject"
+      && moment.semanticVerified === true
+      && Number(moment.confidence || 0) >= 0.4
+      && Number.isFinite(duration)
+      && duration >= MIN_SCENE_SECONDS;
+    if (!promotable) return moment;
+    return {
+      ...moment,
+      sceneSelectionApproved: true,
+      selectionLocked: true,
+      selectionDecision: "promoted_from_step_1_reserve",
+      selectionKeepDecision: moment.isReplay || moment.storyPhase === "replay" ? "replay" : "keep",
+      keepDecision: moment.isReplay || moment.storyPhase === "replay" ? "replay" : "keep",
+      selectedForFinalVideo: false,
     };
   });
 }
@@ -3802,7 +3980,7 @@ function gradeForScene(moment) {
   return moment.storyPhase === "hook" ? "dramatic" : "clean";
 }
 
-function applyEditPlan(candidates, plan, targetDuration) {
+function applyEditPlan(candidates, plan, targetDuration, settings = {}) {
   const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   const used = new Set();
   const planned = [...(Array.isArray(plan?.segments) ? plan.segments : [])]
@@ -3812,7 +3990,9 @@ function applyEditPlan(candidates, plan, targetDuration) {
   let outputDuration = 0;
   for (const directive of planned) {
     const candidate = byId.get(String(directive.candidateId));
-    if (!candidate || used.has(candidate.id) || !framingEligible(candidate)) continue;
+    const renderable = candidate && (framingEligible(candidate)
+      || (settings.aspectRatio === "16:9" && canRenderLockedNativeAction(candidate)));
+    if (!renderable || used.has(candidate.id)) continue;
 
     const reaction = candidate.eventType === "celebration" || candidate.storyPhase === "reaction";
     const candidateSourceLength = reaction ? Math.min(3, candidate.endTime - candidate.startTime) : candidate.endTime - candidate.startTime;
@@ -3845,7 +4025,9 @@ function applyEditPlan(candidates, plan, targetDuration) {
     const eventCallout = reaction ? "none" : requestedCallout;
     const colorGrade = gradeForScene({ ...candidate, role: directive.role });
     const requestedSound = normalizeChoice(directive.soundEffect, ["none", "whoosh", "impact", "goal", "whistle", "sparkle"], "none");
-    const soundEffect = !reaction && (goalAction || shot || save) && requestedSound !== "none" ? "impact" : "none";
+    const soundEffect = !reaction && requestedSound !== "none"
+      ? goalAction ? "goal" : shot || save ? "impact" : requestedSound
+      : "none";
     edits.push({
       ...candidate,
       startTime,
@@ -3972,7 +4154,8 @@ function repairPlanWithTrackedBackups(plannedMoments, assessedMoments, tracking,
     .map((moment) => ({ moment, assessment: settings.aspectRatio === "16:9"
       ? assessNativeFrameAction(moment, trackingEvidenceFor(tracking, moment))
       : assessPlannedSceneTracking(moment, trackingEvidenceFor(tracking, moment)) }))
-    .filter((item) => item.assessment.usable)
+    .filter((item) => item.assessment.usable
+      || (settings.aspectRatio === "16:9" && canRenderLockedNativeAction(item.moment)))
     .sort((a, b) => Number(b.moment.importanceScore || 0) - Number(a.moment.importanceScore || 0));
   const desired = [...approvedById.values()];
   const used = new Set(desired.map((moment) => moment.id));
@@ -4626,7 +4809,7 @@ async function writeTransformationAudit(destination, job, media, frameable, cont
     return total + (fullSceneGrade && originalAudioReplaced ? duration : 0);
   }, 0);
   const transformationAudit = {
-    version: 4,
+    version: 5,
     purpose: "Original football criticism, commentary, and tactical analysis",
     outputFormat: job.settings.aspectRatio,
     originalAudioRemoved: job.settings.originalAudio === "muted",
@@ -4640,6 +4823,9 @@ async function writeTransformationAudit(destination, job, media, frameable, cont
     analyticalTreatmentCoverage: Number((analyticallyTreated / Math.max(1, scenes.length)).toFixed(4)),
     continuousTimelineTreatmentCoverage: Number((continuouslyTreatedDuration / Math.max(0.001, excerptDuration)).toFixed(4)),
     movingTacticalNetworkSceneCount: movingNetworkIds.size,
+    eventAwarePresentation: true,
+    liveGoalCueCount: scenes.filter(moment => moment.eventType === "goal" && !moment.isReplay && moment.storyPhase !== "replay" && moment.soundEffect === "goal").length,
+    replayGoalCueCount: scenes.filter(moment => (moment.isReplay || moment.storyPhase === "replay") && moment.soundEffect === "goal").length,
     scenes: scenes.map((moment) => ({
       id: moment.id,
       sourceStart: moment.startTime,
@@ -4658,6 +4844,8 @@ async function writeTransformationAudit(destination, job, media, frameable, cont
         continuousNaturalExposureTreatment: true,
         movingPlayerHighlight: moment.playerHighlight !== false,
         playerHighlightPolicy: "verified ball carrier only; sustained handoff; hidden on uncertainty and after decisive contact",
+        eventCallout: Number(moment.presentationVersion || 1) >= 2 ? moment.eventCallout || "none" : "none",
+        transitionPolicy: "scene-local reveal after the preceding action completes; no action-overlap transition",
         sourceAudio: job.settings.originalAudio,
         originalAudioReplacedByNarration: job.settings.originalAudio === "muted" && Boolean(job.settings.commentary && contentScript),
       },
@@ -4861,7 +5049,7 @@ function requestedRecapSeconds(brief) {
 }
 
 function parseSettings(header) {
-  const defaults = { editStyle: "complete_highlights", durationMode: "auto", targetDuration: 30, durationMin: 30, aspectRatio: "16:9", commentary: true, playerHighlight: true, captions: true, logoMasking: true, originalAudio: "muted", intensity: "dynamic", recapBrief: "" };
+  const defaults = { editStyle: "complete_highlights", durationMode: "auto", targetDuration: COMPLETE_RECAP_MINIMUM_SECONDS, durationMin: COMPLETE_RECAP_MINIMUM_SECONDS, durationMax: COMPLETE_RECAP_MAXIMUM_SECONDS, aspectRatio: "16:9", commentary: true, playerHighlight: true, captions: true, logoMasking: true, originalAudio: "muted", intensity: "dynamic", recapBrief: "" };
   if (!header) return defaults;
   try {
     const raw = JSON.parse(Buffer.from(header, "base64url").toString("utf8"));
@@ -4873,10 +5061,11 @@ function parseSettings(header) {
     const requestedSeconds = complete ? requestedRecapSeconds(recapBrief) : null;
     const requestedTarget = clamp(Number(requestedSeconds), 30, 300);
     const duration = requestedSeconds
-      ? { durationMode: "requested", targetDuration: requestedTarget, durationMin: 60 }
-      : viral ? { durationMode: "auto", targetDuration: 36, durationMin: 30 } : automatic;
+      ? { durationMode: "requested", targetDuration: requestedTarget, durationMin: COMPLETE_RECAP_MINIMUM_SECONDS, durationMax: COMPLETE_RECAP_MAXIMUM_SECONDS }
+      : viral ? { durationMode: "auto", targetDuration: 36, durationMin: 30 }
+        : complete ? { durationMode: "auto", targetDuration: COMPLETE_RECAP_MINIMUM_SECONDS, durationMin: COMPLETE_RECAP_MINIMUM_SECONDS, durationMax: COMPLETE_RECAP_MAXIMUM_SECONDS }
+          : automatic;
     const settings = { ...defaults, ...raw, ...duration, recapBrief, editStyle, aspectRatio: viral ? "4:5" : complete ? "16:9" : "9:16", commentary: complete ? true : raw.commentary !== false, originalAudio: complete ? "muted" : raw.originalAudio || (viral ? "reduced" : "muted") };
-    delete settings.durationMax;
     return settings;
   }
   catch { throw new Error("Invalid edit settings."); }
@@ -4934,10 +5123,9 @@ function sanitizeSavedEditPlan(editPlan, matchContext, settings) {
   return { ...editPlan, title: sanitized.title, contentBeats: sanitized.contentBeats };
 }
 function applyCompleteDurationBounds(settings, sourceDuration) {
-  const bounds = adaptiveHighlightDurationBounds(sourceDuration);
-  const naturalMinimum = Math.min(60, bounds.maximum);
-  const targetDuration = clamp(Number(settings?.targetDuration || naturalMinimum), naturalMinimum, bounds.maximum);
-  return { ...settings, aspectRatio: "16:9", originalAudio: "muted", targetDuration, durationMin: naturalMinimum, durationMax: bounds.maximum };
+  const bounds = completeRecapDurationBounds(sourceDuration);
+  const targetDuration = clamp(Number(settings?.targetDuration || bounds.minimum), bounds.minimum, bounds.maximum);
+  return { ...settings, aspectRatio: "16:9", originalAudio: "muted", targetDuration, durationMin: bounds.minimum, durationMax: bounds.maximum };
 }
 function outputDurationBounds(settings) {
   if (isViralReel(settings)) return viralReelDurationBounds();
@@ -4950,14 +5138,16 @@ function outputDurationBounds(settings) {
 function minimumPlannedDuration(settings) { return isViralReel(settings) ? viralReelDurationBounds().minimum : isCompleteHighlights(settings) ? Number(settings.durationMin || 60) : settings.durationMode === "auto" ? 30 : Math.max(MIN_SCENE_SECONDS * 2, settings.targetDuration - 1); }
 function planningCeiling(settings) { return isCompleteHighlights(settings) ? (Number.isFinite(Number(settings.durationMax)) ? Number(settings.durationMax) : Infinity) : settings.durationMode === "auto" ? (Number.isFinite(Number(settings.durationMax)) ? Number(settings.durationMax) : Infinity) : settings.targetDuration; }
 function planningEvidenceCapacity(candidates, settings) {
-  return settings.durationMode === "auto"
-    ? naturalStoryCapacity(selectDirectorCandidates(candidates).filter(framingEligible))
-    : editableEvidenceDuration(candidates);
+  const eligible = selectDirectorCandidates(candidates).filter((moment) => framingEligible(moment)
+    || (settings?.aspectRatio === "16:9" && canRenderLockedNativeAction(moment)));
+  if (isCompleteHighlights(settings)) return renderableEvidenceCapacity(eligible);
+  return settings.durationMode === "auto" ? naturalStoryCapacity(eligible) : editableEvidenceDuration(candidates);
 }
 function safeFileName(name) { return basename(name).replace(/[^a-zA-Z0-9._ -]/g, "_").slice(0, 180) || "source.mp4"; }
 function resolveSetting(value) { return isAbsolute(value) ? value : resolve(projectRoot, value); }
 function resolveExecutable(value) { return /[\\/]/.test(value) ? resolveSetting(value) : value; }
 function mimeFor(path) { return extname(path).toLowerCase() === ".mov" ? "video/quicktime" : extname(path).toLowerCase() === ".webm" ? "video/webm" : "video/mp4"; }
+function publicOutputUrl(id) { return `${publicBaseUrl}/outputs/${encodeURIComponent(id)}/final.mp4`; }
 function clamp(value, min, max) { return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min)); }
 function setCors(request, response) { const origin = String(request.headers.origin || ""); if (allowedOrigins.has(origin)) response.setHeader("Access-Control-Allow-Origin", origin); response.setHeader("Access-Control-Allow-Headers", "content-type,x-file-name,x-edit-settings"); response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS"); }
 function json(response, status, value) { response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }); response.end(JSON.stringify(value)); }

@@ -1,4 +1,6 @@
 export const AUTO_MINIMUM_SECONDS = 30;
+export const COMPLETE_RECAP_MINIMUM_SECONDS = 60;
+export const COMPLETE_RECAP_MAXIMUM_SECONDS = 120;
 import { assertIncidentCoverage } from "./incident-coverage.mjs";
 
 export function automaticDurationSettings() {
@@ -11,6 +13,15 @@ export function adaptiveHighlightDurationBounds(sourceDuration) {
   if (seconds <= 420) return { minimum: AUTO_MINIMUM_SECONDS, maximum: 120 };
   if (seconds <= 900) return { minimum: AUTO_MINIMUM_SECONDS, maximum: 240 };
   return { minimum: AUTO_MINIMUM_SECONDS, maximum: 300 };
+}
+
+export function completeRecapDurationBounds(sourceDuration) {
+  const seconds = Math.max(0, Number(sourceDuration) || 0);
+  if (!(seconds > 0)) return { minimum: COMPLETE_RECAP_MINIMUM_SECONDS, maximum: COMPLETE_RECAP_MAXIMUM_SECONDS };
+  return {
+    minimum: Math.min(COMPLETE_RECAP_MINIMUM_SECONDS, seconds),
+    maximum: Math.min(COMPLETE_RECAP_MAXIMUM_SECONDS, seconds),
+  };
 }
 
 export function uniqueEvidenceCandidates(candidates) {
