@@ -40,6 +40,8 @@ test("completed edits expose copyable publishing metadata", () => {
   const source = readFileSync(new URL("../app/video-studio.tsx", import.meta.url), "utf8");
   assert.match(source, /READY TO PUBLISH/);
   assert.match(source, /Copy title \+ hashtags/);
+  assert.match(source, /Choose exactly one channel/);
+  assert.match(source, /Upload privately/);
   assert.match(source, /#GoalVision/);
   assert.match(source, /navigator\.clipboard\.writeText/);
 });

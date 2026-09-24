@@ -21,7 +21,7 @@
     "test:connections": "npm run test:gemini && npm run test:gemini-video && npm run test:video-intelligence && npm run test:tts",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/editorial-policy.test.mjs tests/payoff-evidence.test.mjs tests/tracked-position.test.mjs tests/hold-pan-camera.test.mjs tests/pipeline-state.test.mjs tests/action-boundaries.test.mjs tests/viral-reel-policy.test.mjs tests/delivery-policy.test.mjs tests/passage-inventory.test.mjs tests/native-frame-action.test.mjs tests/score-normalization.test.mjs tests/gemini-request-scheduler.test.mjs tests/serialized-json-store.test.mjs tests/bounded-concurrency.test.mjs tests/render-style.test.mjs tests/deployment.test.mjs",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/editorial-policy.test.mjs tests/payoff-evidence.test.mjs tests/tracked-position.test.mjs tests/hold-pan-camera.test.mjs tests/pipeline-state.test.mjs tests/action-boundaries.test.mjs tests/viral-reel-policy.test.mjs tests/delivery-policy.test.mjs tests/passage-inventory.test.mjs tests/native-frame-action.test.mjs tests/score-normalization.test.mjs tests/gemini-request-scheduler.test.mjs tests/serialized-json-store.test.mjs tests/bounded-concurrency.test.mjs tests/render-style.test.mjs tests/deployment.test.mjs tests/youtube-publisher.test.mjs",
     "test:deployment": "node --test tests/deployment.test.mjs",
     "test:tracking": ".venv-tracking\\Scripts\\python.exe -m unittest discover -s tests -p *_test.py",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .venv-soccernet --ignore-pattern tools/external",

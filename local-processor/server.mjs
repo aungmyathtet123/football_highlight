@@ -11,6 +11,7 @@ import { synthesizeGoogleCloudSpeech } from "./google-cloud-tts.mjs";
 import { normalizeFinishedAudio, outputDimensions, renderVideoV2 } from "./render-video-v2.mjs";
 import { createJobQueue } from "./job-queue.mjs";
 import { createSerializedJsonStore } from "./serialized-json-store.mjs";
+import { createYouTubePublisher } from "./youtube-publisher.mjs";
 import { mapWithConcurrency } from "./bounded-concurrency.mjs";
 import { downgradeToSafeStatic, recoverSafeStaticCandidates, safeStaticFallbackEligible, usesSafeStaticPresentation } from "./delivery-policy.mjs";
 import { restoreContentBeatOrder } from "./pipeline-state.mjs";
@@ -148,12 +149,20 @@ const allowedOrigins = new Set(
     process.env.SITE_URL,
   ].filter(Boolean),
 );
+const youtubeCredentialFile = process.env.YOUTUBE_OAUTH_CLIENT_FILE ? resolveSetting(process.env.YOUTUBE_OAUTH_CLIENT_FILE) : "";
+const youtubeRedirectUri = String(process.env.YOUTUBE_OAUTH_REDIRECT_URI || `http://127.0.0.1:${port}/youtube/oauth/callback`);
 const jobQueue = createJobQueue(error => console.error("Job queue error", error));
 const geminiRequestGate = createGeminiRequestGate({ minimumIntervalMs: geminiMinimumIntervalMs });
 let activeGeminiJobId = null;
 
 await Promise.all([mkdir(uploadRoot, { recursive: true }), mkdir(outputRoot, { recursive: true }), mkdir(jobRoot, { recursive: true })]);
 const saveJobJson = createSerializedJsonStore(jobRoot);
+const youtubePublisher = await createYouTubePublisher({
+  dataRoot,
+  credentialFile: youtubeCredentialFile,
+  redirectUri: youtubeRedirectUri,
+  allowedReturnOrigins: [...allowedOrigins],
+});
 
 const server = http.createServer(async (request, response) => {
   try {
@@ -173,6 +182,35 @@ const server = http.createServer(async (request, response) => {
         workers: { analysisProxyConcurrency, trackingSceneConcurrency, nativeTrackingSampleFps },
         tools,
       });
+    }
+    if (request.method === "GET" && url.pathname === "/youtube/channels") return json(response, 200, await youtubePublisher.status());
+    if (request.method === "GET" && url.pathname === "/youtube/oauth/start") {
+      const location = await youtubePublisher.authorizationUrl(url.searchParams.get("returnTo") || process.env.SITE_URL || "http://localhost:3001");
+      response.writeHead(302, { Location: location, "Cache-Control": "no-store" }); return response.end();
+    }
+    if (request.method === "GET" && url.pathname === "/youtube/oauth/callback") {
+      if (url.searchParams.get("error")) return youtubeCallbackHtml(response, { error: url.searchParams.get("error_description") || url.searchParams.get("error") });
+      try {
+        const result = await youtubePublisher.completeAuthorization({ code: url.searchParams.get("code"), state: url.searchParams.get("state") });
+        return youtubeCallbackHtml(response, { channel: result.channel, returnOrigin: result.returnOrigin });
+      } catch (error) {
+        return youtubeCallbackHtml(response, { error: error instanceof Error ? error.message : "YouTube authorization failed." });
+      }
+    }
+    if (request.method === "POST" && url.pathname === "/youtube/uploads") {
+      const body = await readJsonBody(request, 64 * 1024);
+      const jobId = String(body.jobId || "");
+      if (!/^[a-f0-9-]{36}$/i.test(jobId)) return json(response, 400, { error: "A completed video job is required." });
+      const job = await readJob(jobId);
+      if (job.stage !== "completed" || !job.outputKey) return json(response, 409, { error: "Finish rendering the video before uploading it." });
+      const upload = await youtubePublisher.upload({
+        jobId,
+        channelId: String(body.channelId || ""),
+        outputPath: job.outputKey,
+        title: String(body.title || job.editPlan?.title || "Touchline AI football recap"),
+        description: String(body.description || ""),
+      });
+      return json(response, 200, upload);
     }
     if (request.method === "POST" && url.pathname === "/jobs") return await createJob(request, response);
     const retryAnalysisMatch = url.pathname.match(/^\/jobs\/([a-f0-9-]+)\/retry-analysis$/i);
@@ -5152,6 +5190,23 @@ function clamp(value, min, max) { return Math.min(max, Math.max(min, Number.isFi
 function setCors(request, response) { const origin = String(request.headers.origin || ""); if (allowedOrigins.has(origin)) response.setHeader("Access-Control-Allow-Origin", origin); response.setHeader("Access-Control-Allow-Headers", "content-type,x-file-name,x-edit-settings"); response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS"); }
 function json(response, status, value) { response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }); response.end(JSON.stringify(value)); }
 function send(response, status) { response.writeHead(status); response.end(); }
+function youtubeCallbackHtml(response, { channel, returnOrigin = "http://localhost:3001", error }) {
+  const payload = JSON.stringify({ type: "touchline-youtube-connected", channel: channel || null, error: error || null }).replace(/</g, "\\u003c");
+  const targetOrigin = JSON.stringify(returnOrigin).replace(/</g, "\\u003c");
+  const title = error ? "YouTube connection failed" : "YouTube connected";
+  const message = error || `${channel?.title || "YouTube channel"} is ready for private uploads.`;
+  response.writeHead(error ? 400 : 200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  response.end(`<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>body{margin:0;display:grid;place-items:center;min-height:100vh;background:#101410;color:#eef2e9;font:16px system-ui}.card{max-width:440px;padding:32px;border:1px solid #394039;border-radius:16px;background:#171d18}h1{margin:0 0 10px;color:#c8ff52}p{line-height:1.5}</style></head><body><main class="card"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><p>You can close this window.</p></main><script>if(window.opener){window.opener.postMessage(${payload},${targetOrigin});window.close();}</script></body></html>`);
+}
+function escapeHtml(value) { return String(value || "").replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]); }
+async function readJsonBody(request, maximumBytes) {
+  let text = "";
+  for await (const chunk of request) {
+    text += chunk;
+    if (Buffer.byteLength(text) > maximumBytes) throw new Error("Request body is too large.");
+  }
+  try { return JSON.parse(text || "{}"); } catch { throw new Error("Request body must be valid JSON."); }
+}
 async function inspectTools() {
   const [ffmpeg, ffprobe, trackingPython, trackingModel, trackingBallModel, soccerNetPython, soccerNetModel] = await Promise.all([
     run(ffmpegPath, ["-version"]).then(() => true).catch(() => false),

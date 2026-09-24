@@ -94,6 +94,17 @@ bash deploy/oracle/install.sh your-name.duckdns.org touchline
 Open `https://your-name.duckdns.org`, enter the website login, and upload a
 short test video. Completed video URLs use the same HTTPS hostname.
 
+## YouTube publishing
+
+Create one Google web OAuth client and authorize each channel owner separately. Store the downloaded client JSON at `/etc/touchline/youtube-oauth-client.json`, set owner-only permissions, and set these values in `/etc/touchline/touchline.env`:
+
+```env
+YOUTUBE_OAUTH_CLIENT_FILE=/etc/touchline/youtube-oauth-client.json
+YOUTUBE_OAUTH_REDIRECT_URI=https://your-hostname/youtube/oauth/callback
+```
+
+Add the same HTTPS callback to the Google OAuth client. Channel refresh tokens and completed-upload records are stored under `LOCAL_DATA_DIR/youtube` and must remain private.
+
 ## Operations
 
 Check health and logs:

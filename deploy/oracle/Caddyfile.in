@@ -11,7 +11,7 @@ __DOMAIN__ {
 		__BASIC_USER__ __BASIC_PASSWORD_HASH__
 	}
 
-	@processor path /health /jobs /jobs/* /outputs/*
+	@processor path /health /jobs /jobs/* /outputs/* /youtube/*
 	reverse_proxy @processor 127.0.0.1:8787 {
 		flush_interval -1
 	}

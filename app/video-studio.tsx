@@ -33,6 +33,16 @@ type LocalJob = {
   error?: { code?: string; message: string; retryable?: boolean };
 };
 
+type YouTubeChannel = {
+  channelId: string; title: string; handle?: string; thumbnailUrl?: string;
+  subscriberCount: number; connectedAt: string;
+};
+
+type YouTubeUpload = {
+  jobId: string; channelId: string; videoId: string; title: string;
+  privacyStatus: "private"; status: "completed"; uploadedAt: string; url: string;
+};
+
 export function VideoStudio() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [view, setView] = useState<View>("upload");
@@ -197,7 +207,7 @@ export function VideoStudio() {
         {view === "processing" && <ProcessingView fileName={file?.name ?? "Match footage"} progress={progress} detail={progressDetail} stageIndex={stageIndex} error={processingError} canResume={Boolean(currentJobId)} retrying={retrying} onRetry={resumeProcessing} onBack={() => setView("upload")} />}
         {view === "result" && (
           <ResultView file={file} videoUrl={outputUrl || videoUrl} outputUrl={outputUrl} warnings={warnings} selected={selected} allMoments={moments} finalDuration={finalDuration}
-            sourceDuration={sourceDuration} videoTitle={typeof editPlan?.title === "string" ? editPlan.title : "Your football story"} editStyle={editStyle} downloadPlan={downloadPlan} />
+            sourceDuration={sourceDuration} videoTitle={typeof editPlan?.title === "string" ? editPlan.title : "Your football story"} editStyle={editStyle} downloadPlan={downloadPlan} jobId={currentJobId} />
         )}
       </section>
     </main>
@@ -272,9 +282,9 @@ function ProcessingView({ fileName, progress, detail, stageIndex, error, canResu
   </div>;
 }
 
-type ResultProps = { file: File | null; videoUrl: string | null; outputUrl: string | null; warnings: string[]; selected: FootballMoment[]; allMoments: FootballMoment[]; finalDuration: number; sourceDuration: number; videoTitle: string; editStyle: EditStyle; downloadPlan: () => void };
+type ResultProps = { file: File | null; videoUrl: string | null; outputUrl: string | null; warnings: string[]; selected: FootballMoment[]; allMoments: FootballMoment[]; finalDuration: number; sourceDuration: number; videoTitle: string; editStyle: EditStyle; downloadPlan: () => void; jobId: string | null };
 
-function ResultView({ file, videoUrl, outputUrl, warnings, selected, allMoments, finalDuration, sourceDuration, videoTitle, editStyle, downloadPlan }: ResultProps) {
+function ResultView({ file, videoUrl, outputUrl, warnings, selected, allMoments, finalDuration, sourceDuration, videoTitle, editStyle, downloadPlan, jobId }: ResultProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [copied, setCopied] = useState<"title" | "hashtags" | "all" | null>(null);
   const hashtags = publishingHashtags(selected, editStyle);
@@ -322,8 +332,97 @@ function ResultView({ file, videoUrl, outputUrl, warnings, selected, allMoments,
         <div className="publishing-field"><div><label htmlFor="publishing-video-title">Video title</label><button onClick={() => void copyPublishingText("title")}>{copied === "title" ? "Copied!" : "Copy title"}</button></div><textarea id="publishing-video-title" readOnly rows={2} value={videoTitle} /></div>
         <div className="publishing-field"><div><label htmlFor="publishing-hashtags">Hashtags</label><button onClick={() => void copyPublishingText("hashtags")}>{copied === "hashtags" ? "Copied!" : "Copy hashtags"}</button></div><textarea id="publishing-hashtags" readOnly rows={3} value={hashtags} /></div>
       </div>
+      {outputUrl && jobId && <YouTubePublishingPanel jobId={jobId} videoTitle={videoTitle} hashtags={hashtags} />}
     </section>
     <div className="render-banner"><div><span className="mini-label">PRIVATE LOCAL OUTPUT</span><strong>{file?.name}</strong><p>The source, job data and finished video are stored only in this project&apos;s local-data folder.</p></div>{outputUrl ? <a href={outputUrl} download>Download MP4</a> : <button onClick={downloadPlan}>Export JSON plan</button>}</div>
+  </div>;
+}
+
+function YouTubePublishingPanel({ jobId, videoTitle, hashtags }: { jobId: string; videoTitle: string; hashtags: string }) {
+  const [configured, setConfigured] = useState(true);
+  const [channels, setChannels] = useState<YouTubeChannel[]>([]);
+  const [uploads, setUploads] = useState<YouTubeUpload[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [connecting, setConnecting] = useState(false);
+  const [uploadingChannelId, setUploadingChannelId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function refreshChannels() {
+    try {
+      const response = await fetch(`${processorUrl}/youtube/channels`, { cache: "no-store" });
+      const data = await response.json() as { configured?: boolean; channels?: YouTubeChannel[]; uploads?: YouTubeUpload[]; error?: string };
+      if (!response.ok) throw new Error(data.error || "Could not read connected YouTube channels.");
+      setConfigured(data.configured !== false);
+      setChannels(data.channels || []);
+      setUploads((data.uploads || []).filter((upload) => upload.jobId === jobId));
+      setError(null);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Could not reach the YouTube publisher.");
+    } finally {
+      setLoading(false);
+      setConnecting(false);
+    }
+  }
+
+  useEffect(() => {
+    void refreshChannels();
+    function onMessage(event: MessageEvent) {
+      if (event.origin !== new URL(processorUrl).origin || event.data?.type !== "touchline-youtube-connected") return;
+      if (event.data.error) setError(String(event.data.error));
+      void refreshChannels();
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [jobId]);
+
+  function connectChannel() {
+    setConnecting(true);
+    setError(null);
+    const returnTo = window.location.origin;
+    const popup = window.open(`${processorUrl}/youtube/oauth/start?returnTo=${encodeURIComponent(returnTo)}`, "touchline-youtube-oauth", "popup=yes,width=620,height=760");
+    if (!popup) {
+      setConnecting(false);
+      setError("Your browser blocked the Google connection window. Allow popups for this page and try again.");
+    }
+  }
+
+  async function uploadToChannel(channel: YouTubeChannel) {
+    setUploadingChannelId(channel.channelId);
+    setError(null);
+    try {
+      const response = await fetch(`${processorUrl}/youtube/uploads`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId, channelId: channel.channelId, title: videoTitle, description: hashtags }),
+      });
+      const data = await response.json() as YouTubeUpload & { error?: string };
+      if (!response.ok) throw new Error(data.error || "YouTube upload failed.");
+      setUploads((current) => [...current.filter((upload) => upload.channelId !== data.channelId), data]);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "YouTube upload failed.");
+    } finally {
+      setUploadingChannelId(null);
+    }
+  }
+
+  return <div className="youtube-publisher" aria-labelledby="youtube-publisher-title">
+    <div className="youtube-publisher-head">
+      <div><span className="mini-label">YOUTUBE</span><h3 id="youtube-publisher-title">Choose exactly one channel</h3><p>Uploads are Private for review. Channel IDs prevent duplicate names from causing a wrong upload.</p></div>
+      <button className="secondary-button" disabled={connecting || !configured} onClick={connectChannel}>{connecting ? "Opening Google..." : channels.length ? "Connect another channel" : "Connect YouTube channel"}</button>
+    </div>
+    {!configured && <p className="publish-error">YouTube OAuth is not configured on this processor.</p>}
+    {error && <p className="publish-error" role="alert">{error}</p>}
+    {loading ? <p className="youtube-empty">Checking connected channels...</p> : channels.length === 0 ? <p className="youtube-empty">Connect each GoalVision account once. Both channels will then appear here as separate upload buttons.</p> : <div className="youtube-channel-list">
+      {channels.map((channel) => {
+        const uploaded = uploads.find((item) => item.channelId === channel.channelId);
+        const uploading = uploadingChannelId === channel.channelId;
+        return <article className="youtube-channel" key={channel.channelId}>
+          <div className="youtube-avatar">{channel.thumbnailUrl ? <img src={channel.thumbnailUrl} alt="" /> : channel.title.slice(0, 1)}</div>
+          <div className="youtube-channel-copy"><strong>{channel.title}</strong><span>{channel.handle || channel.channelId}</span><small>{formatSubscribers(channel.subscriberCount)} subscribers · ID …{channel.channelId.slice(-6)}</small></div>
+          {uploaded ? <a className="youtube-uploaded" href={uploaded.url} target="_blank" rel="noreferrer">Uploaded · Review on YouTube</a> : <button className="youtube-upload-button" disabled={Boolean(uploadingChannelId)} onClick={() => void uploadToChannel(channel)}>{uploading ? "Uploading..." : "Upload privately"}</button>}
+        </article>;
+      })}
+    </div>}
   </div>;
 }
 
@@ -332,6 +431,7 @@ function Toggle({ label, detail, checked, disabled = false, onChange }: { label:
 function formatBytes(bytes: number) { if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`; return `${(bytes / 1024 / 1024).toFixed(1)} MB`; }
 function formatTime(seconds: number) { const safe = Number.isFinite(seconds) ? Math.max(0, Math.round(seconds)) : 0; return `${Math.floor(safe / 60)}:${String(safe % 60).padStart(2, "0")}`; }
 function titleCase(value: string) { return value.charAt(0).toUpperCase() + value.slice(1); }
+function formatSubscribers(value: number) { return new Intl.NumberFormat(undefined, { notation: value >= 1000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value || 0); }
 function publishingHashtags(moments: FootballMoment[], editStyle: EditStyle) {
   const events = new Set(moments.map((moment) => moment.eventType));
   const tags = ["#GoalVision", "#Football", "#FootballHighlights", "#MatchRecap", "#FootballAnalysis"];
