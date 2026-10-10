@@ -1,0 +1,19 @@
+FROM node:22-bookworm-slim
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY app ./app
+COPY assets ./assets
+COPY lib ./lib
+COPY local-processor/workflow-progress.mjs local-processor/workflow-progress.d.mts ./local-processor/
+COPY local-processor/source-duration-policy.mjs local-processor/source-duration-policy.d.mts ./local-processor/
+COPY public ./public
+COPY worker ./worker
+COPY .openai ./.openai
+COPY cloudflare-env.d.ts drizzle.config.ts eslint.config.mjs next-env.d.ts next.config.ts postcss.config.mjs tsconfig.json vite.config.ts ./
+COPY deploy/cloud-run/gateway.mjs ./deploy/cloud-run/gateway.mjs
+COPY deploy/cloud-run/proxy-response-headers.mjs ./deploy/cloud-run/proxy-response-headers.mjs
+COPY deploy/cloud-run/youtube-publisher.mjs ./deploy/cloud-run/youtube-publisher.mjs
+COPY deploy/cloud-run/source-import-policy.mjs ./deploy/cloud-run/source-import-policy.mjs
+RUN npm run build
+CMD ["node", "deploy/cloud-run/gateway.mjs"]

@@ -1,15 +1,13 @@
 """Choose the player making the verified decisive touch."""
 
 import math
+from detector_roles import touch_distance
 
 
 def player_ball_distance(player, record):
     if record.get("ball_x") is None or record.get("ball_y") is None:
         return math.inf
-    return math.hypot(
-        float(player.get("cx", 0)) - float(record["ball_x"]),
-        (float(player.get("y2", 0)) - float(record["ball_y"])) * .52,
-    )
+    return touch_distance(player, (float(record["ball_x"]), float(record["ball_y"])), .52)
 
 
 def select_stable_action_track_id(records, annotation_start, annotation_end, minimum_coverage=.70, minimum_samples=5):
@@ -45,7 +43,7 @@ def select_scorer_track_id(records, contact_time):
         for player in people:
             track_id = player.get("trackId")
             distance = player_ball_distance(player, record)
-            if (track_id is None or distance > .11 or player.get("pitchSupport", 0) < .08
+            if (player.get("role") == "referee" or track_id is None or distance > .11 or player.get("pitchSupport", 0) < .08
                     or player.get("confidence", 0) < .35):
                 continue
             timing = abs(float(record["time"]) - float(contact_time))

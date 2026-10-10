@@ -1,0 +1,4 @@
+// A foul resolves with its infringement/whistle/decision, not with a later
+// unrelated pass or shot. Do not use this rule for goals or finishing chances.
+export const isDisciplinaryAction = scene => ['foul','yellow_card','red_card'].includes(scene?.eventType);
+export const DISCIPLINARY_ACTION_CONTRACT = 'For a disciplinary action, independently show the ball carrier before the challenge and the visible infringement/contact. Its payoff is the observable whistle, stoppage or referee/card decision. After that challenge, do not demand that an unrelated later pass or shot resolve. Referee/card close-ups may have no ball, but must show the correct involved subject. Record the visible decision as a payoff phaseCheck with playerVisible true and truthful ballVisible false when absent. ballFollowed means the ball remains visible during the relevant live challenge, not during the later decision. Never approve a missing challenge or substitute an unrelated player.';

@@ -1,4 +1,10 @@
+import { assessDecisionFraming } from "./decision-framing.mjs";
+import { assessGeminiFraming } from "./gemini-framing.mjs";
 export function assessNativeFrameAction(scene, evidence) {
+  const gemini = assessGeminiFraming(scene, evidence);
+  if (gemini) return gemini;
+  const decision = assessDecisionFraming(scene, evidence);
+  if (decision) return decision;
   const reaction = scene?.eventType === "celebration" || scene?.storyPhase === "reaction" || scene?.role === "reaction";
   if (reaction) return { usable: true, mode: "planned_reaction" };
   // This flag is assigned only after all local repair passes fail and only for
@@ -66,6 +72,11 @@ export function canRenderLockedNativeAction(scene) {
     && scene?.keepDecision !== "reject"
     && scene?.ballVisible === true
     && scene?.mainPlayerVisible === true;
+}
+
+export function canUseNativeSemanticFallback(scene) {
+  return canRenderLockedNativeAction(scene)
+    && scene?.trackingBrief?.payoffEvidence?.verified === true;
 }
 
 function mapValue(map, id) {

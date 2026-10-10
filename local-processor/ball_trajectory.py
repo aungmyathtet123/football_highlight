@@ -6,6 +6,51 @@ switching to a distant boot/advert when the actual ball is briefly weak.
 import math
 
 
+def candidate_diameter(ball, view_width, output_width=1080, source_aspect=16/9):
+    # X and Y are normalized against DIFFERENT native dimensions. Using Y as
+    # if it were normalized against width enlarged every ball-size estimate.
+    return max(ball['x2']-ball['x1'],(ball['y2']-ball['y1'])/source_aspect)/view_width*output_width
+
+
+def maximum_candidate_diameter(ball, people, view_width, output_width=1080, source_aspect=16/9):
+    # A foreground football is larger than a four-pixel wide-shot football.
+    # Keep a measured ball proportionate to a nearby observed player's body;
+    # a big logo/advert with no relevant nearby player still gets the 70px cap.
+    near=[p for p in people if p.get('pitchSupport',0)>=.08
+        and math.hypot(ball['cx']-p['cx'],(ball['cy']-p['y2'])/source_aspect)<=.12]
+    bodies=sorted((p['y2']-p.get('y1',p['y2']))/source_aspect/view_width*output_width
+        for p in people if p.get('pitchSupport',0)>=.08 and p.get('role')!='referee')
+    # After contact a foreground ball moves away from the player's feet, while
+    # remaining at the same apparent scale. Use the current shot's observed
+    # player scale as well as the nearest player; distance must not shrink a
+    # genuine moving football back to the wide-shot size limit.
+    shot_body=bodies[min(len(bodies)-1,int(len(bodies)*.75))] if bodies else 0
+    body=max([shot_body,*((p['y2']-p.get('y1',p['y2']))/source_aspect/view_width*output_width
+        for p in near)])
+    return max(70,min(240,body*.25))
+
+
+def semantic_region_distance(ball, frame):
+    anchor=frame.get('semantic_ball_region')
+    if anchor is None:
+        return None
+    x1,y1,x2,y2,radius=anchor
+    dx=max(0,x1-ball['cx'],ball['cx']-x2)
+    dy=max(0,y1-ball['cy'],ball['cy']-y2)*.6
+    return math.hypot(dx,dy)/max(.001,radius)
+
+
+def semantic_region_cost(ball, frame):
+    distance = semantic_region_distance(ball, frame)
+    if distance is None:
+        return 0.0
+    cost = 1.5 * distance**2
+    # Source coordinates do not interpolate linearly while the broadcast pans
+    # or zooms. A corridor between sparse anchors can guide acquisition, but
+    # must not make an actually detected moving ball more costly than missing.
+    return min(.6, cost) if frame.get('semantic_anchor_observed') is False else cost
+
+
 def interpolate_observation_gaps(frames, path, maximum_gap=.45):
     """Camera guidance between two observations; never marks a missing frame direct."""
     output = {}
@@ -61,7 +106,8 @@ def trajectory_camera_guidance(frames, path, maximum_gap=.75, edge_hold=.55, ope
 
 def choose_trajectory(frames, view_width, output_width=1080, beam_width=24,
                       initial_focus_x=None, attack_direction=None,
-                      contact_time=None, goal_focus_x=None, goal_focus_y=None):
+                      contact_time=None, goal_focus_x=None, goal_focus_y=None, route_end_time=None,
+                      source_aspect=16/9):
     """Choose one coherent football trajectory from noisy small-object detections.
 
     A football detector frequently gives a white boot a much higher confidence
@@ -80,19 +126,32 @@ def choose_trajectory(frames, view_width, output_width=1080, beam_width=24,
         # score, last observed candidate, last observed time, linked path
         beam = [(0.0, None, 0.0, None)]
         shot_start_time = shot[0]["time"] if shot else 0.0
+        role_times=[f['time'] for f in shot if any(b.get('roleDetector') is True
+            and b['confidence']>=.35 and b.get('pitchSupport',0)>=.1
+            and 4<=candidate_diameter(b,view_width,output_width,source_aspect)
+                <=maximum_candidate_diameter(b,f['people'],view_width,output_width,source_aspect)
+            for b in f['balls'])]
         for frame in shot:
             route_context = (attack_direction in {"left", "right"}
                 and isinstance(contact_time, (int, float))
-                and isinstance(goal_focus_x, (int, float)))
+                and isinstance(goal_focus_x, (int, float))
+                and (route_end_time is None or frame['time']<=route_end_time))
             candidates = []
             for ball in frame["balls"]:
-                diameter = max(ball["x2"] - ball["x1"], ball["y2"] - ball["y1"]) / view_width * output_width
+                diameter = candidate_diameter(ball,view_width,output_width,source_aspect)
                 # Keep weak, tiny-ball detections when a verified football route
                 # can disambiguate them.  The detector is already invoked at a
                 # low threshold specifically because a broadcast ball can be
                 # only four pixels wide.
-                minimum_confidence = .03 if route_context else .12
-                if not 4 <= diameter <= 70 or ball["confidence"] < minimum_confidence:
+                distance=semantic_region_distance(ball,frame)
+                # The same tiny football must not be discarded merely because
+                # this is a save/pass rather than a goal. A source guide can
+                # retain a measured candidate near its search region; it cannot
+                # provide a missing detection or approve the resulting crop.
+                guided_candidate=distance is not None and distance<=1
+                minimum_confidence = .03 if route_context or guided_candidate else .12
+                maximum=maximum_candidate_diameter(ball,frame['people'],view_width,output_width,source_aspect)
+                if not 4 <= diameter <= maximum or ball["confidence"] < minimum_confidence:
                     continue
                 near = min((math.hypot(ball["cx"] - p["cx"], (ball["cy"] - p["y2"]) * .52)
                             for p in frame["people"] if p.get("pitchSupport", 0) >= .08), default=1)
@@ -113,6 +172,13 @@ def choose_trajectory(frames, view_width, output_width=1080, beam_width=24,
                 verified payoff corridor becomes useful during ball flight.
                 """
                 seconds_after_contact = timestamp - float(contact_time)
+                # The broadcast camera can pan after contact, changing every
+                # normalized goal coordinate. A current semantic search region
+                # already constrains measured candidates in THIS frame; an
+                # older static goal location must not contradict it and make
+                # "missing" cheaper than the actual ball inside that region.
+                if frame.get('semantic_ball_region') is not None:
+                    return 0.0
                 if seconds_after_contact <= 0:
                     return 0.0
                 return max(0.0, min(1.0, seconds_after_contact / .65))
@@ -120,6 +186,9 @@ def choose_trajectory(frames, view_width, output_width=1080, beam_width=24,
             def acquisition_cost(pair):
                 ball, _ = pair
                 score = -math.log(max(.01, ball["confidence"]))
+                distance=semantic_region_distance(ball,frame)
+                if distance is not None:
+                    score+=semantic_region_cost(ball,frame)
                 if route_context:
                     strength = payoff_route_strength_at(frame["time"])
                     horizontal_gap = abs(ball["cx"] - float(goal_focus_x))
@@ -129,18 +198,42 @@ def choose_trajectory(frames, view_width, output_width=1080, beam_width=24,
                         score += (vertical_gap * 6.0 + max(0.0, vertical_gap - .12) * 50.0) * strength
                 return score
 
+            has_role_ball=any(b.get('roleDetector') is True and b['confidence']>=.35
+                and b.get('pitchSupport',0)>=.1 for b,_ in candidates)
+            role_context=has_role_ball or any(abs(frame['time']-t)<=.85 for t in role_times)
+            def detector_cost(ball):
+                # A role-labelled football proposal comes from the full native
+                # picture. Specialist-only proposals from an old small ROI are
+                # often white boots. Prefer the observed full-picture football
+                # while retaining its original score and all alternatives.
+                agrees=any(b.get('roleDetector') is True and b['confidence']>=.35
+                    and math.hypot(b['cx']-ball['cx'],(b['cy']-ball['cy'])*.6)<=.025
+                    for b,_ in candidates)
+                # An honest missing sample during a brief native occlusion is
+                # cheaper than switching to a different player's bright boot.
+                return 3.0 if role_context and ball.get('roleDetector') is not True and not agrees else 0
+
             # Confidence sorting discarded the true four-pixel football before
             # beam search could evaluate it. Rank acquisition using the verified
             # route and retain a wider tactical candidate set.
-            candidates.sort(key=acquisition_cost)
+            candidates.sort(key=lambda pair:acquisition_cost(pair)+detector_cost(pair[0]))
             next_beam = []
             for score, previous, previous_time, path in beam:
                 gap = frame["time"] - previous_time
                 # In a verified goal route, choosing "missing" must not be
                 # cheaper than a genuine low-confidence four-pixel football.
-                next_beam.append((score + (4.0 if route_context else 2.5), previous, previous_time, (path, None)))
+                native_anchor_match=frame.get('semantic_anchor_observed') is True and frame.get('semantic_ball_region') is not None and any(
+                    semantic_region_distance(candidate,frame)<=1 for candidate,_ in candidates)
+                next_beam.append((score + (4.0 if route_context or native_anchor_match else 2.5), previous, previous_time, (path, None)))
                 for ball, near in candidates[:16 if route_context else 8]:
-                    cost = -math.log(max(.01, ball["confidence"])) + min(.8, near * 3)
+                    cost = -math.log(max(.01, ball["confidence"])) + min(.8, near * 3) + detector_cost(ball)
+                    anchor=frame.get("semantic_ball_region")
+                    if anchor is not None:
+                        # A sparse semantic region is only an association
+                        # prior, including uncertain same-shot search corridors.
+                        # It never supplies a ball coordinate or interpolates
+                        # a missing detection.
+                        cost+=semantic_region_cost(ball,frame)
                     # Before a trajectory is established, a bright boot or field
                     # marking can form a very coherent but completely unrelated
                     # path. Gemini's scene crop is not per-frame tracking truth,

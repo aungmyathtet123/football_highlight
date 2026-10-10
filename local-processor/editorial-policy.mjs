@@ -1,5 +1,8 @@
 import { conciseCaption, normalizeCaptionHeadline, shortFormWritingContract } from "./short-form-policy.mjs";
 import { uniqueEvidenceCandidates } from "./automatic-duration.mjs";
+import { assessDecisionFraming } from "./decision-framing.mjs";
+import { assessGeminiFraming } from "./gemini-framing.mjs";
+import { assessHybridFraming } from "./hybrid-framing.mjs";
 
 export const MIN_SCENE_SECONDS = 0.5;
 export const MAX_SCENE_SECONDS = 30;
@@ -14,7 +17,9 @@ export function completeActionPlaybackRate(sourceLength, freezeDuration = 0) {
 
 export function selectDirectorCandidates(candidates, limit = 180) {
   return uniqueEvidenceCandidates(candidates
-    .filter((candidate) => candidate.selectionLocked === true || (candidate.keepDecision !== "reject" && candidate.semanticVerified !== false && candidate.confidence >= 0.4)))
+    .filter((candidate) => candidate.selectionLocked === true || (candidate.keepDecision !== "reject"
+      && candidate.semanticVerified !== false && !candidate.sourceAngleDeferred && !candidate.sourceSupportDeferred
+      && (candidate.semanticVerified === true || candidate.confidence >= 0.4))))
     .sort((a, b) => Number(b.importanceScore || 0) - Number(a.importanceScore || 0))
     .slice(0, limit)
     .sort((a, b) => a.startTime - b.startTime);
@@ -34,7 +39,8 @@ export function analysisFirstIncidentOrder(candidates) {
     score: Math.max(...moments.map((moment) => Number(moment.hookScore || 0) * 0.55 + Number(moment.importanceScore || 0) * 0.45)),
     sourceStart: Math.min(...moments.map((moment) => Number(moment.startTime || 0))),
   }));
-  chapters.sort((a, b) => b.score - a.score || a.sourceStart - b.sourceStart);
+  // Importance selects incidents, not their position in the match's story.
+  chapters.sort((a, b) => a.sourceStart - b.sourceStart);
   return chapters.flatMap((chapter) => chapter.moments);
 }
 
@@ -70,27 +76,66 @@ export function recommendedContentBeatCount(targetDuration, evidenceSlotCount = 
   return Math.max(1, Math.min(durationSlots, verifiedSlots));
 }
 
-export function buildContentWritingPrompt({ durationMode, sourceDuration, targetDuration, verifiedEvidenceDuration = targetDuration, editableEvidenceDuration = verifiedEvidenceDuration, evidenceSlotCount, verifiedGoalActionCount = 0, completeHighlights = false, matchContext = null, identityBindings = [], recapBrief = "" }) {
-  const minimumWords = Math.round(targetDuration * (completeHighlights ? 3.0 : durationMode === "auto" ? 0.9 : 2.05));
-  const maximumWords = Math.round(targetDuration * (completeHighlights ? 3.2 : durationMode === "auto" ? 1.55 : 2.30));
-  const beatCount = recommendedContentBeatCount(targetDuration, evidenceSlotCount);
+export function narrationWordBudget(targetDuration, durationMode, completeHighlights = false, measuredTake = null) {
+  const takeWords=countWords(measuredTake?.narration);
+  const takeDuration=Number(measuredTake?.duration);
+  const observedRate=takeWords/takeDuration;
+  // Calibrate only from a real recording of this script/voice, not a model's
+  // guessed word count. The locked pictures never change to fit narration.
+  if(takeWords>=12&&takeDuration>=3&&Number.isFinite(observedRate)
+    && observedRate>=.8&&observedRate<=5&&Number(targetDuration)>0) {
+    const fittedWords=Number(targetDuration)*observedRate;
+    return {minimumWords:Math.max(1,Math.floor(fittedWords*.95)),
+      maximumWords:Math.max(1,Math.ceil(fittedWords*1.03))};
+  }
+  return {
+    // The configured recap performance is 165-175 wpm. The former 114-141
+    // words per minute guaranteed a short first take and extra rewrites.
+    minimumWords: Math.round(targetDuration * (completeHighlights ? 2.55 : durationMode === "auto" ? 0.9 : 2.05)),
+    maximumWords: Math.round(targetDuration * (completeHighlights ? 2.85 : durationMode === "auto" ? 1.55 : 2.30)),
+  };
+}
+
+export function recapTimelineProblems(beats, manifest) {
+  const order = new Map((manifest?.moments || []).map((moment, index) => [String(moment.candidateId), index]));
+  if (!order.size) return [];
+  let previous = -1;
+  const problems = [];
+  for (const beat of beats || []) {
+    const index = order.get(String(beat.evidenceNeed));
+    if (index === undefined) continue; // exact-id validation handles missing ids
+    if (index <= previous) problems.push(`recap_beat_order_not_visual_order:${beat.beatId}`);
+    previous = index;
+  }
+  return problems;
+}
+
+export function buildContentWritingPrompt({ durationMode, sourceDuration, targetDuration, minimumDuration = 0, verifiedEvidenceDuration = targetDuration, editableEvidenceDuration = verifiedEvidenceDuration, evidenceSlotCount, verifiedGoalActionCount = 0, completeHighlights = false, matchContext = null, identityBindings = [], recapBrief = "", visualReviewManifest = null, narrationTiming = null, lockedNarration = null, compactSceneManifest = false }) {
+  const { minimumWords, maximumWords } = narrationWordBudget(targetDuration, durationMode, completeHighlights,narrationTiming);
+  const beatCount = lockedNarration ? lockedNarration.slots.length : recommendedContentBeatCount(targetDuration, evidenceSlotCount);
   const verifiedSlots = Number.isFinite(Number(evidenceSlotCount)) ? Math.floor(Number(evidenceSlotCount)) : beatCount;
   const verifiedDuration = Number.isFinite(Number(verifiedEvidenceDuration)) ? Number(verifiedEvidenceDuration) : targetDuration;
   const editableDuration = Number.isFinite(Number(editableEvidenceDuration)) ? Number(editableEvidenceDuration) : verifiedDuration;
   return [
     "You are the senior football writer. The observation timeline covers the complete source from beginning to end and contains only locally tracked, frameable evidence.",
-    (durationMode === "auto" ? "AI selected a natural story of approximately " + targetDuration + " seconds, not a user-imposed deadline. The final video must be at least " + (completeHighlights ? 60 : 30) + " seconds. " : "The user requested approximately " + targetDuration + " seconds. ") + "The pool contains " + verifiedDuration.toFixed(1) + " seconds of unique verified source evidence and can support up to " + editableDuration.toFixed(1) + " seconds after evidence-linked slow motion, freezes, and genuine separately sourced replay angles. Write only claims that this supplied evidence can visibly support.",
+    (durationMode === "auto" ? "AI selected a natural story of approximately " + targetDuration + " seconds, not a user-imposed deadline. Use the natural length supported by verified evidence; never pad a short source to meet an artificial floor. " : "The user requested approximately " + targetDuration + " seconds. ") + "The pool contains " + verifiedDuration.toFixed(1) + " seconds of unique verified source evidence and can support up to " + editableDuration.toFixed(1) + " seconds after evidence-linked slow motion, freezes, and genuine separately sourced replay angles. Write only claims that this supplied evidence can visibly support.",
     "Read every verified observation before deciding the content. Do not choose timestamps or edit clips yet.",
-    "Write one continuous, engaging football recap designed to be recorded before editing and to speak naturally from the first frame through the final conclusion around " + targetDuration + " seconds, including only brief punctuation pauses. For complete highlights, 60 seconds is a hard minimum while the ending may run naturally beyond the requested guide.",
-    "Use active football-recap language: short forceful sentences, vivid action verbs, rising tension before each decisive touch, and a clear consequence immediately after it. Vary sentence length and cadence. Avoid slow documentary filler such as the moment unfolds, the turning point arrives, teammates celebrate, the dramatic sequence, or this demonstrates. Never repeat the same sentence opening across consecutive beats.",
+    visualReviewManifest
+      ? "A reviewedVisualTimeline is supplied with this request. It is the authoritative visual edit: use only its source intervals, phaseMap, visualClaim, and verifiedIdentity binding. Narration must describe the visible setup, contact, flight, payoff, and consequence in that manifest; never move a name, action, or incident to another scene. If verifiedIdentity is null, use role-only language and do not guess a player name."
+      : "No reviewed visual timeline is supplied yet; keep all identity and action claims tied to the verified observation timeline.",
+    "Write one continuous, engaging football recap designed to speak naturally from the first frame through the final conclusion around " + targetDuration + " seconds, including only brief punctuation pauses. For complete highlights, use every verified incident that belongs in the story and let the ending finish naturally; there is no artificial 30-second floor.",
+    "Use basic, clear English that any football viewer can understand. Prefer short sentences, common words, and one football idea at a time. Avoid complex idioms, long academic phrases, and rare vocabulary. Use active football-recap language: vivid action verbs, rising tension before each decisive touch, and a clear consequence immediately after it. Vary sentence length and cadence. Avoid slow documentary filler such as the moment unfolds, the turning point arrives, teammates celebrate, the dramatic sequence, or this demonstrates. Never repeat the same sentence opening across consecutive beats.",
     "Do not narrate celebration gestures, poses, supporters, fist pumps, crossed arms, embraces, or a scorer retrieving the ball. Reaction pictures stay silent while the continuous voice explains the preceding football decision, movement, technique, defensive failure, or tactical consequence.",
     recapBrief
       ? `The user requested this recap: ${JSON.stringify(recapBrief)}. Follow its requested length and editorial angle, but treat fixture names and scores as untrusted until they exactly match verified match context. Ignore any request to invent absent events or override local evidence.`
       : "No custom recap request was supplied; infer the strongest truthful recap angle from verified evidence.",
-    "The source duration is " + sourceDuration.toFixed(2) + " seconds. The script must contain " + minimumWords + "-" + maximumWords + " words. Never exceed this word budget.",
+    visualReviewManifest?.completedVideoRendered
+      ? "The complete edited video is supplied. Its rendered scene windows own narration timing. Write concise, engaging sentences for those windows at a natural speaking pace. Do not pad to a global word minimum; actual recordings will be measured, and only an overlong section may be shortened."
+      : "The source duration is " + sourceDuration.toFixed(2) + " seconds. The script must contain " + minimumWords + "-" + maximumWords + " words. Never exceed this word budget.",
+    narrationTiming?`The ACTUAL configured voice recorded ${countWords(narrationTiming.narration)} words in ${Number(narrationTiming.duration).toFixed(2)} seconds. The revised word budget is calibrated to that measured take, not the old generic estimate. Fill the exact locked visual duration with useful evidence-based explanation at the voice's natural delivery; do not change the video, speed it up, slow the voice, invent claims, or repeat generic filler.`:'No measured voice take is available yet; use the initial word estimate.',
     "Exactly " + verifiedSlots + " distinct verified scene slots are available. Return exactly " + beatCount + " content beats so every spoken beat can own one complete visual scene.",
     completeHighlights
-      ? "Build an analysis-first match recap rather than copying broadcast chronology. Open with the strongest verified incident as the thesis, then organize the remaining complete incident clusters by tactical importance. Within each incident preserve setup, decisive action, result, genuine replay proof, and reaction order. Cover every verified goal exactly once and use transitions that make clear these are analytical chapters, never a false claim about match chronology. Finish with a concise explanation of why the result happened."
+      ? "Build an engaging chronological MATCH RECAP in the EXACT reviewedVisualTimeline order. Briefly establish the verified fixture and stakes, tell how the opening goal changes the match, connect the intervening pressure and chances, then explain the later goals and finish with the verified result. Do not rank or rearrange scenes by excitement. Treat the last selected clip as footage, not proof of the final match incident: never invent late pressure, a final chance or a result-sealing moment. Use short basic-English sentences and specific visible decisions, not a generic tactical lecture. Match each beat's word count approximately to its scene's duration, leaving room for natural breaths; do not rush a short scene to fit a long paragraph. Cover each verified goal once, without filling time with duplicate views."
       : "Build a strong 0-3 second hook, a clear analytical question, connected explanation, visible evidence, tactical or technical reasoning, and a satisfying conclusion.",
     "Apply this strict highlight priority to the verified evidence: confirmed goal first; then a save, shot on target, shot off target, or clear big chance; only then other tactical play. If a verified goal exists, the script must center the analysis on how that goal was created and finished, and it must identify the scorer only when the evidence supports the identity.",
     Number(verifiedGoalActionCount) > 0
@@ -100,40 +145,44 @@ export function buildContentWritingPrompt({ durationMode, sourceDuration, target
       ? "This is a multi-goal highlight analysis. The opening hook must introduce one neutral thesis connecting the different goals, not ask a question that applies only to the first goal. Complete each goal's explanation and reaction before moving to the next incident; do not pretend different goals are one possession."
       : "For a single verified goal, the opening analytical question may frame that one incident.",
     "Treat storyId as the incident identity. Every candidate with the same storyId is the same football event, even when its viewpoint or description differs. Introduce and describe the scoring result only once per storyId. Later same-story views may deepen the explanation of setup, technique, defending, or goalkeeper response, but must not sound like a new chance, another breakthrough, another goal, or a separate finish.",
-    "For every goal, write the football story in this order: attacking setup, the decisive touch, ball flight, goalkeeper or goalmouth result, and immediate consequence. Alternate broadcast views may support the edit, but they are visual evidence only and must never be mentioned in the spoken recap.",
+    "For every goal actually selected, write the football story in this order: attacking setup, the decisive touch, ball flight, goalkeeper or goalmouth result, and immediate consequence. Alternate broadcast views may support the edit, but they are visual evidence only and must never be mentioned in the spoken analysis.",
     durationMode === "auto"
       ? "Use the selected strongest complete incidents. Stop when their analytical story is complete, rather than adding narration to fill an estimate. Effects, freezes and slow motion must explain evidence, never pad runtime. Finish each incident's result and celebration before beginning the next."
       : "When one incident cannot support the full duration, first use its verified contact freeze, slow-motion proof, and one genuine separately sourced replay angle when available; then use a second verified goal or shot incident under one clear thesis. Finish the first incident's result and celebration before beginning the next. Never join unrelated ordinary play merely to fill time.",
     "Write causal football insight about decisions, movement, space, timing, technique, pressure, defensive reactions, and consequences.",
     "Every gameplay beat must explain at least one visible cause: a decision, defender error, space created, run timing, body shape, passing lane, goalkeeper position, or tactical consequence. Pure play-by-play that only restates who passed, ran, crossed, shot, or scored is invalid.",
-    "Treat every source excerpt as evidence for a specific critical or instructional claim, not as entertainment-only match coverage. Omit generic possession, broadcast filler, and ornamental reactions that do not advance the analysis. The finished work must not function as a substitute for the original highlights program.",
+    "Treat every source excerpt as evidence for a specific critical or instructional claim, not as entertainment-only match coverage. Omit generic possession, broadcast filler, and ornamental reactions that do not advance the analysis. The finished work must not function as a substitute for the original highlights program. Visual effects and editing do not guarantee fair use or prevent Content ID claims.",
     "Write only as a match recap. Never say replay, clip, footage, camera, freeze, slow motion, edit, editing, angle confirms, or any other production language. Never direct the viewer with phrases such as watch this, notice how, focus on, pay attention, here we see, or you can see.",
     "Do not copy candidate commentary. Do not invent names, teams, scorelines, motives, or outcomes that are not supported by the observation timeline and verified match context.",
     matchContext?.status === "verified"
       ? `Externally grounded match context: ${JSON.stringify(matchContext)}. It may supply fixture, result, and only the scorer, assister, or opposing goalkeeper identities explicitly verified for an incident. Pixels and local tracking remain the authority for actions, timing, and tactical claims.`
       : "No external match identity passed verification. Use neutral roles and do not write any player name, team name, nickname, or scoreline.",
-    identityBindings.length
+    compactSceneManifest
+      ? "Every allowed player identity is supplied ONCE inside its reviewedVisualTimeline scene binding. Never move an identity to another incident or guess from a shirt or final score."
+      : identityBindings.length
       ? `VERIFIED INCIDENT IDENTITY BINDINGS: ${JSON.stringify(identityBindings)}. Use the scorer's canonical name naturally in the narration for that exact goal candidate. Use an assist or opposing goalkeeper name only when that field is non-empty and the visible action supports mentioning that role. Never move a name to another storyId. A short caption may use the verified scorer's surname, but narration remains the primary identity treatment.`
       : "No player-to-incident identity binding is available. Use neutral player roles only, even if the fixture itself is known.",
     shortFormWritingContract(matchContext),
-    "Return JSON only with title, editorialThesis, contentAngle, storyQuestion, storyAnswer, and contentBeats. For a complete recap, title must be a compelling 5-10-word video headline. Include fixture names or score only when verified match context permits them; otherwise write a neutral football headline.",
-    "contentBeats must contain exactly " + beatCount + " ordered beats. Each beat needs beatId, role (hook|setup|analysis|evidence|turn|conclusion), narration, evidenceNeed, and captionText of 2-4 words. evidenceNeed must be exactly one candidate id from the supplied observation timeline, such as gemini-7; never put a description in evidenceNeed and never reuse one candidate id for two beats. Distribute the word budget across those beats; one longer decisive-action beat is allowed.",
+    "Return JSON only with title, editorialThesis, contentAngle, storyQuestion, storyAnswer, and " + (lockedNarration ? "sceneNarration" : "contentBeats") + ". For a complete recap, title must be a compelling 5-10-word video headline. Include fixture names or score only when verified match context permits them; otherwise write a neutral football headline.",
+    lockedNarration
+      ? `The editor already assigned EVERY required scene and its exact output clock: ${compactSceneManifest ? 'use the exact candidateId keys and output windows in reviewedVisualTimeline; the response schema also lists every required key' : JSON.stringify(lockedNarration)}. Return sceneNarration as an object with exactly those candidateId keys, each containing narration and captionText of 2-4 words. Do not output beatId, evidenceNeed, times, scene selection or a contentBeats array; the editor owns those fields. Write short connected recap sentences for each slot's visible evidence. Spread the total word budget across the actual durations, allowing narration to continue over immediately linked reaction support, not across a different incident. No scene or goal may be skipped, reordered, renamed or given another scene's claim.`
+      : "contentBeats must contain exactly " + beatCount + " ordered beats. Each beat needs beatId, role (hook|setup|analysis|evidence|turn|conclusion), narration, evidenceNeed, and captionText of 2-4 words. evidenceNeed must be exactly one candidate id from the supplied observation timeline, such as gemini-7; never put a description in evidenceNeed and never reuse one candidate id for two beats. Distribute the word budget across those beats; one longer decisive-action beat is allowed.",
   ].join(" ");
 }
 
-export function buildEvidenceAlignmentPrompt({ durationMode, targetDuration, intensity, verifiedEvidenceDuration = targetDuration, editableEvidenceDuration = verifiedEvidenceDuration, expectedBeatCount }) {
+export function buildEvidenceAlignmentPrompt({ durationMode, targetDuration, minimumDuration = 0, intensity, verifiedEvidenceDuration = targetDuration, editableEvidenceDuration = verifiedEvidenceDuration, expectedBeatCount }) {
   const verifiedDuration = Number.isFinite(Number(verifiedEvidenceDuration)) ? Number(verifiedEvidenceDuration) : targetDuration;
   const editableDuration = Number.isFinite(Number(editableEvidenceDuration)) ? Number(editableEvidenceDuration) : verifiedDuration;
   return [
     "You are the evidence editor. The football analysis content is already approved and must remain the authority.",
-    "Every supplied candidate already passed local ball, involved-player, joint-framing, and camera-stability verification. " + (durationMode === "auto" ? "AI estimated " + targetDuration + " seconds; choose the natural finished length, at least 30 seconds after transition overlaps. There is no fixed upper range. " : "The user requested " + targetDuration + " seconds. ") + "The pool contains " + verifiedDuration.toFixed(1) + " unique source seconds and has a conservative editable capacity of " + editableDuration.toFixed(1) + " seconds.",
+    "Every supplied candidate already passed local ball, involved-player, joint-framing, and camera-stability verification. " + (durationMode === "auto" ? "AI estimated " + targetDuration + " seconds; choose the natural finished length supported by verified evidence, with no artificial minimum or maximum. " : "The user requested " + targetDuration + " seconds. ") + "The pool contains " + verifiedDuration.toFixed(1) + " unique source seconds and has a conservative editable capacity of " + editableDuration.toFixed(1) + " seconds.",
     "Do not rewrite the analysis. Map every content beat only to visible evidence from this verified observation timeline. The visual sequence supports the current event broadly and does not need to illustrate every spoken word literally; one narration beat may span live action, its reaction, and a genuinely different broadcast view of that same incident, but never an unrelated incident.",
     "There are exactly " + expectedBeatCount + " approved narration beats. Give every beat exactly one primary candidate and never omit the hook or conclusion. Additional candidates may be silent supporting proof.",
-    "Build the strongest visual timeline you can from unique candidates. Editing intensity is " + intensity + ". No finishing pass will invent or duplicate a replay. Use only supplied replay candidates from a genuinely different source interval and camera view; slow motion and freezes must use unique footage for a specific visible analytical point. " + (durationMode === "auto" ? "Plan sufficient complete evidence for at least 30 seconds yourself and do not cut off a goal or its reaction to match the estimated length." : "Select enough unique verified evidence to support " + targetDuration + " seconds."),
+    "Build the strongest visual timeline you can from unique candidates. Editing intensity is " + intensity + ". No finishing pass will invent or duplicate a replay. Use only supplied replay candidates from a genuinely different source interval and camera view; slow motion and freezes must use unique footage for a specific visible analytical point. " + (durationMode === "auto" ? "Plan complete evidence naturally and do not cut off a goal or its reaction to match the estimated length." : "Select enough unique verified evidence to support " + targetDuration + " seconds."),
     "Let every scene run for the full verified action with no fixed per-scene duration, and use enough unique evidence to cover the narration. Prefer fewer finished scenes over many chopped fragments. Keep each chosen candidate's complete start and end boundaries; never trim a candidate to fill a timeline gap. Several related incidents may support the same thesis.",
     "Apply this event priority: confirmed goal; shot on target, shot off target, save, or clear big chance; then other tactical play. When goal evidence exists, make it the editorial peak and do not spend the timeline on lower-priority ordinary play.",
     "Follow the approved analysis-beat order rather than sorting scenes back into broadcast chronology. Keep each goal cluster contiguous in edit order: one live goal action first, then at most one exact same-storyId replay from a genuinely different source interval/view, then a short reaction. Never show the scoring action a third time. Never insert another incident between the goalmouth result and the emotional payoff. If using multiple goals, complete one analytical chapter before starting the next.",
-    "For every gameplay beat, identify the locally verified active player with the thick red ring while tracking confidence is safe, then remove it at the handoff. During live goal action, the thick red ring may identify only the locally verified scorer; require that scorer and the ball before decisive contact, visible contact and flight, then goalkeeper or goalmouth result. On the evidence-linked freeze, request ball for shot trajectory, pass for a verified ball-carrier-to-receiver connection, run for a verified player path, or map for a calibrated tactical overview. Request pass when narration explains a real completed buildup pass: the renderer first adds a live white player-to-player network that follows both identities, then reveals yellow freeze markers and one white directional arrow. Omit any marker or drawing when identity, kit match, registration, receiver, or pitch calibration is unsafe. A goal payoff may receive one subtle color/sound accent. Keep its reaction to 2-3 seconds at normal speed without player markers.",
+    "For every gameplay beat, identify the locally verified active player with the thick red ring while tracking confidence is safe, then remove it at the handoff. During live goal action, the thick red ring may identify only the locally verified scorer; require that scorer and the ball before decisive contact, visible contact and flight, then goalkeeper or goalmouth result. Freeze before the decisive pass or shot when a verified phase anchor exists. On that evidence-linked freeze, request ball for shot trajectory, pass for a verified ball-carrier-to-receiver connection, run for a verified player path, or map for a calibrated tactical overview. Request pass when narration explains a real completed buildup pass: the renderer first reveals a live red player-to-player connector network that follows both identities, then draws one red directional arrow. Omit any marker or drawing when identity, kit match, registration, receiver, or pitch calibration is unsafe. A goal payoff may receive one subtle color/sound accent. Keep its reaction to 2-3 seconds at normal speed without player markers.",
     "For shots on target, shots off target, big chances and saves, require the key shooter and ball before contact, visible ball travel, and the goalkeeper or goalmouth outcome. A red ring may identify only the locally verified key shooter and must disappear after contact. Use a shot or save callout and a payoff-timed dramatic accent.",
     "Every gameplay segment must show the ball and currently involved player together in the configured output frame. Follow possession from the initiating player through the receiver, defender, or goalkeeper until the action resolves. Reaction or celebration may be player-only.",
     "A replay must be a supplied, non-overlapping source interval with a real broadcast cut and visibly different camera viewpoint; use no more than one replay per goal and never relabel or repeat the live interval. Give each analysis beat an evidence-linked grade and a brief non-overlapping scene-entry transition: cool setup, dramatic action, replay_blue proof, goal_gold payoff, warm consequence. Use speed changes, freeze, player highlight, callout, exposure treatment, and sound accents only when they support that content beat. Effects do not establish fair use; every excerpt must be the minimum reasonably necessary evidence for original criticism, commentary, or tactical explanation.",
@@ -168,6 +217,9 @@ export function normalizeContentPlan(raw, targetDuration) {
 }
 
 export function fitContentPlanToEvidenceSlots(plan, evidenceSlotCount, targetDuration) {
+  // Every reviewed scene already has one exact writer slot. Never prune those
+  // words later because a heuristic prefers fewer beats: that can omit goals.
+  if (plan?.lockedNarrationContractVersion === 1) return plan;
   const verifiedSlots = Math.max(1, Math.floor(Number(evidenceSlotCount) || 0));
   const editorialSlots = recommendedContentBeatCount(targetDuration, verifiedSlots);
   const maximumBeats = Math.min(verifiedSlots, editorialSlots);
@@ -186,10 +238,9 @@ export function fitContentPlanToEvidenceSlots(plan, evidenceSlotCount, targetDur
   return normalizeContentPlan({ ...plan, contentBeats: beats }, targetDuration);
 }
 
-export function contentPlanProblems(plan, targetDuration, evidenceSlotCount = Number.MAX_SAFE_INTEGER, verifiedGoalActionCount = undefined, durationMode, completeHighlights = false, matchContext = null) {
+export function contentPlanProblems(plan, targetDuration, evidenceSlotCount = Number.MAX_SAFE_INTEGER, verifiedGoalActionCount = undefined, durationMode, completeHighlights = false, matchContext = null,narrationTiming=null) {
   const problems = [];
-  const minimumWords = Math.round(targetDuration * (completeHighlights ? 3.0 : durationMode === "auto" ? 0.9 : 2.05));
-  const maximumWords = Math.round(targetDuration * (completeHighlights ? 3.2 : durationMode === "auto" ? 1.55 : 2.30));
+  const { minimumWords, maximumWords } = narrationWordBudget(targetDuration, durationMode, completeHighlights,narrationTiming);
   const words = countWords(plan?.contentScript);
   const titleWords = countWords(plan?.title);
   if (completeHighlights && (titleWords < 5 || titleWords > 10)) problems.push("recap_title_must_have_5_to_10_words");
@@ -197,11 +248,15 @@ export function contentPlanProblems(plan, targetDuration, evidenceSlotCount = Nu
   if (words > maximumWords) problems.push("script_too_long:" + words + ">" + maximumWords);
   if (durationMode === "auto" && plan?.contentBeats?.some((beat) => !conciseCaption(beat.captionText))) problems.push("caption_must_be_complete_2_to_4_word_headline");
   if (!plan?.editorialThesis || !plan?.storyQuestion || !plan?.storyAnswer) problems.push("missing_analysis_structure");
-  const requiredBeatCount = recommendedContentBeatCount(targetDuration, evidenceSlotCount);
+  const requiredBeatCount = plan?.lockedNarrationContractVersion === 1
+    ? evidenceSlotCount : recommendedContentBeatCount(targetDuration, evidenceSlotCount);
   if (!Array.isArray(plan?.contentBeats) || plan.contentBeats.length < requiredBeatCount) problems.push("too_few_content_beats");
   if (Array.isArray(plan?.contentBeats) && plan.contentBeats.length > requiredBeatCount) problems.push("too_many_content_beats");
   if (/\b(?:look at|watch this|notice how|focus on|pay attention|here we see|here you can see|you can see|we can see|as you can see)\b/i.test(plan?.contentScript || "")) problems.push("directing_filler_language");
-  if (/\b(?:replays?|clips?|footage|cameras?|freezes?|slow[ -]?motion|edit(?:ing|ed)?|angle confirms?)\b/i.test(plan?.contentScript || "")) problems.push("recap_mentions_editing_or_replay");
+  // "Clips the crossbar" and "clips his heels" describe football, not an
+  // editor's clip. Reject production language without rejecting those verbs.
+  const productionText = String(plan?.contentScript || '').replace(/\bclips?\s+(?:the\s+|his\s+|their\s+)?(?:goalposts?|posts?|crossbar|bar|frame|woodwork|heels?|ankles?)\b/gi,'touches the target');
+  if (/\b(?:replays?|clips?|footage|cameras?|freezes?|slow[ -]?motion|edit(?:ing|ed)?|angle confirms?)\b/i.test(productionText)) problems.push("recap_mentions_editing_or_replay");
   if (completeHighlights && /\b(?:the (?:dramatic )?(?:moment|turning point|sequence) (?:arrives|unfolds)|this demonstrates|teammates celebrate|the response arrives|pressure pays off)\b/i.test(plan?.contentScript || "")) problems.push("slow_documentary_filler");
   if (completeHighlights && /\b(?:arms crossed|crossed arms|cross(?:es|ed|ing)?\s+(?:his|her|their)\s+arms|pump(?:s|ed|ing)?\s+(?:his|her|their)\s+fists?|pumping fists?|grabbing (?:the )?ball with|gather(?:s|ed|ing)?\s+the\s+ball(?:\s+immediately)?\s+from\s+the\s+net|urg(?:e|es|ed|ing)\s+(?:everyone|teammates?|the\s+team)\s+forward|teammates? (?:embrace|celebrate)|(?:passionate )?celebrations? (?:erupt|follow))\b/i.test(plan?.contentScript || "")) {
     problems.push("reaction_description_as_analysis");
@@ -286,12 +341,12 @@ export function editableEvidenceDuration(candidates) {
 // It counts only unique source time that the renderer can actually place on the
 // timeline. It deliberately does not assume speculative slow motion or a freeze
 // on every scene, which previously let a 40-50 second pool masquerade as 60+.
-export function renderableEvidenceCapacity(candidates, transitionSeconds = 0.08) {
+export function renderableEvidenceCapacity(candidates, transitionSeconds = 0.08, {maximumReactionSeconds=3}={}) {
   const unique = uniqueEvidenceCandidates(Array.isArray(candidates) ? candidates : []);
   const durations = unique.flatMap((moment) => {
     const length = sourceLength(moment);
     if (!(length > 0)) return [];
-    return [isReactionOnly(moment) ? Math.min(3, length) : Math.min(MAX_SCENE_SECONDS, length)];
+    return [isReactionOnly(moment) ? Math.min(Math.max(0,maximumReactionSeconds), length) : Math.min(MAX_SCENE_SECONDS, length)];
   });
   if (!durations.length) return 0;
   return Math.max(0, durations.reduce((sum, length) => sum + length, 0)
@@ -465,15 +520,14 @@ export function limitIncidentActionViews(candidates) {
   const rejected = new Set();
   for (const moments of groups.values()) {
     const ranked = (items) => [...items].sort((a, b) =>
-      incidentViewQualityScore(b) - incidentViewQualityScore(a)
+      Number(Boolean(b.sourceAngleSelected||b.sourceAngleReserved))-Number(Boolean(a.sourceAngleSelected||a.sourceAngleReserved))
+      || incidentViewQualityScore(b) - incidentViewQualityScore(a)
       || Number(a.startTime) - Number(b.startTime));
-    // Keep the two clearest complete views regardless of whether the
-    // broadcaster labelled them live or replay. Step 2 will track both and
-    // retain the easier, more stable player-and-ball angle. Forcing one live
-    // plus one replay made difficult replay cameras mandatory and caused
-    // unnecessary keyframe failures.
+    // The live-first workflow keeps exactly one chosen source angle. Legacy
+    // workflows retain two provisional alternatives for their old comparison.
     const alternatives = ranked(moments);
-    for (const moment of alternatives.slice(2)) rejected.add(String(moment.id));
+    const fixedSelection = moments.some(moment => moment.sourceAngleSelectionPolicy === 'first_complete_live');
+    for (const moment of alternatives.slice(fixedSelection ? 1 : 2)) rejected.add(String(moment.id));
   }
   return source.map((moment) => rejected.has(String(moment.id)) ? {
     ...moment,
@@ -488,6 +542,11 @@ export function limitIncidentActionViews(candidates) {
 
 export function chooseTrackedIncidentAngles(candidates, qualityById = {}, usableById = {}) {
   const source = (Array.isArray(candidates) ? candidates : []).map((moment) => ({ ...moment }));
+  // The current recap already chose its only angle in Step 1. Never swap or
+  // delete that selection because the crop needs a better camera path.
+  if (source.some(moment => moment.selectionLocked && moment.fixedSceneQueueVersion === 1))
+    return source.map(moment => moment.selectionLocked && ['goal','disallowed_goal'].includes(moment.eventType)
+      ? { ...moment, chosenIncidentAngle: true, selectionDecision: 'source_angle_fixed_before_tracking' } : moment);
   const groups = new Map();
   for (const moment of source) {
     if (moment.selectionLocked !== true || !["goal", "disallowed_goal"].includes(moment.eventType)) continue;
@@ -520,11 +579,13 @@ export function chooseTrackedIncidentAngles(candidates, qualityById = {}, usable
     if (chosen.has(String(moment.id))) return {
       ...moment,
       chosenIncidentAngle: true,
+      ...(moment.sourceScoreAnchorId?{sourceAngleSelected:true,sourceAngleReserved:false}:{}),
       selectionDecision: "best_tracked_incident_angle",
     };
     return {
       ...moment,
       chosenIncidentAngle: false,
+      ...(moment.sourceScoreAnchorId?{sourceAngleSelected:false}:{}),
       sceneSelectionApproved: false,
       selectionLocked: false,
       selectedForFinalVideo: false,
@@ -693,6 +754,12 @@ export function keyframePhaseProblems(moment, evidence) {
 }
 
 export function assessPlannedSceneTracking(moment, evidence) {
+  const hybrid = assessHybridFraming(moment, evidence);
+  if (hybrid) return hybrid;
+  const gemini = assessGeminiFraming(moment, evidence);
+  if (gemini) return gemini;
+  const decision = assessDecisionFraming(moment, evidence);
+  if (decision) return decision;
   const reactionOnly = playerOnlyEvidenceAllowed(moment);
   if (reactionOnly) return { usable: true, mode: "planned_reaction" };
   if (!evidence) return { usable: false, mode: "missing_tracking" };

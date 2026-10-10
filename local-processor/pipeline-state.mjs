@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
+import {INITIAL_SECTION_VERSION} from './initial-section-analysis.mjs';
 
-export const SEMANTIC_VERIFICATION_VERSION = 9;
+// HIGH-resolution video observation changes the evidence contract. Earlier
+// low-detail conclusions must be reobserved, not reused on resumed jobs.
+export const SEMANTIC_VERIFICATION_VERSION = 19;
 
 export function stableSignature(value) {
   const canonical = (item) => Array.isArray(item) ? item.map(canonical)
@@ -13,21 +16,48 @@ export function semanticSignature(moment) {
     event: moment.eventType, description: moment.description, storyPhase: moment.storyPhase });
 }
 
-export function needsSemanticReview(moment) {
+export function needsSemanticReview(moment, model) {
+  const initial=moment.sourceSelectionEvidence;
+  if(initial?.version===INITIAL_SECTION_VERSION&&initial.provider==='gemini_initial_section_video'
+    &&initial.independentReview===false&&initial.sourceFingerprint
+    &&moment.semanticVerified===true&&moment.actionComplete===true
+    &&(!model||initial.model===model)
+    &&moment.startTime>=initial.startTime&&moment.endTime<=initial.endTime
+    &&moment.semanticSignature===semanticSignature(moment)) return false;
+  if (model && moment.semanticModel !== model) return true;
+  if (moment.eventType === 'celebration' && moment.semanticReactionContractVersion !== 1) return true;
   return moment.semanticVerificationVersion !== SEMANTIC_VERIFICATION_VERSION || moment.semanticSignature !== semanticSignature(moment);
 }
 
 export function mergeSemanticReview(moment, review) {
-  const fields = ["eventType", "storyPhase", "role", "description", "actionComplete", "trackingBrief",
-    "semanticVerificationVersion", "semanticGeometryVersion", "semanticDecisionContextVersion", "semanticVerified", "semanticSignature", "semanticNarrationFacts"];
+  const fields = ["eventType", "isReplay", "storyPhase", "role", "description", "actionComplete", "trackingBrief",
+    "semanticVerificationVersion", "semanticModel", "semanticGeometryVersion", "semanticDecisionContextVersion", "semanticReactionContractVersion", "semanticVerified", "semanticSignature", "semanticNarrationFacts", "semanticObservedGameplay", "sourceOutcomeObservation", "goalOutcomeCrosscheck", "verifiedSourceActionWindow"];
   const result = { ...moment };
   for (const key of fields) if (Object.hasOwn(review, key)) result[key] = review[key];
-  if (result.eventType !== "celebration") {
+  const window=review.verifiedSourceActionWindow;
+  if(moment.selectionLocked!==true&&review.semanticVerified===true&&window
+    && ['setupVisible','contactVisible','payoffVisible','cleanSourceBoundaries'].every(key=>window[key]===true)
+    && [window.startTime,window.endTime,window.reviewSourceStartTime,window.reviewSourceEndTime].every(Number.isFinite)
+    &&window.startTime>=window.reviewSourceStartTime&&window.endTime<=window.reviewSourceEndTime+.001
+    &&window.endTime>window.startTime) {
+    result.startTime=window.startTime;result.endTime=window.endTime;
+  }
+  if (!["celebration", "var"].includes(result.eventType)) {
     if (result.storyPhase === "reaction") result.storyPhase = result.isReplay ? "replay" : "action";
     if (result.role === "reaction") result.role = "evidence";
   }
   if (review.semanticVerified === false) return { ...result, keepDecision: "reject",
     selectedForFinalVideo: false, trackingDecision: "semantic_mismatch", rejectReason: review.rejectReason };
+  const oldSemanticRejection = moment.trackingDecision === "semantic_mismatch"
+    || (!moment.trackingDecision && moment.semanticVerified === false);
+  if (review.semanticVerified === true && oldSemanticRejection
+    && moment.selectionLocked !== true
+    && Number(review.semanticVerificationVersion || 0) >= Number(moment.semanticVerificationVersion || 0)) {
+    // An upgraded cached observation can repair a Step 1 semantic rejection.
+    // Preserve real Step 2 framing failures; only the semantic gate is reopened.
+    return { ...result, keepDecision: review.keepDecision || (result.isReplay ? "replay" : "keep"),
+      trackingDecision: undefined, rejectReason: undefined, selectedForFinalVideo: false };
+  }
   // A cached semantic approval cannot undo a newer local framing rejection.
   return result;
 }
@@ -67,8 +97,12 @@ export function evidenceReport(candidates, capacity, minimum) {
     reason: m.rejectReason || m.trackingDecision || "analysis_rejected",
     semanticVerified: m.semanticVerified === true,
   }));
-  return { version: 1, capacity, minimum, shortfall: Math.max(0, minimum - capacity), rejected,
-    repairable: rejected.filter(m => m.semanticVerified && trackingRepairableReason(m.reason)).map(m => m.id) };
+  const framingPending=candidates.filter(m=>m.selectionLocked===true&&m.trackingPassed===false)
+    .map(m=>({id:m.id,start:m.startTime,end:m.endTime,event:m.eventType,
+      reason:m.trackingRepairError||m.trackingDecision||'unverified_framing',semanticVerified:m.semanticVerified===true}));
+  return { version: 1, capacity, minimum, shortfall: Math.max(0, minimum - capacity), rejected,framingPending,
+    repairable: [...new Set([...rejected,...framingPending]
+      .filter(m => m.semanticVerified && trackingRepairableReason(m.reason)).map(m => m.id))] };
 }
 
 export function trackingRepairableReason(value) {

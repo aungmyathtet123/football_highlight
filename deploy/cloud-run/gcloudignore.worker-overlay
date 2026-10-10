@@ -1,0 +1,18 @@
+# Code-only overlay: model/runtime assets already exist in BASE_IMAGE.
+*
+!package.json
+!package-lock.json
+!local-processor/
+!local-processor/**
+!assets/
+!assets/team-badges/
+!assets/team-badges/**
+!deploy/
+!deploy/cloud-run/
+!deploy/cloud-run/Dockerfile.worker-code-overlay
+!deploy/cloud-run/cloudbuild.worker-code-overlay.yaml
+!deploy/cloud-run/gcloudignore.worker-overlay
+!deploy/cloud-run/worker.mjs
+!deploy/cloud-run/checkpoint-store.mjs
+!deploy/cloud-run/job-status-policy.mjs
+!deploy/cloud-run/processor-startup-smoke.mjs

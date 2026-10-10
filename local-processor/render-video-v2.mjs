@@ -1,6 +1,6 @@
 import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MIN_SCENE_SECONDS, COMPLETE_HIGHLIGHT_MAX_PLAYBACK_RATE } from "./editorial-policy.mjs";
 import { captionAss, narrationSubtitleCues, sparseCaptionCues, shortReactionCandidates } from "./short-form-policy.mjs";
@@ -9,11 +9,120 @@ import { trackedPositionExpression } from "./tracked-position.mjs";
 import { tacticalFreezeAnchor } from "./tactical-plan.mjs";
 import { assertIncidentCoverage } from "./incident-coverage.mjs";
 import { usesSafeStaticPresentation } from "./delivery-policy.mjs";
+import { filterGraphFileArgs } from "./ffmpeg-compat.mjs";
+import { boundedFfmpegArgs } from "./ffmpeg-thread-budget.mjs";
+import { videoEncoderArgs } from './fast-tracking-policy.mjs';
+import { prepareMatchTeamBadges } from "./team-badges.mjs";
+import {splitSceneInput} from './split-scene-assets.mjs';
+import {fixedRenderSceneQueue} from './fixed-scene-queue.mjs';
+import {encodedBatchClock} from './rendered-batch-clock.mjs';
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 export function outputDimensions(settings) {
   if (settings?.aspectRatio === "16:9") return { width: 1920, height: 1080 };
+  if (settings?.aspectRatio === "4:3") return { width: 1440, height: 1080 };
+  if (settings?.aspectRatio === "1:1") return { width: 1080, height: 1080 };
   return settings?.aspectRatio === "4:5" ? { width: 1080, height: 1350 } : { width: 1080, height: 1920 };
+}
+
+// A panning portrait crop can expose a clock between separated source masks.
+// Cover the shallow broadcast-header strip once in output coordinates, without
+// recropping the pitch, resizing it, or changing the approved camera path.
+export function portraitMatchResultTitle(matchContext, firstTeam = matchContext?.homeTeam) {
+  if (matchContext?.status !== "verified") return "";
+  const cleanTeam = value => typeof value === "string" ? value.replace(/\s+/gu, " ").trim() : "";
+  const home = cleanTeam(matchContext.homeTeam), away = cleanTeam(matchContext.awayTeam);
+  const score = String(matchContext.finalScore || "").match(/^\s*(\d{1,2})\s*[-:\u2013\u2014]\s*(\d{1,2})\s*$/u);
+  if (!home || !away || home.toLowerCase() === away.toLowerCase() || !score) return "";
+  // Reverse the associated score too when changing display order.
+  const awayFirst = cleanTeam(firstTeam).toLowerCase() === away.toLowerCase();
+  return (awayFirst ? `${away} ${score[2]}–${score[1]} ${home}` : `${home} ${score[1]}–${score[2]} ${away}`).toUpperCase();
+}
+
+export function portraitMatchResultScore(matchContext, firstTeam = matchContext?.homeTeam) {
+  if (!portraitMatchResultTitle(matchContext, firstTeam)) return "";
+  const score = String(matchContext.finalScore).match(/^\s*(\d{1,2})\s*[-:\u2013\u2014]\s*(\d{1,2})\s*$/u);
+  const cleanName = value => String(value||'').replace(/\s+/gu,' ').trim().toLowerCase();
+  const awayFirst = cleanName(firstTeam) === cleanName(matchContext.awayTeam);
+  return awayFirst ? `${score[2]}–${score[1]}` : `${score[1]}–${score[2]}`;
+}
+
+export function portraitBroadcastHeaderFilters(settings, width, height, matchContext = null, titlePath = null, firstTeam = matchContext?.homeTeam) {
+  if (settings?.editStyle !== "complete_highlights" || settings?.aspectRatio !== "9:16"
+    || settings?.logoMasking !== true || settings?.broadcastUiMasking === false) return "";
+  const headerHeight=Math.ceil(Number(height)*.115/2)*2;
+  const score = portraitMatchResultScore(matchContext, firstTeam);
+  const background = `drawbox=x=0:y=0:w=iw:h=${headerHeight}:color=black@0.24:t=fill,`
+    +`drawbox=x=0:y=${headerHeight-2}:w=iw:h=2:color=white@0.24:t=fill`;
+  if (!score) return background; // Never invent an unknown match/result.
+  if (!titlePath) throw new Error("A verified match-result header needs its score text file.");
+  const font=escapeFilterPath(resolveSetting(process.env.CAPTION_FONT_PATH || "C:/Windows/Fonts/arialbd.ttf"));
+  const fontSize = Math.max(1, Math.round(Number(width)*.056));
+  // The header file contains only the verified score, not team names. Team
+  // identity is conveyed by the adjacent badges and retained in job metadata.
+  return background + `,drawtext=fontfile='${font}':textfile='${escapeFilterPath(titlePath)}':expansion=none:fontcolor=white:fontsize=${fontSize}:borderw=2:bordercolor=black@0.8:shadowx=1:shadowy=2:shadowcolor=black@0.6:x=(w-text_w)/2:y=(${headerHeight}-text_h)/2`;
+}
+
+// Sample only a narrow copy of the footage below the title, heavily blur it,
+// then overlay that copy at the top. The main pitch is neither scaled nor
+// recropped, and an existing painted header cannot leak into the blur.
+export function portraitBroadcastHeaderPlan(settings,width,height,matchContext,titlePath,{firstTeam=matchContext?.homeTeam,badgeInputs={},inputLabel='outv',outputLabel='headerCleanVideo'}={}){
+  const treatment=portraitBroadcastHeaderFilters(settings,width,height,matchContext,titlePath,firstTeam);
+  if(!treatment)return [];
+  const headerHeight=Math.ceil(Number(height)*.115/2)*2;
+  const filters=[`[${inputLabel}]split=2[headerBase][headerSample]`,
+    `[headerSample]crop=w=iw:h=${headerHeight}:x=0:y=${headerHeight},gblur=sigma=24:steps=2[headerBlur]`,
+    `[headerBase][headerBlur]overlay=x=0:y=0:eof_action=pass:shortest=1,${treatment}[headerText]`];
+  const cleanName = value => String(value||'').replace(/\s+/gu,' ').trim().toLowerCase();
+  const awayFirst=cleanName(firstTeam)===cleanName(matchContext?.awayTeam);
+  const sides=awayFirst?['away','home']:['home','away'];
+  const badgeSize=Math.round(Number(width)*.074),gap=Math.round(Number(width)*.010);
+  // Keep badges close to the score. Reserve more room only for extra digits,
+  // so a 10–0/10–10 result remains legible without widening every 1–1 header.
+  const score=portraitMatchResultScore(matchContext,firstTeam);
+  const extraDigits=Math.max(0,(score.match(/\d/g)||[]).length-2);
+  const scoreBoxWidth=Math.round(Number(width)*.11)+extraDigits*Math.round(Number(width)*.035);
+  let previous='headerText';
+  for(const [sideIndex,side] of sides.entries()){
+    const input=badgeInputs[side];if(!Number.isInteger(input)||input<0)continue;
+    const badge=`headerBadge${sideIndex}`,next=`headerWithBadge${sideIndex}`;
+    filters.push(`[${input}:v]format=rgba,scale=w=${badgeSize}:h=${badgeSize}:force_original_aspect_ratio=decrease:flags=lanczos,pad=w=${badgeSize}:h=${badgeSize}:x=(ow-iw)/2:y=(oh-ih)/2:color=black@0[${badge}]`);
+    const x=sideIndex===0?`(W-${scoreBoxWidth})/2-${gap}-w`:`(W+${scoreBoxWidth})/2+${gap}`;
+    filters.push(`[${previous}][${badge}]overlay=x=${x}:y=(${headerHeight}-h)/2:eof_action=repeat:shortest=1[${next}]`);
+    previous=next;
+  }
+  filters.push(`[${previous}]null[${outputLabel}]`);return filters;
+}
+
+// One fixed crop per source shot. The test uses both subjects across the
+// tracked scene, rather than chasing a player or ball every frame. If the
+// evidence is sparse or either subject approaches the new edge, keep 100%.
+export function safeLandscapeZoom(keyframes, width, height) {
+  const unchanged = (reason) => ({ zoom: 1, centerX: 0.5, centerY: 0.5, reason });
+  const frames = (Array.isArray(keyframes) ? keyframes : []).filter(frame => Number.isFinite(Number(frame?.time)));
+  if (frames.length < 8 || frames.some(frame => frame?.sceneCut && Number(frame.time) > 0.15)) return unchanged("insufficient_continuous_tracking");
+  const observed = frames.filter(frame => frame.ballInFrame === true && frame.playerInFrame === true
+    && [frame.ballCenterX, frame.ballCenterY, frame.playerCenterX, frame.playerCenterY]
+      .every(value => typeof value === "number" && Number.isFinite(value)));
+  if (observed.length < 8 || observed.length / frames.length < 0.85) return unchanged("ball_or_player_not_continuously_verified");
+  const points = observed.flatMap(frame => [
+    [Number(frame.ballCenterX) / width, Number(frame.ballCenterY) / height],
+    [Number(frame.playerCenterX) / width, Number(frame.playerCenterY) / height],
+  ]);
+  if (points.some(([x, y]) => !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1)) return unchanged("invalid_subject_position");
+  const xs = points.map(point => point[0]);
+  const ys = points.map(point => point[1]);
+  const centerX = clamp((Math.min(...xs) + Math.max(...xs)) / 2, 0.475, 0.525);
+  const centerY = clamp((Math.min(...ys) + Math.max(...ys)) / 2, 0.475, 0.525);
+  for (const zoom of [1.10, 1.08, 1.05]) {
+    const half = 0.5 / zoom;
+    const margin = 0.055 / zoom;
+    if (points.every(([x, y]) => x >= centerX - half + margin && x <= centerX + half - margin
+      && y >= centerY - half + margin && y <= centerY + half - margin)) {
+      return { zoom, centerX, centerY, reason: "verified_scene_safe" };
+    }
+  }
+  return unchanged("action_needs_full_width");
 }
 
 export function synchronizationProblems(beats) {
@@ -38,7 +147,56 @@ export function synchronizationProblems(beats) {
   return problems;
 }
 
-export async function renderVideoV2(sourcePath, outputPath, moments, settings, media, ttsFiles, overlayMasks, tracking, stadiumAudioPath = null) {
+// FFmpeg 9 on Windows exposes only -filter_complex (there is no
+// -filter_complex_script).  A complete recap with twelve scenes, captions,
+// tactical assets and badges can therefore exceed Windows' ~32K process
+// command-line limit even though the graph itself is valid.  Render small
+// scene batches and concatenate the finished, independently encoded parts.
+// This keeps every existing visual treatment while keeping each FFmpeg argv
+// safely below the platform limit.
+async function renderChunkedCompleteRecap(sourcePath, outputPath, selected, settings, media, ttsFiles, overlayMasks, tracking, stadiumAudioPath, matchContext) {
+  const chunkSize = 3;
+  const directory = dirname(outputPath);
+  const parts = [];
+  let timelineDuration = 0;
+  const synchronization = [];
+  let loudness = null;
+  for (let start = 0; start < selected.length; start += chunkSize) {
+    const chunk = selected.slice(start, start + chunkSize);
+    const partPath = join(directory, `scene-part-${String(start / chunkSize).padStart(2, "0")}.mp4`);
+    const rendered = await renderVideoV2(sourcePath, partPath, chunk, {
+      ...settings,
+      __renderChunked: true,
+      __skipCoverage: true,
+      // The final visual master should not flash a new match header at every
+      // batch boundary.  The watermark and analytical captions remain in each
+      // part and are preserved by the concat demuxer.
+      __renderChunkPart: true,
+      broadcastUiMasking: false,
+    }, media, ttsFiles, overlayMasks, tracking, stadiumAudioPath, matchContext);
+    const probe=resolveExecutable(process.env.FFPROBE_PATH||'ffprobe');
+    const duration=Number((await run(probe,['-v','error','-show_entries','format=duration',
+      '-of','default=noprint_wrappers=1:nokey=1',partPath])).trim());
+    const result=encodedBatchClock(rendered,duration);
+    parts.push(partPath);
+    for (const beat of result.synchronization || []) synchronization.push({
+      ...beat,
+      visualStart: Number(beat.visualStart || 0) + timelineDuration,
+    });
+    timelineDuration += Number(result.timelineDuration || 0);
+    loudness = result.loudness || loudness;
+  }
+  const listPath = join(directory, "scene-parts.txt");
+  const concatLine = path => `file '${String(path).replace(/'/g, "'\\''")}'`;
+  await writeFile(listPath, parts.map(concatLine).join("\n") + "\n", "utf8");
+  const executable = resolveExecutable(process.env.FFMPEG_PATH || "ffmpeg");
+  await run(executable, ["-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", outputPath]);
+  await writeFile(join(directory,'synchronization.json'),JSON.stringify({version:2,
+    clockSource:'measured_encoded_batches',timelineDuration,beats:synchronization},null,2));
+  return { timelineDuration, synchronization, teaserDuration: 0, loudness };
+}
+
+export async function renderVideoV2(sourcePath, outputPath, moments, settings, media, ttsFiles, overlayMasks, tracking, stadiumAudioPath = null, matchContext = null) {
   const { width: outputWidth, height: outputHeight } = outputDimensions(settings);
   const narrationOnly = settings.commentary && settings.editStyle === "complete_highlights";
   const reactionLimit = settings.editStyle === "complete_highlights" ? 1.6 : settings.editStyle === "viral_reel" ? 2.5 : 3;
@@ -48,10 +206,38 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     presentationVersion: settings.editStyle === "complete_highlights" ? 2 : 1,
     tacticalFreezeSourceTime: usesSafeStaticPresentation(moment) ? undefined : tacticalFreezeAnchor(moment,trackingForMoment(tracking,moment)) }));
   if (selected.length === 0) throw new Error("No moments were selected for the final edit.");
-  assertIncidentCoverage(moments.filter(m=>m.selectedForFinalVideo),selected);
-  const captionCues = settings.captions ? await makeCaptionCueFiles(selected, outputPath, tracking, outputWidth, outputHeight) : new Map();
+  if (settings.__skipCoverage !== true) assertIncidentCoverage(moments.filter(m=>m.selectedForFinalVideo),selected);
+  // See renderChunkedCompleteRecap: this branch is deliberately limited to
+  // the muted visual-master pass.  Narration is added once after the entire
+  // visual timeline has been concatenated, so no speech timing is duplicated.
+  if (settings.__renderChunked !== true && settings.editStyle === "complete_highlights"
+      && settings.commentary === false && selected.length > 3) {
+    return renderChunkedCompleteRecap(sourcePath, outputPath, selected, settings, media, ttsFiles, overlayMasks, tracking, stadiumAudioPath, matchContext);
+  }
+  const captionCues = settings.captions && settings.narrationSubtitles !== false ? await makeCaptionCueFiles(selected, outputPath, tracking, outputWidth, outputHeight) : new Map();
   const calloutFiles = settings.captions ? await makeCalloutFiles(selected, outputPath) : new Map();
-  const args = ["-hide_banner", "-y", "-i", sourcePath];
+  // Keep the upper corner clear. The former scene/chapter label was a static
+  // production label, not evidence-linked football analysis, and could cover
+  // the broadcast action. Scene captions and event callouts remain in their
+  // dedicated safe zones below.
+  // A full recap can have many simultaneous overlay inputs. Bound FFmpeg's
+  // filter graph workers so each branch does not allocate its own large frame
+  // queue at scene boundaries on a memory-limited cloud worker.
+  const segmentedSource = settings.editStyle === "complete_highlights"
+    && (narrationOnly || settings.originalAudio === "muted");
+  const args = ["-hide_banner", "-y", "-filter_complex_threads", "1", "-threads", "2"];
+  const sceneSourceInputs = new Map();
+  if (segmentedSource) {
+    // One shared decoder feeding many trims can retain frames across distant
+    // broadcast timestamps until a concat reaches the next scene. Seek each
+    // selected action independently so decoder queues stay bounded to that
+    // action, not the entire uploaded match.
+    for (const [index, moment] of selected.entries()) {
+      sceneSourceInputs.set(index, inputCount(args));
+      const split=splitSceneInput(moment,settings.sourceSceneDirectory || resolve(dirname(outputPath),'source-scenes'));
+      args.push("-ss", (split?.startTime??moment.startTime).toFixed(3), "-t", Math.max(0.1, moment.endTime - moment.startTime).toFixed(3), "-i", split?.path||sourcePath);
+    }
+  } else args.push("-i", sourcePath);
   const brandWatermarkPath = resolveSetting(process.env.BRAND_WATERMARK_PATH || resolve(projectRoot, "assets/channels4_profile.jpg"));
   const brandWatermarkInputIndex = inputCount(args);
   args.push("-loop", "1", "-i", brandWatermarkPath);
@@ -82,46 +268,53 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
   const tacticalDirectory = resolve(dirname(outputPath), "tactical");
   await mkdir(tacticalDirectory, {recursive:true});
   if (settings.playerHighlight) for (const [index, moment] of selected.entries()) {
-    if (moment.effect !== "freeze_analysis" || !["ball", "run", "pass", "map"].includes(moment.tacticalDrawing)) continue;
+    const freezeDrawing = moment.effect === "freeze_analysis" && ["ball", "run", "pass", "map"].includes(moment.tacticalDrawing);
+    const movingPass = settings.editStyle === "complete_highlights" && moment.tacticalDrawing === "pass";
+    if (!freezeDrawing && !movingPass) continue;
     const evidence = trackingForMoment(tracking, moment);
+    if (!evidence) continue;
     const rate = playbackRateFor(moment);
     let freeze = freezePlan(moment, rate, moment.endTime - moment.startTime);
     const evidencePath = resolve(tacticalDirectory, `${index}.json`);
-    await writeFile(evidencePath, JSON.stringify(evidence || {}));
-    const isMap = moment.tacticalDrawing === "map";
-    const report = JSON.parse(await run(resolveExecutable(process.env.TRACKING_PYTHON || "./.venv-tracking/Scripts/python.exe"), [
-      resolve(projectRoot,isMap ? "local-processor/pitch-map.py" : "local-processor/tactical-overlay.py"), "--source",sourcePath,"--evidence",evidencePath,
-      "--time",String(moment.startTime + freeze.outputTime * rate),
-      ...(isMap ? ["--model",resolveExecutable(process.env.TRACKING_PITCH_MODEL || "./tools/tracking/yolo-football-pitch-detection.pt")] : ["--kind",moment.tacticalDrawing]),
-      "--width",String(outputWidth),"--height",String(outputHeight),
-      ...(settings.aspectRatio === "16:9" ? ["--native-landscape"] : []),
-      "--output",resolve(tacticalDirectory,`${index}.png`),
-    ]));
-    tacticalReport.push({momentId:moment.id,...report});
-    if (report.approved) {
-      if (moment.tacticalDrawing === "pass" && Number.isFinite(Number(report.sourceTime))) {
-        moment.trackingBrief = { ...(moment.trackingBrief || {}), originTime: Number(report.sourceTime) };
-        freeze = freezePlan(moment, rate, moment.endTime - moment.startTime);
-      }
-      const stageInputIndices = Array.isArray(report.stages) && report.stages.length === 3
-        ? report.stages.map(stagePath => {
-            const stageInputIndex = inputCount(args);
-            args.push("-loop","1","-framerate","30","-i",stagePath);
-            return stageInputIndex;
-          })
-        : [];
-      if (stageInputIndices.length) {
-        tacticalInputs.set(index,{stageInputIndices,freeze,isMap:false});
-      } else {
-        const inputIndex = inputCount(args);
-        args.push("-loop","1","-framerate","30","-i",report.path);
-        tacticalInputs.set(index,{inputIndex,freeze,isMap});
+    await writeFile(evidencePath, JSON.stringify(evidence));
+    let staticReport = null;
+    if (freezeDrawing) {
+      const isMap = moment.tacticalDrawing === "map";
+      staticReport = JSON.parse(await run(resolveExecutable(process.env.TRACKING_PYTHON || "./.venv-tracking/Scripts/python.exe"), [
+        resolve(projectRoot,isMap ? "local-processor/pitch-map.py" : "local-processor/tactical-overlay.py"), "--source",sourcePath,"--evidence",evidencePath,
+        "--time",String(moment.startTime + freeze.outputTime * rate),
+        ...(isMap ? ["--model",resolveExecutable(process.env.TRACKING_PITCH_MODEL || "./tools/tracking/yolo-football-pitch-detection.pt")] : ["--kind",moment.tacticalDrawing]),
+        "--width",String(outputWidth),"--height",String(outputHeight),
+        ...(settings.aspectRatio === "16:9" ? ["--native-landscape"] : []),
+        "--output",resolve(tacticalDirectory,`${index}.png`),
+      ]));
+      tacticalReport.push({momentId:moment.id,...staticReport});
+      if (staticReport.approved) {
+        if (moment.tacticalDrawing === "pass" && Number.isFinite(Number(staticReport.sourceTime))) {
+          moment.trackingBrief = { ...(moment.trackingBrief || {}), originTime: Number(staticReport.sourceTime) };
+          freeze = freezePlan(moment, rate, moment.endTime - moment.startTime);
+        }
+        const stageInputIndices = Array.isArray(staticReport.stages) && staticReport.stages.length === 3
+          ? staticReport.stages.map(stagePath => {
+              const stageInputIndex = inputCount(args);
+              args.push("-loop","1","-framerate","30","-i",stagePath);
+              return stageInputIndex;
+            })
+          : [];
+        if (stageInputIndices.length) {
+          tacticalInputs.set(index,{stageInputIndices,freeze,isMap:false});
+        } else {
+          const inputIndex = inputCount(args);
+          args.push("-loop","1","-framerate","30","-i",staticReport.path);
+          tacticalInputs.set(index,{inputIndex,freeze,isMap});
+        }
       }
     }
-    if (settings.editStyle === "complete_highlights" && moment.tacticalDrawing === "pass") {
+    if (movingPass) {
+      const requestedTime = Number(staticReport?.sourceTime ?? moment.trackingBrief?.originTime ?? moment.startTime + (moment.endTime - moment.startTime) / 2);
       const motionReport = JSON.parse(await run(resolveExecutable(process.env.TRACKING_PYTHON || "./.venv-tracking/Scripts/python.exe"), [
         resolve(projectRoot,"local-processor/moving-tactical-overlay.py"), "--evidence",evidencePath,
-        "--time",String(Number(report.sourceTime || moment.startTime + freeze.outputTime * rate)),
+        "--time",String(requestedTime),
         "--width",String(outputWidth),"--height",String(outputHeight),
         ...(settings.aspectRatio === "16:9" ? ["--native-landscape"] : []),
         "--output-dir",resolve(tacticalDirectory,`motion-${index}`),
@@ -135,7 +328,7 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
           sourceStartTime:Number(motionReport.sourceStartTime),
           duration:Number(motionReport.duration),
         });
-      } else {
+      } else if (freezeDrawing) {
         // A plausible still frame is not enough to identify a passer and
         // receiver. If their identities cannot survive the live sequence,
         // suppress the static network too instead of circling nearby players.
@@ -152,7 +345,8 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     const reaction = moment.eventType === "celebration" || moment.storyPhase === "reaction" || moment.role === "reaction";
     const style = ["viral_reel", "complete_highlights"].includes(settings.editStyle) || moment.effect === "freeze_analysis" ? "ring" : "arrow";
     const markerPath = tracking?.markerPaths?.[style];
-    const verifiedAction = /^(?:phase|native_frame)_verified_(?:goal|action)$/.test(String(moment.trackingDecision || ""));
+    const verifiedAction = /^(?:phase|native_frame)_verified_(?:goal|action)$/.test(String(moment.trackingDecision || ""))
+      || moment.trackingDecision === "hybrid_crop_verified";
     const minimumMarkerConfidence = verifiedAction ? 0.65 : 0.85;
     const playerEligible = !reaction
       && moment.playerHighlight !== false
@@ -176,9 +370,10 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
   const filters = [];
   const useOriginalAudio = !narrationOnly && !stadiumAudioPath && media.hasAudio && settings.originalAudio !== "muted" && (!settings.commentary || settings.editStyle === "viral_reel");
   const gain = settings.editStyle === "viral_reel" && settings.commentary ? 0.20 : settings.originalAudio === "reduced" ? 0.28 : 1;
-  const masks = settings.logoMasking ? sourceMaskFilters(effectiveOverlayMasks(overlayMasks), media) : [];
+  const masks = settings.logoMasking ? sourceMaskFilters(effectiveOverlayMasks(overlayMasks, { ...settings, broadcastUiMasking: settings.broadcastUiMasking !== false }), media) : [];
   const masking = masks.length ? `${masks.join(",")},` : "";
   const clipDurations = [];
+  const framingReport = [];
   const clipStarts = [0];
   const first = selected[0];
   const firstRate = playbackRateFor(first);
@@ -200,23 +395,27 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     const eventCue = eventCueWindow(moment, playbackRate, freeze, sourceLength);
     const annotationInput = annotationInputs.get(index);
     const cueDuration = 0;
-    const baseOutputLength = sourceLength / playbackRate + freeze.duration;
+    const baseOutputLength = sourceLength / playbackRate + freeze.frames / 30;
     const speechDuration = Number(ttsFiles.durations?.get(moment.id) || 0);
     const narrationDelay = speechDuration > 0 ? clamp(Number(moment.narrationDelay || 0), 0, Math.max(0, baseOutputLength - speechDuration - 0.12)) : 0;
     if (speechDuration > baseOutputLength + 0.35) throw new Error(`Narration for ${moment.id} is longer than its complete scene. Rewrite it more concisely instead of freezing the ending.`);
     if (speechDuration + narrationDelay > baseOutputLength + 0.35) throw new Error(`Narration for ${moment.id} is longer than its complete scene. Rewrite it more concisely instead of freezing the ending.`);
-    const outputLength = Math.max(baseOutputLength, speechDuration > 0 ? speechDuration + narrationDelay + 0.16 : 0);
+    // Every concat branch must share the SAME whole-frame endpoint. Keeping
+    // fractional audio durations alongside rounded video frames accumulated
+    // extra ticks at each cut and made the writer's timeline too short.
+    const outputLength = Math.ceil(Math.max(baseOutputLength, speechDuration > 0 ? speechDuration + narrationDelay + 0.16 : 0) * 30 - 1e-8) / 30;
     clipDurations.push(outputLength);
 
     const fallbackX = clamp(moment.recommendedCrop?.[0]?.x ?? 0.5, 0, 1);
     const trackedMoment = trackingForMoment(tracking, moment);
+    const landscapeZoom = nativeLandscape ? safeLandscapeZoom(trackedMoment?.keyframes, outputWidth, outputHeight) : { zoom: 1, centerX: 0.5, centerY: 0.5, reason: "not_landscape" };
+    framingReport.push({ momentId: moment.id, ...landscapeZoom });
     const cameraKeyframes = usesSafeStaticPresentation(moment) ? [] : trackedMoment?.keyframes || [];
     const keyframes = retimeKeyframes(cameraKeyframes, playbackRate, freeze);
     // Cropping happens before speed changes and freezes. Its clock must remain
     // source-local; only overlays/captions use the retimed output clock.
-    // Complete 16:9 analysis keeps the broadcast camera intact. Tracking may
-    // verify subjects and position annotations, but it cannot steer or shake
-    // the rendered camera.
+    // Complete 16:9 analysis never chases detections frame by frame. Tracking
+    // verifies a single safe scene crop below; otherwise the full view stays.
     const cameraX = nativeLandscape ? "0.5" : keyframeExpression(cameraKeyframes, "cameraX", fallbackX);
     const cameraY = nativeLandscape ? "0.5" : keyframeExpression(cameraKeyframes, "cameraY", 0.5);
     // Keep scale fixed for the whole source shot. The crop itself is genuine
@@ -226,7 +425,9 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     const suppressPayoffAccent = usesSafeStaticPresentation(moment) && !nativeVerifiedAction;
     const verifiedPayoff = suppressPayoffAccent ? null : verifiedPayoffWindow(moment, trackedMoment, playbackRate, freeze);
     const sourcePayoff = suppressPayoffAccent ? null : (verifiedPayoffWindow(moment, trackedMoment) || nativePayoffWindow(moment, sourceLength));
-    const sourcePrefix = `[0:v]trim=start=${moment.startTime.toFixed(3)}:duration=${sourceLength.toFixed(3)},setpts=PTS-STARTPTS,${masking}`;
+    const sourcePrefix = segmentedSource
+      ? `[${sceneSourceInputs.get(index)}:v]trim=duration=${sourceLength.toFixed(3)},setpts=PTS-STARTPTS,${masking}`
+      : `[0:v]trim=start=${moment.startTime.toFixed(3)}:duration=${sourceLength.toFixed(3)},setpts=PTS-STARTPTS,${masking}`;
     const targetRatio = outputWidth / outputHeight;
     const crop = media.width / media.height >= targetRatio
       ? `crop=ih*${targetRatio.toFixed(8)}/${sceneZoom.toFixed(4)}:ih/${sceneZoom.toFixed(4)}:x='max(0,min(iw-ow,iw*(${cameraX})-ow/2))':y='max(0,min(ih-oh,ih*(${cameraY})-oh/2))'`
@@ -234,7 +435,7 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     const freezeFilter = freeze.duration > 0
       ? `,loop=loop=${freeze.frames}:size=1:start=${freeze.frame},setpts=N/(30*TB)`
       : "";
-    const entryTreatment = sceneEntryTransition(moment, index, outputLength);
+    const entryTreatment = sceneEntryTransition(moment, index, outputLength, settings);
     filters.push(`${sourcePrefix}${crop},scale=${outputWidth}:${outputHeight}:flags=lanczos,setsar=1${visualEffectFilter(moment, settings.intensity, Boolean(annotationInput), sourcePayoff)},setpts=PTS/${playbackRate.toFixed(5)},fps=30${freezeFilter},settb=AVTB${entryTreatment.filter},format=yuv420p[baseclip${index}]`);
     if (index === 0 && teaserEnabled) {
       filters[filters.length - 1] = filters[filters.length - 1].replace("[baseclip0]", "[hookSource]");
@@ -302,8 +503,16 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
 
     const extensionDuration = Math.max(0, outputLength - baseOutputLength);
     let captionLabel = `clip${index}`;
+    if (landscapeZoom.zoom > 1) {
+      const cropHeight = Math.floor(outputHeight / landscapeZoom.zoom / 2) * 2;
+      const cropWidth = Math.floor(outputWidth / landscapeZoom.zoom / 2) * 2;
+      const cropX = Math.round(outputWidth * landscapeZoom.centerX - cropWidth / 2);
+      const cropY = Math.round(outputHeight * landscapeZoom.centerY - cropHeight / 2);
+      filters.push(`[clip${index}]crop=${cropWidth}:${cropHeight}:${cropX}:${cropY},scale=${outputWidth}:${outputHeight}:flags=lanczos[framedClip${index}]`);
+      captionLabel = `framedClip${index}`;
+    }
     if (extensionDuration > 0.01) {
-      filters.push(`[clip${index}]tpad=stop_mode=clone:stop_duration=${extensionDuration.toFixed(3)},trim=duration=${outputLength.toFixed(3)}[timedclip${index}]`);
+      filters.push(`[${captionLabel}]tpad=stop_mode=clone:stop_duration=${extensionDuration.toFixed(3)},trim=duration=${outputLength.toFixed(3)}[timedclip${index}]`);
       captionLabel = `timedclip${index}`;
     }
     const cues = captionCues.get(moment.id) || [];
@@ -330,9 +539,9 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
       const calloutStart = eventCue.start.toFixed(3);
       const calloutEnd = eventCue.end.toFixed(3);
       const calloutProgress = `min(1,max(0,(t-${calloutStart})/0.14))`;
-      filters.push(`[${captionLabel}]drawtext=fontfile='${eventFont}':textfile='${escapeFilterPath(calloutPath)}':fontcolor=${color}:fontsize='68*(0.88+0.12*${calloutProgress})':borderw=5:bordercolor=black@0.92:shadowx=3:shadowy=4:shadowcolor=black@0.65:alpha='min(1,max(0,(t-${calloutStart})/0.12))*min(1,max(0,((${calloutEnd})-t)/0.12))':x=(w-text_w)/2:y='250+16*(1-${calloutProgress})':enable='between(t,${calloutStart},${calloutEnd})'[v${index}]`);
+      filters.push(`[${captionLabel}]drawtext=fontfile='${eventFont}':textfile='${escapeFilterPath(calloutPath)}':fontcolor=${color}:fontsize='68*(0.88+0.12*${calloutProgress})':borderw=5:bordercolor=black@0.92:shadowx=3:shadowy=4:shadowcolor=black@0.65:alpha='min(1,max(0,(t-${calloutStart})/0.12))*min(1,max(0,((${calloutEnd})-t)/0.12))':x=(w-text_w)/2:y='250+16*(1-${calloutProgress})':enable='between(t,${calloutStart},${calloutEnd})',setsar=1,trim=duration=${outputLength.toFixed(6)},setpts=N/(30*TB)[v${index}]`);
     } else {
-      filters.push(`[${captionLabel}]null[v${index}]`);
+      filters.push(`[${captionLabel}]setsar=1,trim=duration=${outputLength.toFixed(6)},setpts=N/(30*TB)[v${index}]`);
     }
     const speechIndex = ttsInputs.get(moment.id);
     if (speechIndex !== undefined) {
@@ -358,6 +567,8 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
       filters.push(`[abase${index}]anull[a${index}]`);
     }
   });
+
+  await writeFile(resolve(dirname(outputPath), "framing-report.json"), JSON.stringify(framingReport, null, 2));
 
   let timelineDuration = clipDurations[0] || 0;
   if (selected.length === 1) {
@@ -428,8 +639,25 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
   }
   const watermarkWidth = settings.aspectRatio === "16:9" ? 220 : 180;
   const watermarkMargin = settings.aspectRatio === "16:9" ? 32 : 28;
+  const headerTitlePath = resolve(dirname(outputPath), "match-result-header.txt");
+  const firstHeaderTeam = settings.headerFirstTeam || matchContext?.homeTeam;
+  const headerTitle = portraitMatchResultTitle(matchContext,firstHeaderTeam);
+  if (headerTitle) await writeFile(headerTitlePath, portraitMatchResultScore(matchContext,firstHeaderTeam), "utf8");
+  const headerEnabled=settings.__renderChunkPart !== true
+    && Boolean(portraitBroadcastHeaderFilters(settings,outputWidth,outputHeight,matchContext,headerTitlePath,firstHeaderTeam));
+  const headerBadgeInputs={};
+  if(headerEnabled && headerTitle){
+    const badges=await prepareMatchTeamBadges(matchContext,resolve(dirname(outputPath),'team-badges'));
+    for(const side of ['home','away'])if(badges[side]){
+      headerBadgeInputs[side]=inputCount(args);args.push('-loop','1','-framerate','30','-i',badges[side].path);
+    }
+  }
+  const headerPlan=portraitBroadcastHeaderPlan(settings,outputWidth,outputHeight,matchContext,headerTitlePath,
+    {firstTeam:firstHeaderTeam,badgeInputs:headerBadgeInputs});
+  const brandedVideoSource=headerPlan.length ? "headerCleanVideo" : "outv";
+  filters.push(...headerPlan);
   filters.push(`[${brandWatermarkInputIndex}:v]scale=${watermarkWidth}:-1:flags=lanczos,format=rgba,colorkey=0x25262A:0.08:0.035,colorchannelmixer=aa=0.86[goalVisionBrand]`);
-  filters.push(`[outv][goalVisionBrand]overlay=x=W-w-${watermarkMargin}:y=H-h-${watermarkMargin}:eval=init:eof_action=repeat:shortest=1[brandedv]`);
+  filters.push(`[${brandedVideoSource}][goalVisionBrand]overlay=x=W-w-${watermarkMargin}:y=H-h-${watermarkMargin}:eval=init:eof_action=repeat:shortest=1,setsar=1[brandedv]`);
   const synchronization = globalNarrationPath ? [{
     beatId: "__narration__",
     momentId: "__continuous_master__",
@@ -454,12 +682,13 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
   const filterScriptPath = resolve(dirname(outputPath), "filtergraph-v2.txt");
   await writeFile(filterScriptPath, filters.join(";\n"));
   const premixPath = resolve(dirname(outputPath), "premix.mp4");
+  const executable = resolveExecutable(process.env.FFMPEG_PATH || "ffmpeg");
   args.push(
-    "-/filter_complex", filterScriptPath, "-map", "[brandedv]", "-map", "[outa]",
-    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+    ...await filterGraphFileArgs(executable, filterScriptPath), "-map", "[brandedv]", "-map", "[outa]",
+    ...videoEncoderArgs(), "-pix_fmt", "yuv420p",
     "-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart", premixPath,
   );
-  await run(resolveExecutable(process.env.FFMPEG_PATH || "ffmpeg"), args);
+  await run(executable, args);
   const loudness = await normalizeFinishedAudio(premixPath, outputPath);
   return { timelineDuration, synchronization, teaserDuration, loudness };
 }
@@ -479,6 +708,8 @@ function delayValue(seconds) {
 }
 
 function fitSelectedMoments(moments, targetDuration, ttsFiles, tracking) {
+  const fixed=fixedRenderSceneQueue(moments);
+  if(fixed) return fixed;
   const ordered = moments
     .map(ensureMinimumSelectedDuration)
     .filter((item) => item.selectedForFinalVideo && sceneOutputDuration(item) >= minimumSceneSeconds(item))
@@ -505,6 +736,7 @@ function fitSelectedMoments(moments, targetDuration, ttsFiles, tracking) {
 }
 
 function ensureMinimumSelectedDuration(moment) {
+  if (moment.selectionLocked === true && moment.fixedSceneQueueVersion === 1) return moment;
   if (!moment.selectedForFinalVideo) return moment;
   const minimum = minimumSceneSeconds(moment);
   if (sceneOutputDuration(moment) >= minimum) return moment;
@@ -529,6 +761,7 @@ function playbackRateUpper(moment) {
   return moment?.completeActionCompressed ? COMPLETE_HIGHLIGHT_MAX_PLAYBACK_RATE : 1.18;
 }
 function playbackRateFor(moment) {
+  if (moment?.selectionLocked === true && moment?.fixedSceneQueueVersion === 1) return 1;
   return clamp(Number(moment?.playbackRate || 1), 0.72, playbackRateUpper(moment));
 }
 function freezePlan(moment, playbackRate, sourceLength) {
@@ -701,8 +934,11 @@ export function editorialGrade(moment) {
   return ["cool", "clean", "warm", "dramatic", "goal_gold", "replay_blue"].includes(requested) ? requested : "clean";
 }
 
-export function sceneEntryTransition(moment, index, outputLength) {
-  if (index === 0) return { kind: "cut", duration: 0, filter: "" };
+export function sceneEntryTransition(moment, index, outputLength, settings = {}) {
+  // A full-frame flash conceals the next action's opening touch and makes the
+  // recap appear overexposed. Complete football recaps use exact clean cuts;
+  // their scene-local grades, contact freezes and sound accents remain intact.
+  if (index === 0 || settings.editStyle === "complete_highlights") return { kind: "cut", duration: 0, filter: "" };
   const requested = clamp(Number(moment?.transitionDuration || 0.10), 0.06, 0.22);
   const duration = Math.min(requested, Math.max(0.06, Number(outputLength || 0) / 8));
   const replay = moment?.isReplay || moment?.storyPhase === "replay" || moment?.effect === "replay_treatment";
@@ -827,7 +1063,12 @@ async function makeCaptionCueFiles(moments, outputPath, tracking, outputWidth, o
       ? narrationSubtitleCues(moment, outputLength)
       : sparseCaptionCues(moment, outputLength, payoff);
     if (!cues.length) continue;
-    const y = moment.tacticalDrawing === "map" ? Math.round(outputHeight * 0.755) : safeCaptionY(trackingForMoment(tracking, moment)?.keyframes || [], outputHeight);
+    // Keep every spoken caption in one predictable lower band.  Moving it
+    // around the detected players made the landscape edit visually busy and
+    // sometimes covered the pass, shot, or goalkeeper.  The lower band is
+    // deliberately independent from tracking; tracking belongs to the camera
+    // and evidence overlays, not subtitle placement.
+    const y = safeCaptionY([], outputHeight);
     const assPath = resolve(captionDir, `${index}.ass`);
     await writeFile(assPath, captionAss(cues, y, outputWidth, outputHeight));
     files.set(moment.id, [{ assPath }]);
@@ -835,17 +1076,11 @@ async function makeCaptionCueFiles(moments, outputPath, tracking, outputWidth, o
   return files;
 }
 
-function safeCaptionY(keyframes, outputHeight = 1920) {
-  const subjectY = keyframes
-    .flatMap((frame) => [Number(frame.ballCenterY), Number(frame.playerCenterY)])
-    .filter((value) => Number.isFinite(value) && value >= 0 && value <= outputHeight);
-  if (!subjectY.length) return Math.round(outputHeight * 0.74);
-  const median = [...subjectY].sort((a, b) => a - b)[Math.floor(subjectY.length / 2)];
-  // Landscape callouts occupy the upper quarter around y=250. Keep a
-  // top-routed subtitle below that band; portrait has enough vertical room to
-  // retain the higher mobile-safe position.
-  const topSafeRatio = outputHeight <= 1200 ? 0.35 : 0.20;
-  return median > outputHeight * 0.58 ? Math.round(outputHeight * topSafeRatio) : Math.round(outputHeight * 0.74);
+function safeCaptionY(_keyframes, outputHeight = 1920) {
+  // One stable lower-third position prevents captions from jumping between
+  // the middle and top of the picture as the ball moves.  Leave a little
+  // room for the creator watermark and the subtitle outline.
+  return Math.round(outputHeight * (outputHeight <= 1200 ? 0.84 : 0.78));
 }
 
 async function makeCalloutFiles(moments, outputPath) {
@@ -878,9 +1113,14 @@ function eventCalloutLabel(value) {
 }
 
 
-export function effectiveOverlayMasks(masks) {
+export function effectiveOverlayMasks(masks, settings = {}) {
   const detected = Array.isArray(masks) ? masks.filter((mask) => mask && Number(mask.width) > 0 && Number(mask.height) > 0) : [];
-  if (detected.length) return detected;
+  const broadcastUi = settings.broadcastUiMasking === true ? [
+    { id: "broadcast-scorebug", kind: "scoreboard", x: 0.005, y: 0.006, width: 0.275, height: 0.085, confidence: 0.55, generated: true },
+    { id: "broadcast-header", kind: "broadcast_header", x: 0.345, y: 0.004, width: 0.31, height: 0.072, confidence: 0.55, generated: true },
+    { id: "broadcast-channel-bug", kind: "channel_bug", x: 0.775, y: 0.006, width: 0.22, height: 0.095, confidence: 0.55, generated: true },
+  ] : [];
+  if (detected.length || broadcastUi.length) return [...detected, ...broadcastUi];
   // Creator/channel marks are commonly anchored in this corner. This conservative
   // fallback keeps logo masking deterministic when the semantic pass misses one;
   // it is applied only when the user has enabled logoMasking.
@@ -966,16 +1206,26 @@ export async function normalizeFinishedAudio(premixPath, outputPath) {
   await run(executable, ["-hide_banner", "-y", "-i", premixPath, "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-af", filter, "-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart", outputPath]);
   result = await measure(outputPath);
   loudness = { normalized: true, targetLufs: -15, integratedLufs: Number(result.input_i), truePeakDb: Number(result.input_tp) };
-  // AAC can introduce a small inter-sample overshoot after loudnorm. Correct the
-  // encoded result by the measured amount instead of rejecting an otherwise good
-  // render or re-encoding its video stream.
-  if (loudness.truePeakDb > -1) {
-    const correctionDb = Math.max(0.25, loudness.truePeakDb + 1.25);
-    const correctedPath = `${outputPath}.peak-corrected.mp4`;
-    await run(executable, ["-hide_banner", "-y", "-i", outputPath, "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-af", `volume=-${correctionDb.toFixed(2)}dB`, "-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart", correctedPath]);
+  // AAC can introduce a small inter-sample overshoot, and short silent/sfx
+  // sections can leave the integrated level just outside the delivery band.
+  // Correct the encoded audio in-place (video is stream-copied) instead of
+  // rejecting an otherwise valid visual edit. Two bounded passes are enough
+  // to converge after AAC measurement without creating a retry loop.
+  let totalCorrectionDb = 0;
+  for (let pass = 0; pass < 2; pass += 1) {
+    const levelCorrection = Number.isFinite(loudness.integratedLufs)
+      && (loudness.integratedLufs < -17.2 || loudness.integratedLufs > -13.8)
+      ? Math.max(-6, Math.min(6, -15 - loudness.integratedLufs)) : 0;
+    const peakCorrection = Number.isFinite(loudness.truePeakDb) && loudness.truePeakDb > -1
+      ? -(loudness.truePeakDb + 1.25) : 0;
+    const correctionDb = levelCorrection + peakCorrection;
+    if (Math.abs(correctionDb) < 0.05) break;
+    const correctedPath = `${outputPath}.audio-corrected-${pass}.mp4`;
+    await run(executable, ["-hide_banner", "-y", "-i", outputPath, "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-af", `volume=${correctionDb.toFixed(2)}dB`, "-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart", correctedPath]);
     await rename(correctedPath, outputPath);
+    totalCorrectionDb += correctionDb;
     result = await measure(outputPath);
-    loudness = { normalized: true, targetLufs: -15, integratedLufs: Number(result.input_i), truePeakDb: Number(result.input_tp), peakCorrectionDb: correctionDb };
+    loudness = { normalized: true, targetLufs: -15, integratedLufs: Number(result.input_i), truePeakDb: Number(result.input_tp), audioCorrectionDb: +totalCorrectionDb.toFixed(2) };
   }
   await writeFile(resolve(dirname(outputPath), "loudness.json"), JSON.stringify(loudness, null, 2));
   if (loudness.integratedLufs < -17.2 || loudness.integratedLufs > -13.8 || loudness.truePeakDb > -1) throw new Error("The final audio mix failed its measured loudness/peak check.");
@@ -984,6 +1234,7 @@ export async function normalizeFinishedAudio(premixPath, outputPath) {
 }
 
 function run(command, args, captureDiagnostics = false) {
+  if (/^ffmpeg(?:\.exe)?$/i.test(basename(command))) args = boundedFfmpegArgs(args);
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, { cwd: projectRoot, windowsHide: true, shell: false });
     let stdout = "";
@@ -994,8 +1245,8 @@ function run(command, args, captureDiagnostics = false) {
       if (stderr.length > 12000) stderr = stderr.slice(-12000);
     });
     child.on("error", reject);
-    child.on("close", (code) => code === 0
+    child.on("close", (code, signal) => code === 0
       ? resolvePromise(captureDiagnostics ? stderr : stdout)
-      : reject(new Error(`${basename(command)} exited with code ${code}: ${stderr.slice(-2400)}`)));
+      : reject(new Error(`${basename(command)} exited with ${signal ? `signal ${signal}` : `code ${code}`}: ${stderr.slice(-2400)}`)));
   });
 }

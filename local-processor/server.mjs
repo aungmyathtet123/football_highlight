@@ -1,30 +1,80 @@
 import http from "node:http";
+import { localStudioOrigins, localStudioReturnOrigin } from './local-studio-origin.mjs';
 import { createWriteStream } from "node:fs";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { GoogleGenAI } from "@google/genai";
-import { createGeminiRequestGate, quotaRetryDelay, retryAfterMilliseconds } from "./gemini-request-scheduler.mjs";
+import { quotaRetryDelay, retryAfterMilliseconds, serviceRetryDelay, restoredGeminiRetryDelay, geminiServiceFailure, geminiRetryDeadline, geminiVideoDeadline, withGeminiDeadline } from "./gemini-request-scheduler.mjs";
+import {geminiLimitEvidence,geminiLimitMessage,geminiResourceExhausted} from './gemini-limit-evidence.mjs';
+import {createGeminiModelGate} from './gemini-model-gate.mjs';
+import {geminiFailoverModels,chooseGeminiFailoverModel,geminiFailoverCooldown,recordGeminiGeneration,geminiResponseProvenance,mergeGeminiModelCooldowns} from './gemini-model-failover.mjs';
+import {geminiGenerationConfig} from './gemini-generation-config.mjs';
+import { geminiTrafficPolicy, geminiTrafficResult } from "./gemini-traffic-policy.mjs";
+import { footballVideoPart, NARRATION_VIDEO_PROFILE } from "./gemini-media-policy.mjs";
+import { compactNarrationEvidence } from './narration-request-policy.mjs';
+import { renderedNarrationManifest, narrationSlotBudgets, recordTimedNarration, normalizeRecapResultEnding } from './completed-video-narration.mjs';
+import { captionAss, narrationSubtitleCues } from './short-form-policy.mjs';
+import { migrateRetiringGeminiModels } from './gemini-model-lifecycle.mjs';
+import { installGeminiTransport } from "./gemini-http-transport.mjs";
+import { GOAL_OUTCOME_VERSION, OUTCOME_OBSERVATION_PROMPT_VERSION, SOURCE_OUTCOME_OBSERVATION_VERSION, outcomeScoreConflict, outcomeEvidenceConflict, outcomeObservationSchema, reusableSourceOutcome, sameIncidentOutcomeWindows, outcomeConflictSampleTimes, singleActionObservationContract, reusableCompletedOutcome, reusableDenseGoalOutcome, sameIncidentDecisionWindows, goalOutcomeDetail, goalOutcomeDetailIndexes, invalidateOlderGoalOutcomes, needsGoalOutcomeObservation } from "./goal-outcome-detail.mjs";
+import {hasInitialSceneEvidence} from './scene-selection-evidence.mjs';
+import {INITIAL_SECTION_VERSION,INITIAL_SECTION_SCHEMA,initialObservationProblems,initialScoringObservations,initialScoringCoverage,observeInitialSections,selectInitialActionViews} from './initial-section-analysis.mjs';
+import {parseSourceShotCheckpoint,sourceShotCheckpointMatches} from './shot-checkpoint.mjs';
+import { geminiOutputTruncated, geminiJsonRetryConfig,geminiInvalidRequestDetails,parseGeminiJson } from "./gemini-json-policy.mjs";
 import { synthesizeGoogleCloudSpeech } from "./google-cloud-tts.mjs";
 import { normalizeFinishedAudio, outputDimensions, renderVideoV2 } from "./render-video-v2.mjs";
+import { filterGraphFileArgs } from "./ffmpeg-compat.mjs";
+import { boundedFfmpegArgs } from "./ffmpeg-thread-budget.mjs";
 import { createJobQueue } from "./job-queue.mjs";
+import {geminiWorkloadModel,initialDiscoveryFps,restoreInitialSectionResponse,needsBroadExtraDiscovery,unifiedDiscoverySummary,UNIFIED_DISCOVERY_VERSION} from './gemini-workload-policy.mjs';
+import { assertSourceDuration } from './source-duration-policy.mjs';
+import { processingInterruption, createRecoveryScheduler } from './processing-recovery.mjs';
 import { createSerializedJsonStore } from "./serialized-json-store.mjs";
 import { createYouTubePublisher } from "./youtube-publisher.mjs";
-import { mapWithConcurrency } from "./bounded-concurrency.mjs";
+import { mapWithConcurrency, createStreamingWorkQueue } from "./bounded-concurrency.mjs";
 import { downgradeToSafeStatic, recoverSafeStaticCandidates, safeStaticFallbackEligible, usesSafeStaticPresentation } from "./delivery-policy.mjs";
 import { restoreContentBeatOrder } from "./pipeline-state.mjs";
+import { downloadAuthorizedYouTubeSource, normalizeAuthorizedYouTubeUrl } from "./source-import.mjs";
 import { incidentCoverage, assertIncidentCoverage } from "./incident-coverage.mjs";
+import { isDecisionScene, normalizeDecisionOnlyScene, repairDecisionFraming } from "./decision-framing.mjs";
+import { trackSceneWithGemini, assessGeminiFraming, reviewedFramingEvent, reviewedFramingNarration, reviewedLeadInScene, FramingVerificationError } from "./gemini-framing.mjs";
+import { keyframeProvider, hybridDetectorScene, providerEvidenceMatches, HYBRID_TRACKING_VERSION } from "./hybrid-tracking-policy.mjs";
+import { reviewHybridCrop, reviewedHybridPhaseBrief, hybridEvidenceWindowMatches } from "./hybrid-framing.mjs";
+import { fastTrackingPolicy } from './fast-tracking-policy.mjs';
+import { createWorkflowPerformance } from './workflow-performance.mjs';
+import {ACTION_GUIDANCE_VERSION,actionGuidanceKey,matchingActionGuidance,actionGuidanceRequest,observeValidatedActionGuidance,applySavedActionGuidance,actionGuideObservationKey,matchingActionGuideObservation,sharedActionGuideObservation} from './action-guidance.mjs';
+import {sourceActionGuideWindow,selectGuidedSourceAction} from './source-action-selection.mjs';
+import {BLOCKED_SELECTION_VERSION,SOURCE_RESELECTION_FPS,blockedSelectionScenes,blockedSelectionWindow,blockedSelectionRequest,applyBlockedSelection,mergeBlockedSelections} from './blocked-source-selection.mjs';
+import {framingVideoClockFilter} from './gemini-video-framing.mjs';
+import {outcomeNarrationProblems} from './narration-outcome-policy.mjs';
+import { lockedNarrationContract, lockedNarrationResponseSchema, projectLockedNarration } from './locked-narration.mjs';
+import { fixedSceneQueue, assertFixedSceneQueue, LIVE_FIRST_SELECTION_POLICY } from './fixed-scene-queue.mjs';
+import {prepareSplitSceneAssets,splitSceneInput,sceneWithLocalClock,savePortraitSceneAsset} from './split-scene-assets.mjs';
+import {buildWorkflowProgress,workflowPhase} from './workflow-progress.mjs';
+import { splitNarrationForTts } from './tts-policy.mjs';
+import { sourceContentFingerprint } from "./source-content-fingerprint.mjs";
+import { observeSourceScore } from "./observe-source-score.mjs";
+import { scoreAnchorForScene, bindSourceScoreCandidates, contradictsStableLiveScore, stableLiveScoreContext, sourceScoreCoverage } from "./source-score-ledger.mjs";
+import { SCORE_ACTION_SCHEMA, validScoreActionDraft, scoreActionObservationProfile, scoreActionSearchWindows, hasCompleteLiveScoreCandidate } from "./score-action-schema.mjs";
+import { CLEAR_ANGLE_WORKFLOW_VERSION, selectClearIncidentAngles, trimCompleteCameraView, sourceScoreShotProposals } from "./clear-incident-angle.mjs";
+import { RECAP_ACTION_INVENTORY_VERSION, RECAP_EXTRA_SCHEMA, validRecapExtraDraft, normalizeRecapExtraDraft, recapExtraDraftProblems, recapExtraPrompt, selectRecapExtraActions } from "./recap-action-inventory.mjs";
+import {step1DiscoveryPlan,unobservedSourceShotWindows,selectSectionSceneIds,sectionSelectionSummary} from './step1-discovery-plan.mjs';
 import { alignActionToShot, linkImmediateGoalReplays, trimToVerifiedActionOrigin } from "./action-boundaries.mjs";
 import { SEMANTIC_VERIFICATION_VERSION, stableSignature, semanticSignature, needsSemanticReview, mergeSemanticReview, incidentManifest, evidenceReport, parseTrackingProgress, matchingTrackingEvidence, summarizeTracking } from "./pipeline-state.mjs";
+import { sourceCompletionDetailTimes, conflictingSourceActionWindowIds, applyReviewedSourceActionWindow, correctSemanticReelClock, invalidSemanticTimingIds, semanticReviewSchema, missingSemanticReviewIds, mergeMissingSemanticReview, semanticClipManifest, semanticReviewInputArgs, semanticReviewLabel, semanticReviewBatches, semanticReviewWindow, syntheticReactionMismatch, unsupportedNormalPlay, reconcileVerifiedGoalDecisions } from "./semantic-observation-policy.mjs";
 import { COMPLETE_RECAP_MINIMUM_SECONDS, COMPLETE_RECAP_MAXIMUM_SECONDS, completeRecapDurationBounds, automaticDurationSettings, naturalStoryCapacity, uniqueEvidenceCandidates } from "./automatic-duration.mjs";
 import { obviousIdentityProblems, shortReactionCandidates, unverifiedNamedEntities } from "./short-form-policy.mjs";
 import { buildViralReelPlan, isViralReel, viralReelDurationBounds } from "./viral-reel-policy.mjs";
 import { analysisProxyWindows, buildBroadcastShotInventory, inventoryForExcerpt, passageFitsShotSequence } from "./passage-inventory.mjs";
+import { durationOnlyRecovery, durationRecoveryWindowLimit, boundedRecoveryWindows, coverageCandidateState, coverageRecoveryWindows, isDurationRecoveryAction, scenesNeedingCoverageRecovery, goalRecoveryWindow, goalCountRecoveryWindows, GOAL_RECOVERY_LOOKBACK_SECONDS } from "./coverage-recovery.mjs";
+import { filterUnprovedRecoveryGoals, goalTotalFromFilename, liveGoalStoryCount, verifiedPrimaryReplayGoal, sourceGoalCountCoverage } from "./goal-count-evidence.mjs";
 import { normalizeEditorialScore } from "./score-normalization.mjs";
 import { holdAndPanCamera, isActionHandoffCut } from "./hold-pan-camera.mjs";
-import { assessNativeFrameAction, canRenderLockedNativeAction, recoverNativeFullFrameIncidents } from "./native-frame-action.mjs";
+import { buildVisualReviewManifest } from "./visual-review-manifest.mjs";
+import { assessNativeFrameAction, canRenderLockedNativeAction, canUseNativeSemanticFallback, recoverNativeFullFrameIncidents } from "./native-frame-action.mjs";
 import {
   MIN_SCENE_SECONDS,
   MAX_SCENE_SECONDS,
@@ -39,6 +89,8 @@ import {
   buildContinuousNarration,
   buildEvidenceAlignmentPrompt,
   contentPlanProblems,
+  narrationWordBudget,
+  recapTimelineProblems,
   contentEvidenceBindingProblems,
   editableEvidenceDuration,
   expandVerifiedTimeline,
@@ -85,6 +137,10 @@ import {
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 await loadDotEnv(join(projectRoot, ".env"));
+for (const change of migrateRetiringGeminiModels()) {
+  console.info(`Gemini lifecycle migration: ${change.key} ${change.before} -> ${change.after}`);
+}
+installGeminiTransport();
 
 const port = Number(process.env.LOCAL_PROCESSOR_PORT || 8787);
 const publicBaseUrl = String(process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${port}`).replace(/\/+$/, "");
@@ -105,8 +161,16 @@ const soccerNetScriptPath = resolveSetting(process.env.SOCCERNET_CALF_SCRIPT || 
 const soccerNetRepoPath = resolveSetting(process.env.SOCCERNET_CALF_REPO || "./tools/external/soccernet-sn-spotting");
 const soccerNetModelPath = join(soccerNetRepoPath, "Benchmarks", "CALF", "models", "CALF_benchmark", "model.pth.tar");
 const trackingScriptPath = resolveSetting(process.env.TRACKING_SCRIPT || "./local-processor/track-football-v2.py");
-const trackingModelPath = resolveSetting(process.env.TRACKING_MODEL || "./tools/tracking/yolo11n.pt");
-const trackingBallModelPath = resolveSetting(process.env.TRACKING_BALL_MODEL || "./tools/tracking/yolo-football-ball-detection.pt");
+// Preserve the deployed provider until the isolated hybrid regression passes.
+// Legacy hybrid shares role weights. Fast hybrid uses a dedicated ball model.
+const activeKeyframeProvider = keyframeProvider(process.env.KEYFRAME_PROVIDER || "gemini");
+const hybridKeyframing = activeKeyframeProvider === "hybrid";
+const fastTracking = fastTrackingPolicy();
+const hybridModelPath = resolveSetting(process.env.HYBRID_TRACKING_MODEL || "./tools/tracking/football-role-detector.pt");
+const trackingModelPath = hybridKeyframing ? hybridModelPath : resolveSetting(process.env.TRACKING_MODEL || "./tools/tracking/yolo11n.pt");
+const trackingBallModelPath = hybridKeyframing
+  ? (fastTracking.enabled ? resolveSetting(fastTracking.ballModel) : hybridModelPath)
+  : resolveSetting(process.env.TRACKING_BALL_MODEL || "./tools/tracking/yolo-football-ball-detection.pt");
 const trackingSampleFps = clamp(Number(process.env.TRACKING_SAMPLE_FPS || 10), 1, 15);
 const trackingCoarseSampleFps = clamp(Number(process.env.TRACKING_COARSE_SAMPLE_FPS || 5), 1, trackingSampleFps);
 const trackingDevice = String(process.env.TRACKING_DEVICE || "auto").trim() || "auto";
@@ -131,12 +195,30 @@ const analysisFps = clamp(Number(process.env.ANALYSIS_FPS || 3), 1, 8);
 const analysisHeight = Math.round(clamp(Number(process.env.ANALYSIS_HEIGHT || 480), 360, 720));
 const analysisProxyConcurrency = Math.round(clamp(Number(process.env.ANALYSIS_PROXY_CONCURRENCY || 3), 1, 4));
 const geminiRequestTimeoutMs = Math.round(clamp(Number(process.env.GEMINI_REQUEST_TIMEOUT_MS || 180000), 30000, 600000));
-const geminiMinimumIntervalMs = Math.round(clamp(Number(process.env.GEMINI_MINIMUM_INTERVAL_MS || 12000), 0, 120000));
-const geminiQuotaBaseDelayMs = Math.round(clamp(Number(process.env.GEMINI_QUOTA_BASE_DELAY_MS || 60000), 1000, 600000));
-const geminiQuotaMaximumDelayMs = Math.round(clamp(Number(process.env.GEMINI_QUOTA_MAXIMUM_DELAY_MS || 300000), geminiQuotaBaseDelayMs, 1800000));
-const passageInventoryVersion = 2;
-const passageInventoryExcerptVersion = 1;
+// Retained in health responses for compatibility; old environment pacing
+// settings can no longer delay successful requests.
+const geminiMinimumIntervalMs = 0;
+const geminiKeyframing = activeKeyframeProvider === "gemini";
+const geminiQuotaBaseDelayMs = Math.round(clamp(Number(process.env.GEMINI_QUOTA_BASE_DELAY_MS || 15000), 1000, 600000));
+const geminiQuotaMaximumDelayMs = Math.round(clamp(Number(process.env.GEMINI_QUOTA_MAXIMUM_DELAY_MS || 60000), geminiQuotaBaseDelayMs, 1800000));
+const passageInventoryVersion = 4;
+const passageInventoryExcerptVersion = 3;
+class Step1CoverageError extends Error {
+  constructor(selectedSeconds, minimum) {
+    super(`Step 1 selected only ${selectedSeconds.toFixed(1)} naturally paced seconds; it must discover and validate at least ${minimum} seconds of complete actions before keyframe tracking begins.`);
+    this.selectedSeconds = selectedSeconds;
+    this.minimum = minimum;
+  }
+}
 const blockingAiQualityReview = /^(1|true|yes)$/i.test(String(process.env.BLOCKING_AI_QUALITY_REVIEW || ""));
+// Cloud Run uses Application Default Credentials with Vertex AI, while local
+// development may continue to use an explicit API key. Keep the pipeline gate
+// independent from the credential transport so no long-lived key is required
+// in the worker container.
+const geminiEnabled = Boolean(
+  String(process.env.GEMINI_API_KEY || "").trim()
+  || (String(process.env.GOOGLE_CLOUD_PROJECT || "").trim() && String(process.env.GOOGLE_CLOUD_LOCATION || "").trim()),
+);
 const outputWidth = 1080;
 const outputHeight = 1920;
 const maxUploadBytes = 2 * 1024 * 1024 * 1024;
@@ -146,14 +228,56 @@ const allowedOrigins = new Set(
     "http://127.0.0.1:3000",
     "http://localhost:3001",
     "http://127.0.0.1:3001",
+    ...localStudioOrigins(),
     process.env.SITE_URL,
   ].filter(Boolean),
 );
 const youtubeCredentialFile = process.env.YOUTUBE_OAUTH_CLIENT_FILE ? resolveSetting(process.env.YOUTUBE_OAUTH_CLIENT_FILE) : "";
 const youtubeRedirectUri = String(process.env.YOUTUBE_OAUTH_REDIRECT_URI || `http://127.0.0.1:${port}/youtube/oauth/callback`);
 const jobQueue = createJobQueue(error => console.error("Job queue error", error));
-const geminiRequestGate = createGeminiRequestGate({ minimumIntervalMs: geminiMinimumIntervalMs });
+const recoveryScheduler = createRecoveryScheduler({readJob,isQueued:id=>jobQueue.has(id),
+  retry:job=>job.processingRecovery.action==='render'?retryRenderJob(null,job.id,true):retryAnalysisJob(null,job.id,true),
+  onError:async(error,id)=>{console.error('Automatic retry could not start',id,error);
+    await handleProcessingInterruption(id,error);}});
+
+async function handleProcessingInterruption(id,error) {
+  const job=await readJob(id);
+  const next=processingInterruption(job,error);
+  // The completed-video narration workflow must resume its own checkpoints,
+  // not the legacy render repair path that rewrites copy from source notes.
+  if(job.narrationProductionVersion===1 && next.processingRecovery)
+    next.processingRecovery.action='analysis';
+  await updateJob(job,next.stage,job.progress||0,next);
+  if(next.stage==='waiting_retry') recoveryScheduler.schedule(id,Date.parse(next.processingRecovery.retryAt));
+}
+
+async function restoreProcessingRetries() {
+  const interruptedStages=new Set(['queued','detecting_moments','tracking','writing_content',
+    'aligning','aligning_content','generating_commentary','editing','rendering','validating']);
+  for(const name of await readdir(jobRoot)) {
+    if(!name.endsWith('.json'))continue;
+    try {const job=await readJob(name.slice(0,-5));
+      if(job.stage==='waiting_retry')recoveryScheduler.schedule(job.id,Date.parse(job.processingRecovery?.retryAt)||Date.now());
+      else if(interruptedStages.has(job.stage)&&!jobQueue.has(job.id)&&job.presentationOnly!==true) {
+        // The in-memory execution disappeared with this processor. Leaving
+        // its saved stage as "tracking" makes Reconnect poll forever without
+        // any worker. Resume real checkpoints, not upload or completed jobs.
+        await handleProcessingInterruption(job.id,Object.assign(
+          new Error('The processor restarted; continuing from saved scenes and completed work.'),
+          {code:'PROCESSOR_RESTART'}));
+      }
+    }catch(error){console.error('Could not restore saved retry',name,error);}
+  }
+}
+const geminiRequestGate = createGeminiModelGate({
+  maxConcurrent: Number(process.env.GEMINI_REQUEST_CONCURRENCY || 2), overloadDelayMs:geminiQuotaBaseDelayMs });
 let activeGeminiJobId = null;
+const geminiCapacityStates = new Map();
+const geminiModelCooldownStates = new Map();
+const workflowPerformance = createWorkflowPerformance();
+const pendingActionGuideObservations = new Map();
+const restoredCapacityCooldownJobs = new Set();
+const unavailableGeminiFailoverModels = new Set();
 
 await Promise.all([mkdir(uploadRoot, { recursive: true }), mkdir(outputRoot, { recursive: true }), mkdir(jobRoot, { recursive: true })]);
 const saveJobJson = createSerializedJsonStore(jobRoot);
@@ -174,18 +298,24 @@ const server = http.createServer(async (request, response) => {
       return json(response, 200, {
         ok: tools.ffmpeg && tools.ffprobe && tools.trackingPython && tools.trackingModel && tools.trackingBallModel && (!soccerNetEnabled || (tools.soccerNetPython && tools.soccerNetModel)),
         storage: dataRoot,
-        analysisProvider: process.env.GEMINI_API_KEY ? (videoIntelligenceEnabled() ? "gemini+video_intelligence" : "gemini") : "local_fallback",
+        analysisProvider: geminiEnabled ? (videoIntelligenceEnabled() ? "gemini+video_intelligence" : "gemini") : "local_fallback",
         videoIntelligence: videoIntelligenceEnabled(),
         ttsProvider: process.env.TTS_PROVIDER || "gemini",
         footballEditorSkillVersion: FOOTBALL_EDITOR_SKILL_VERSION,
-        geminiRequests: { minimumIntervalMs: geminiMinimumIntervalMs, quotaRetry: "persistent", ...geminiRequestGate.status() },
+        geminiRequests: { minimumIntervalMs: geminiMinimumIntervalMs, quotaRetry: "persistent",
+          quotaBaseDelayMs: geminiQuotaBaseDelayMs, quotaMaximumDelayMs: geminiQuotaMaximumDelayMs,
+          ...geminiRequestGate.status() },
+        geminiModels:{discovery:geminiWorkloadModel('discovery'),script:geminiWorkloadModel('script'),framing:geminiWorkloadModel('framing')},
+        geminiFailover:{discovery:geminiFailoverModels(geminiWorkloadModel('discovery')),
+          script:geminiFailoverModels(geminiWorkloadModel('script')),
+          framing:geminiFailoverModels(geminiWorkloadModel('framing'))},
         workers: { analysisProxyConcurrency, trackingSceneConcurrency, nativeTrackingSampleFps },
         tools,
       });
     }
     if (request.method === "GET" && url.pathname === "/youtube/channels") return json(response, 200, await youtubePublisher.status());
     if (request.method === "GET" && url.pathname === "/youtube/oauth/start") {
-      const location = await youtubePublisher.authorizationUrl(url.searchParams.get("returnTo") || process.env.SITE_URL || "http://localhost:3001");
+      const location = await youtubePublisher.authorizationUrl(url.searchParams.get("returnTo") || localStudioReturnOrigin());
       response.writeHead(302, { Location: location, "Cache-Control": "no-store" }); return response.end();
     }
     if (request.method === "GET" && url.pathname === "/youtube/oauth/callback") {
@@ -213,14 +343,29 @@ const server = http.createServer(async (request, response) => {
       return json(response, 200, upload);
     }
     if (request.method === "POST" && url.pathname === "/jobs") return await createJob(request, response);
+    if (request.method === "GET" && url.pathname === "/jobs") return await listLocalJobs(response);
+    if (request.method === "POST" && url.pathname === "/imports/youtube") return await createLocalYouTubeImport(request, response);
+    const retryImportMatch = url.pathname.match(/^\/jobs\/([a-f0-9-]+)\/retry-import$/i);
+    if (request.method === "POST" && retryImportMatch) return await retryLocalYouTubeImport(response, retryImportMatch[1]);
+    const startMatch = url.pathname.match(/^\/jobs\/([a-f0-9-]+)\/start$/i);
+    if (request.method === "POST" && startMatch) return await startLocalImportedJob(request, response, startMatch[1]);
     const retryAnalysisMatch = url.pathname.match(/^\/jobs\/([a-f0-9-]+)\/retry-analysis$/i);
     if (request.method === "POST" && retryAnalysisMatch) return await retryAnalysisJob(response, retryAnalysisMatch[1]);
+    const reselectBlockedMatch = url.pathname.match(/^\/jobs\/([a-f0-9-]+)\/reselect-blocked$/i);
+    if (request.method === "POST" && reselectBlockedMatch) return await retryAnalysisJob(response,reselectBlockedMatch[1],false,true);
     const retryRenderMatch = url.pathname.match(/^\/jobs\/([a-f0-9-]+)\/retry-render$/i);
-    if (request.method === "POST" && retryRenderMatch) return await retryRenderJob(response, retryRenderMatch[1]);
+    if (request.method === "POST" && retryRenderMatch) {
+      // Presentation-only retries reuse the locked scenes, tracking and
+      // narration. This is used when a render-layer overlay changes and must
+      // never reopen discovery or semantic analysis.
+      return await retryRenderJob(response, retryRenderMatch[1], false, url.searchParams.get("presentationOnly") === "1");
+    }
     const jobMatch = url.pathname.match(/^\/jobs\/([a-f0-9-]+)$/i);
     if (request.method === "GET" && jobMatch) return await getJob(response, jobMatch[1]);
     const outputMatch = url.pathname.match(/^\/outputs\/([a-f0-9-]+)\/final\.mp4$/i);
     if (request.method === "GET" && outputMatch) return await streamOutput(request, response, outputMatch[1]);
+    const sourceMatch = url.pathname.match(/^\/sources\/([a-f0-9-]+)$/i);
+    if (request.method === "GET" && sourceMatch) return await streamLocalSource(request, response, sourceMatch[1]);
     return json(response, 404, { error: "Not found" });
   } catch (error) {
     console.error(error);
@@ -231,6 +376,7 @@ const server = http.createServer(async (request, response) => {
 server.listen(port, "127.0.0.1", () => {
   console.log(`Touchline local processor: http://127.0.0.1:${port}`);
   console.log(`Private storage: ${dataRoot}`);
+  void restoreProcessingRetries().catch(console.error);
 });
 
 async function createJob(request, response) {
@@ -240,7 +386,20 @@ async function createJob(request, response) {
   const contentType = String(request.headers["content-type"] || "application/octet-stream");
   if (!contentType.startsWith("video/")) return json(response, 415, { error: "Upload must be a video file." });
   const settings = parseSettings(String(request.headers["x-edit-settings"] || ""));
-  const id = randomUUID();
+  const requestedId = String(request.headers["x-job-id"] || "").trim();
+  const allowExternalJobId = /^(1|true|yes)$/i.test(String(process.env.ALLOW_EXTERNAL_JOB_ID || ""));
+  if (requestedId && (!allowExternalJobId || !/^[a-f0-9-]{36}$/i.test(requestedId))) {
+    return json(response, 400, { error: "The requested job ID is not allowed." });
+  }
+  const id = requestedId || randomUUID();
+  if (requestedId) {
+    try {
+      await stat(join(jobRoot, `${id}.json`));
+      return json(response, 409, { error: "This job ID already exists." });
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
   const uploadDir = join(uploadRoot, id);
   await mkdir(uploadDir, { recursive: true });
   const extension = [".mp4", ".mov", ".webm", ".mkv"].includes(extname(originalName).toLowerCase()) ? extname(originalName).toLowerCase() : ".mp4";
@@ -252,30 +411,46 @@ async function createJob(request, response) {
     throw error;
   }
   const now = new Date().toISOString();
+  let media;
+  try {media=await probe(sourcePath);assertSourceDuration(media.duration);}
+  catch(error){await rm(sourcePath,{force:true});return json(response,422,{error:error.message,code:'SOURCE_VALIDATION'});}
   const job = {
     id, stage: "uploaded", progress: 5, sourceKey: sourcePath, sourceName: originalName,
-    settings, moments: [], warnings: [], createdAt: now, updatedAt: now,
+    settings, media, moments: [], warnings: [], createdAt: now, updatedAt: now,
   };
   await saveJob(job);
   await jobQueue.submit(id, () => true, () => processJob(id));
   return json(response, 202, publicJob(job));
 }
 
-async function retryAnalysisJob(response, id) {
+async function retryAnalysisJob(response, id, automatic=false, reselectBlocked=false) {
   if (jobQueue.has(id)) return json(response, 409, { error: "This video is already queued or processing. Wait for its current run to finish." });
+  recoveryScheduler.cancel(id);
   await jobQueue.submit(id, async () => {
   let job;
   try { job = await readJob(id); }
   catch { json(response, 404, { error: "Job not found" }); return false; }
   try { await stat(job.sourceKey); }
-  catch { json(response, 409, { error: "The saved source video is missing; upload it again." }); return false; }
+  catch { if(automatic){const error=new Error('The saved source video is missing; upload it again.');error.code='SOURCE_VALIDATION';throw error;}
+    json(response, 409, { error: "The saved source video is missing; upload it again." }); return false; }
+  const sourceSelectionUpgrade = Number(job.clearAngleWorkflowVersion || 0)>0
+    && Number(job.clearAngleWorkflowVersion)<CLEAR_ANGLE_WORKFLOW_VERSION
+    && (Number(job.progress || 0)>=30 || job.resumeTrackingOnly===true);
+  const savedLockedScenes = sourceSelectionUpgrade || (job.clearAngleWorkflowVersion === CLEAR_ANGLE_WORKFLOW_VERSION
+    && (Number(job.progress || 0) >= 34 || job.resumeTrackingOnly === true))
+    ? await loadStep1SceneManifest(id, job.settings, {sourceOnly:sourceSelectionUpgrade}) : [];
+  const hasSavedSceneLock = savedLockedScenes.some(moment => moment.selectionLocked === true);
+  if(reselectBlocked && (!geminiEnabled||!hasSavedSceneLock||job.stage!=='attention_required')) {
+    json(response,409,{error:'Blocked source reselection requires a saved scene lock that needs attention.'});
+    return false;
+  }
   const reusableCandidates = Number(job.progress || 0) >= 30
     && job.media
-    && Array.isArray(job.moments)
-    && job.moments.length > 0
+    && (hasSavedSceneLock || (Array.isArray(job.moments) && job.moments.length > 0))
     && !/Gemini video analysis failed|could not return numeric football scenes/i.test(String(job.error?.message || ""));
   const trackingOnlyRetry = reusableCandidates
-    && job.moments.some(moment => moment.selectionLocked === true)
+    && job.clearAngleWorkflowVersion === CLEAR_ANGLE_WORKFLOW_VERSION
+    && (hasSavedSceneLock || job.moments.some(moment => moment.selectionLocked === true))
     && (Number(job.progress || 0) >= 34
       || ["tracking", "writing_content", "aligning", "aligning_content", "generating_commentary", "editing", "rendering", "validating", "completed"].includes(job.stage)
       || /Locked scene|keyframe|tracking or framing repair|incident\(s\).*tracking has not passed|Complete-match coverage is missing/i.test(String(job.error?.message || "")));
@@ -283,26 +458,36 @@ async function retryAnalysisJob(response, id) {
   // manifest. A pre-lock semantic failure must resume from its saved inventory
   // so the newer verifier can re-review it; attempting to synthesize a locked
   // manifest here repeats the old duration failure inside the HTTP request.
-  const savedStep1Scenes = trackingOnlyRetry ? await loadStep1SceneManifest(id, job.settings) : [];
+  const savedStep1Scenes = trackingOnlyRetry || sourceSelectionUpgrade ? savedLockedScenes : [];
   const restarted = reusableCandidates
     ? { ...job, moments: savedStep1Scenes.length ? savedStep1Scenes : (job.observedMoments?.length ? job.observedMoments : job.moments), resumeFromCandidates: true }
     : { ...job, moments: [], warnings: [], overlayMasks: [], discoveryPassesCompleted: 0 };
-  if (trackingOnlyRetry) restarted.resumeTrackingOnly = true;
+  restarted.resumeTrackingOnly = trackingOnlyRetry;
+  if(reselectBlocked) restarted.resumeBlockedSelection=true;
+  restarted.processingRecovery=automatic?{...job.processingRecovery,status:'retrying'}:undefined;
   for (const key of ["error", "outputKey", "outputUrl", "completedAt", "qualityReview", "renderValidation", "editPlan", "trackingSummary", "evidenceReport"]) delete restarted[key];
   restarted.progress = trackingOnlyRetry ? 34 : reusableCandidates ? 30 : 5;
+  restarted.progressDetail = trackingOnlyRetry
+    ? "Resuming player-and-ball framing from the saved scene lock; discovery is not restarting."
+    : reusableCandidates ? "Resuming source selection from saved observations." : "Starting source analysis.";
   job = await updateJob(restarted, trackingOnlyRetry ? "tracking" : reusableCandidates ? "detecting_moments" : "uploaded", restarted.progress);
   json(response, 202, publicJob(job));
   return true;
   }, () => processJob(id));
 }
-async function retryRenderJob(response, id) {
+async function retryRenderJob(response, id, automatic=false, presentationOnly=false) {
   if (jobQueue.has(id)) return json(response, 409, { error: "This video is already queued or processing. Wait for its current run to finish." });
+  const saved = await readJob(id).catch(()=>null);
+  if(saved?.narrationProductionVersion===1 && !presentationOnly) return retryAnalysisJob(response,id,automatic);
+  recoveryScheduler.cancel(id);
   await jobQueue.submit(id, async () => {
   let job;
   try { job = await readJob(id); }
   catch { json(response, 404, { error: "Job not found" }); return false; }
-  if (!job.sourceKey || !job.media || !Array.isArray(job.moments)) { json(response, 409, { error: "This job does not have enough saved data to retry rendering." }); return false; }
-  const cleanJob = { ...job, retryRenderReason: String(job.error?.message || "") };
+  if (!job.sourceKey || !job.media || !Array.isArray(job.moments)) {
+    if(automatic)throw new Error('Saved render scene data needs repair before rendering can retry.');
+    json(response, 409, { error: "This job does not have enough saved data to retry rendering." }); return false; }
+  const cleanJob = { ...job, progress:84, presentationOnly, processingRecovery:automatic?{...job.processingRecovery,status:'retrying'}:undefined, progressDetail:"Re-rendering the saved visual edit; approved tracking and narration will be reused.", retryRenderReason: String(job.error?.message || job.processingRecovery?.lastError || "") };
   delete cleanJob.error;
   job = await updateJob(cleanJob, "queued", 84);
   json(response, 202, publicJob(job));
@@ -315,6 +500,15 @@ async function resumeRender(id) {
   const destination = join(outputRoot, id);
   const premixPath = join(destination, "premix.mp4");
   const outputPath = join(destination, "final.mp4");
+  if (job.presentationOnly === true && isCompleteHighlights(job.settings) && job.settings.commentary) {
+    try {
+      await resumePresentationOnlyRender(job, destination, outputPath);
+    } catch (error) {
+      console.error(`Job ${id} presentation-only render failed`, error);
+      await handleProcessingInterruption(id, error);
+    }
+    return;
+  }
   if (/final audio mix failed/i.test(String(job.retryRenderReason || ""))) {
     try {
       await stat(premixPath);
@@ -354,7 +548,10 @@ async function resumeRender(id) {
   // because its start was extended to include the passer/carrier.
   job.moments = restorePossessionChainStarts(job.moments);
   try {
-    const staleSemanticIds = job.moments.filter(needsSemanticReview).map((moment) => moment.id);
+    // A presentation-only retry is intentionally render-only. The scene
+    // boundaries, tracking evidence, and narration are already locked; do not
+    // spend new provider requests rechecking semantic source observations.
+    const staleSemanticIds = job.presentationOnly ? [] : job.moments.filter(needsSemanticReview).map((moment) => moment.id);
     if (staleSemanticIds.length) {
       job = await updateJob(job, "verifying_scenes", 42, {
         progressDetail: `Rechecking ${staleSemanticIds.length} saved scene(s) for complete contact, ball flight and payoff boundaries.`,
@@ -369,13 +566,17 @@ async function resumeRender(id) {
     const pacedPreview = applyCompleteHighlightTreatment(job.moments, job.settings);
     const naturallyPacedDuration = selectedTimelineDuration(pacedPreview);
     const previousTargetDuration = Number(job.settings.targetDuration || 0);
+    const savedLockedDuration=Number(job.editPlan?.plannedDuration || 0);
+    const timingReferenceDuration=savedLockedDuration>0
+      && job.moments.filter(moment=>moment.selectedForFinalVideo).every(moment=>moment.selectionLocked===true)
+      ? savedLockedDuration : previousTargetDuration;
     const pacingDurationExpanded = isCompleteHighlights(job.settings)
-      && naturallyPacedDuration > previousTargetDuration + 3;
+      && naturallyPacedDuration > timingReferenceDuration + 3;
     if (pacingDurationExpanded) {
       const adjustedTarget = clamp(
         Math.ceil(naturallyPacedDuration),
-        Number(job.settings.durationMin || 60),
-        Number(job.settings.durationMax || 240),
+        Number(job.settings.durationMin ?? COMPLETE_RECAP_MINIMUM_SECONDS),
+        Number.isFinite(Number(job.settings.durationMax)) ? Number(job.settings.durationMax) : Infinity,
       );
       job.settings = { ...job.settings, durationMode: "paced_complete_actions", targetDuration: adjustedTarget };
       const warning = `Expanded the edit from the ${previousTargetDuration.toFixed(0)}-second guide to ${adjustedTarget} seconds so every complete action stays at or below ${COMPLETE_HIGHLIGHT_MAX_PLAYBACK_RATE.toFixed(1)}x.`;
@@ -390,11 +591,15 @@ async function resumeRender(id) {
     const matchContextInvalidated = savedMatchContext?.status === "verified" && safeMatchContext.status !== "verified";
     const savedScript = String(job.editPlan?.contentScript || job.editPlan?.narrationScript || "");
     const savedWordCount = savedScript.trim().split(/\s+/).filter(Boolean).length;
+    const measuredSavedVoice=Number(job.editPlan?.narrationDuration || 0);
+    const measuredSavedVoiceRatio=measuredSavedVoice/Math.max(1,naturallyPacedDuration);
     const narrationPacingMismatch = isCompleteHighlights(job.settings)
-      && savedWordCount < Math.round(Number(job.settings.targetDuration || 0) * 3.0);
+      && (measuredSavedVoice>0
+        ? measuredSavedVoiceRatio<.94 || measuredSavedVoiceRatio>1.10
+        : savedWordCount < Math.round(Number(job.settings.targetDuration || 0) * 3.0));
     const unsafeUnverifiedNarration = safeMatchContext.status !== "verified"
       && (unverifiedNamedEntities([savedScript], []).length > 0 || /\b\d{1,2}\s*[-:–—]\s*\d{1,2}\b/.test(savedScript));
-    if (matchContextInvalidated || unsafeUnverifiedNarration || pacingDurationExpanded || narrationPacingMismatch) {
+    if (!job.presentationOnly && (matchContextInvalidated || unsafeUnverifiedNarration || pacingDurationExpanded || narrationPacingMismatch)) {
       const scriptCandidates = selectDirectorCandidates(job.moments).filter(narratableEvidence);
       const verifiedEvidenceDuration = availableVerifiedEvidenceDuration(scriptCandidates);
       const editableDuration = planningEvidenceCapacity(scriptCandidates, job.settings);
@@ -454,7 +659,7 @@ async function resumeRender(id) {
       || savedDuration < minimumPlannedDuration(job.settings)
       || savedDuration > planningCeiling(job.settings) + 3
       || (savedSequenceProblems.length && !isCompleteHighlights(job.settings));
-    if (needsAlignmentRepair && savedBeatCount) {
+    if (!job.presentationOnly && needsAlignmentRepair && savedBeatCount) {
       const verifiedEvidenceDuration = Number(job.editPlan.verifiedEvidenceDuration)
         || availableVerifiedEvidenceDuration(job.moments);
       const editableDuration = Number(job.editPlan.editableEvidenceDuration)
@@ -536,7 +741,7 @@ async function resumeRender(id) {
       if (!job.warnings.includes(warning)) job.warnings.push(warning);
     }
     const deliveryFailures = [];
-    if (plannedFrameable.length < 2) deliveryFailures.push(`only_${plannedFrameable.length}_selected_scenes`);
+    if (plannedFrameable.length < 1) deliveryFailures.push("no_selected_action_scenes");
     if (uniqueEvidenceCandidates(plannedFrameable).length !== plannedFrameable.length) deliveryFailures.push("duplicate_source_intervals");
     if (plannedDuration < minimumPlannedDuration(job.settings)) deliveryFailures.push(`duration_short_${plannedDuration.toFixed(1)}s`);
     if (plannedDuration > planningCeiling(job.settings) + 3) deliveryFailures.push(`duration_long_${plannedDuration.toFixed(1)}s`);
@@ -560,14 +765,14 @@ async function resumeRender(id) {
       ? await makeStadiumAudio(job.sourceKey, plannedFrameable, id)
       : null;
     job = await updateJob(job, "rendering", 84);
-    const renderResult = await renderVideoV2(job.sourceKey, outputPath, plannedMoments, job.settings, job.media, ttsFiles, job.overlayMasks || [], tracking, stadiumAudioPath);
+    const renderResult = await renderVideoV2(job.sourceKey, outputPath, plannedMoments, job.settings, job.media, ttsFiles, job.overlayMasks || [], tracking, stadiumAudioPath, job.matchContext || job.editPlan?.matchContext);
     job = await updateJob(job, "validating", 96, {
       editPlan: { ...job.editPlan, synchronization: renderResult.synchronization },
     });
     const renderValidation = await validateRenderedVideo(outputPath, job.settings);
     await writeTransformationAudit(destination, job, job.media, plannedFrameable, job.editPlan?.contentScript);
     let qualityReview;
-    if (process.env.GEMINI_API_KEY && blockingAiQualityReview) {
+    if (geminiEnabled && blockingAiQualityReview && !job.presentationOnly) {
       try {
         qualityReview = await reviewRenderedVideoWithGemini(outputPath, renderValidation.media, id, job.settings, plannedMoments, job.matchContext);
         if (!qualityReview.approved) {
@@ -593,9 +798,50 @@ async function resumeRender(id) {
     console.error(`Job ${id} render retry failed`, error);
     const saved = await readJob(id);
     job = { ...job, ...saved, warnings: [...new Set([...(saved.warnings || []), ...(job.warnings || [])])] };
-    job.error = { code: "PROCESSING_FAILED", message: error instanceof Error ? error.message : "Processing failed", retryable: true };
-    await updateJob(job, "failed", job.progress || 0);
+    await handleProcessingInterruption(id,error);
   }
+}
+
+// Rebuild only the visual master and final narration mix after a presentation
+// change (for example removing a static corner label). All scene boundaries,
+// tracking evidence, and timed narration are already saved, so this path must
+// not call Gemini, rediscover scenes, or rewrite the script.
+async function resumePresentationOnlyRender(job, destination, outputPath) {
+  const locked = JSON.parse(await readFile(join(destination, "locked-visual-timeline.json"), "utf8"));
+  const tracking = JSON.parse(await readFile(join(destination, "tracking", "tracking.json"), "utf8"));
+  const timedManifest = JSON.parse(await readFile(join(destination, "speech", "timed", "master-manifest.json"), "utf8"));
+  const savedMoments = Array.isArray(job.moments) && job.moments.some((moment) => moment?.selectedForFinalVideo === true)
+    ? job.moments : locked.moments;
+  const selected = (Array.isArray(savedMoments) ? savedMoments : [])
+    .filter((moment) => moment?.selectedForFinalVideo !== false);
+  const matchContext = job.matchContext || job.editPlan?.matchContext || locked.matchContext || null;
+  const media = job.media || await probe(job.sourceKey);
+  const visual = await prepareCompletedVisualNarration(
+    job,
+    selected,
+    media,
+    job.overlayMasks || [],
+    tracking,
+    matchContext,
+    locked.visualReviewManifest,
+  );
+  const narrationPath = join(destination, "speech", "timed", String(timedManifest.filename || "narration-master.wav"));
+  const files = new Map([["__narration__", narrationPath]]);
+  files.timedSections = Array.isArray(timedManifest.takes) ? timedManifest.takes : [];
+  files.narrationDuration = Number(timedManifest.duration || 0);
+  files.narrationScript = String(timedManifest.narration || "");
+  const renderResult = await finishCompletedVisualNarration(visual, outputPath, selected, job.settings, files);
+  const renderValidation = await validateRenderedVideo(outputPath, job.settings);
+  await updateJob(job, "completed", 100, {
+    presentationOnly: false,
+    outputKey: outputPath,
+    outputUrl: publicOutputUrl(job.id),
+    renderValidation,
+    qualityReview: job.qualityReview,
+    loudness: renderResult.loudness,
+    completedAt: new Date().toISOString(),
+    progressDetail: "Presentation updated and final video validated without re-running analysis.",
+  });
 }
 async function loadSavedSpeech(moments, id, savedMasterNarration = "") {
   return makeContinuousSpeech(String(savedMasterNarration || "").trim() || buildContinuousNarration(moments), id);
@@ -639,12 +885,27 @@ async function processJob(id) {
   activeGeminiJobId = id;
   let job = await readJob(id);
   try {
+    if (isCompleteHighlights(job.settings) && job.media) {
+      const updatedSettings = applyCompleteDurationBounds(job.settings, job.media.duration);
+      if (Number(job.settings.durationMin) !== Number(updatedSettings.durationMin)) {
+        job = await updateJob(job, job.stage, job.progress, { settings: updatedSettings });
+      }
+    }
     if (job.trackingRepairVersion !== 39) {
       job = await updateJob(job, job.stage, job.progress, {trackingRepairVersion:39,trackingRepairAttempts:[]});
     }
-    if (job.pipelineVersion !== 5) {
-      job = await updateJob(job, job.stage, job.progress, { pipelineVersion: 5, resumeFromCandidates: false, moments: [], discoveryPassesCompleted: 0, trackingRepairAttempts: [],
-        warnings: job.warnings.filter(warning => !/Target-aware discovery pass/i.test(warning)) });
+    if (job.pipelineVersion !== 7) {
+      const hasLockedScenes = Array.isArray(job.moments) && job.moments.some(moment => moment.selectionLocked === true);
+      const expectedGoals = goalTotalFromFilename(job.sourceName);
+      const invalidLockedGoals = hasLockedScenes && expectedGoals != null
+        && liveGoalStoryCount(job.moments, { lockedOnly: true }) !== expectedGoals;
+      // Preserve a valid locked Step 2 manifest. An unlocked inventory, or a
+      // locked manifest contradicted by an explicit match score, must reload
+      // Step 1 from saved source evidence instead of retaining false goals.
+      job = await updateJob(job, job.stage, job.progress, hasLockedScenes && !invalidLockedGoals
+        ? { pipelineVersion: 7 }
+        : { pipelineVersion: 7, resumeFromCandidates: false, moments: [], discoveryPassesCompleted: 0, trackingRepairAttempts: [],
+          warnings: job.warnings.filter(warning => !/Target-aware discovery pass/i.test(warning)) });
     }
     const resumeFromCandidates = job.resumeFromCandidates === true
       && job.media
@@ -671,22 +932,22 @@ async function processJob(id) {
       job = await updateJob(job, "analyzing", 12);
       media = await probe(job.sourceKey);
       job.media = media;
-      // Complete-recap discovery must receive the same 60-120 second contract
-      // enforced later. Previously it searched with a 30-second target and the
-      // pipeline raised the minimum to 60 only after the inventory was built.
+      // Apply the current source-aware duration bounds before discovery.
       if (isCompleteHighlights(job.settings)) {
         job.settings = applyCompleteDurationBounds(job.settings, media.duration);
       }
       overlayMasks = [];
+      job=await updateJob(job,'analyzing',12,{
+        progressDetail:'Indexing source camera cuts locally before the initial Gemini section analysis. No scenes have been combined.'});
       await ensureShotBoundaries(job.sourceKey, id);
-      if (process.env.GEMINI_API_KEY) {
+      if (geminiEnabled) {
         const inventoryFirst = isCompleteHighlights(job.settings);
-        const analysis = inventoryFirst
+        const analysis = (inventoryFirst
           ? await analyzePassageInventoryWithGemini(job.sourceKey, media, job.settings.targetDuration, id)
-          : await analyzeWithGemini(job.sourceKey, media, job.settings.targetDuration, id);
+          : await analyzeWithGemini(job.sourceKey, media, job.settings.targetDuration, id));
         candidates = analysis.moments;
         overlayMasks = analysis.overlayMasks;
-        job.analysisProvider = inventoryFirst ? "soccernet_calf+gemini+pyscenedetect_inventory" : analysis.videoIntelligenceSummary?.processedChunks ? "gemini+video_intelligence" : "gemini";
+        job.analysisProvider = inventoryFirst ? "gemini_initial_sections+pyscenedetect" : analysis.videoIntelligenceSummary?.processedChunks ? "gemini+video_intelligence" : "gemini";
         job.videoIntelligenceSummary = analysis.videoIntelligenceSummary;
         job.passageInventorySummary = analysis.passageInventorySummary;
         job.warnings.push(...analysis.warnings);
@@ -702,8 +963,62 @@ async function processJob(id) {
         passageInventorySummary: job.passageInventorySummary,
       });
     }
+    if(job.resumeBlockedSelection===true) {
+      candidates=await reselectBlockedSourceActions(job.sourceKey,candidates,media,id);
+      delete job.resumeBlockedSelection;
+      job=await updateJob(await readJob(id),'tracking',34,{moments:candidates,resumeBlockedSelection:undefined,
+        progressDetail:'Clearer source actions selected. Approved scene crops are preserved; tracking resumes only changed scenes.'});
+    }
     let observedIncidentCandidates;
     if (!resumeTrackingOnly) {
+    const initialSectionWorkflow = geminiEnabled && isCompleteHighlights(job.settings);
+    if (initialSectionWorkflow) {
+      // Old provisional jobs do not carry the new one-pass evidence contract.
+      // Upgrade them once; a locked Step-2 retry never enters this branch.
+      if (!candidates.every(scene=>scene.sourceSelectionEvidence?.version===INITIAL_SECTION_VERSION)) {
+        const analysis=await analyzePassageInventoryWithGemini(job.sourceKey,media,job.settings.targetDuration,id);
+        candidates=analysis.moments;overlayMasks=analysis.overlayMasks;
+        job.passageInventorySummary=analysis.passageInventorySummary;
+        job.warnings.push(...analysis.warnings);
+      }
+      job.settings=applyCompleteDurationBounds(job.settings,media.duration);
+      if(job.settings.commentary) job.settings={...job.settings,originalAudio:'muted'};
+      if(hybridKeyframing && fastTracking.enabled)
+        candidates=await prepareGuidedSourceSelection(job.sourceKey,candidates,media,id);
+      candidates=selectInitialActionViews(candidates.map(scene=>({...scene,
+        selectionLocked:false,sceneSelectionApproved:false})));
+      candidates=chooseInitialScenesForLock(candidates,job.settings,{
+        requireSemanticVerification:true,sourceDuration:media.duration,
+        sectionPlan:job.passageInventorySummary?.sectionPlan});
+      candidates=candidates.map(scene=>({...scene,semanticSignature:semanticSignature(scene)}));
+      const observedGoals=sourceGoalCountCoverage(candidates,null).observed;
+      const selectedGoals=sourceGoalCountCoverage(candidates.filter(scene=>scene.sceneSelectionApproved),null).observed;
+      if(selectedGoals!==observedGoals) throw new Error('Initial scene selection omitted an observed goal. Source clips are not locked.');
+      // This is a local audit, not a scorebug request or missing-goal search.
+      const coverage=sourceGoalCountCoverage(candidates.filter(scene=>scene.sceneSelectionApproved),goalTotalFromFilename(job.sourceName));
+      const observedScoringCoverage=initialScoringCoverage(job.passageInventorySummary?.scoringObservations||[],
+        candidates.filter(scene=>scene.sceneSelectionApproved),{resolvedCandidates:candidates});
+      await writeFile(join(outputRoot,id,'source-goal-count-coverage.json'),JSON.stringify({
+        ...coverage,complete:coverage.complete&&observedScoringCoverage.complete,
+        observedScoringCoverage,coverageScope:'observed_source_incidents',
+        expectedTotalKnown:coverage.expected!==null,
+        observationPolicy:'initial_section_video_only',filenameScoreIsContext:true},null,2));
+      if(!observedScoringCoverage.complete)
+        throw Object.assign(new Error(`Initial source selection omitted ${observedScoringCoverage.missing.length} observed scoring incident(s). See source-goal-count-coverage.json and saved section observations; no incomplete scene lock was committed.`),{code:'SOURCE_SELECTION_CONFLICT'});
+      if(!coverage.complete) job.warnings.push(`The initial video observations contain ${coverage.observed} scoring incidents; the filename suggests ${coverage.expected}. This discrepancy is recorded, not repaired by repeated discovery or invented goals.`);
+    } else {
+    // A previous pre-handoff failure may have left provisional lock flags.
+    // Only the completed source manifest owns Step 2. Unlock this Step-1 pool
+    // so source evidence and angle ranking can actually repair it on retry.
+    candidates=candidates.map(scene=>({...scene,selectionLocked:false,sceneSelectionApproved:false}));
+    // A retry from an old narrow inventory must run the same broad, budgeted
+    // Step 1 as a new upload. Never apply this to an immutable Step-2 queue.
+    if(geminiEnabled&&isCompleteHighlights(job.settings)
+      && needsBroadExtraDiscovery(candidates,job.passageInventorySummary)
+      &&!candidates.some(scene=>scene.sourceActionInventoryVersion===RECAP_ACTION_INVENTORY_VERSION)) {
+      const extras=await discoverRecapExtraActions(job.sourceKey,media,id,candidates.filter(scene=>['goal','disallowed_goal'].includes(scene.eventType)),minimumPlannedDuration(job.settings));
+      candidates=mergeAnalyzedMoments([...candidates,...extras]);
+    }
     // Candidate timestamps from the whole-video observer are provisional. Do
     // not make them immutable until the original 16:9 pixels have confirmed
     // the complete action and its natural broadcast-shot boundaries.
@@ -720,16 +1035,83 @@ async function processJob(id) {
     await ensureShotBoundaries(job.sourceKey, id);
     const sourceShots = JSON.parse(await readFile(join(outputRoot, id, "shots.json"), "utf8")).shots;
     candidates = linkImmediateGoalReplays(candidates.map(moment => alignActionToShot(moment, sourceShots)));
+    let sourceScoreLedger=null;
+    if (geminiEnabled && isCompleteHighlights(job.settings)) {
+      const scoreClient=createGeminiClient();
+      sourceScoreLedger=await observeSourceScore({sourcePath:job.sourceKey,fingerprint:await sourceContentFingerprint(job.sourceKey),media,
+        directory:join(outputRoot,id,'source-score'),model:geminiWorkloadModel('discovery'),ffmpeg:ffmpegPath,run,
+        generate:(request,label)=>generateGeminiJson(scoreClient,request,label,3),
+        onProgress:async progressDetail=>{const current=await readJob(id);await updateJob(current,'tracking',32,{progressDetail});}});
+      await writeFile(join(outputRoot,id,'source-score-ledger.json'),JSON.stringify(sourceScoreLedger,null,2));
+      // Reuse measured camera shots before buying another broad video scan.
+      // They are observation proposals only: neutral source review below must
+      // still establish setup, contact and payoff for every selected goal.
+      candidates=[...candidates,...sourceScoreShotProposals(sourceScoreLedger.anchors,sourceShots,candidates)];
+      candidates=linkImmediateGoalReplays(uniqueEvidenceCandidates(candidates).map(moment=>alignActionToShot(moment,sourceShots)));
+    }
+    let goalInventoryAnchor = [];
     // First verify scene identity and action boundaries against the uncropped
     // source. Portrait tracking cannot repair a clip that points at the wrong
     // incident, an incomplete goal, or an unrelated midfield passage.
-    if (process.env.GEMINI_API_KEY) {
+    if (geminiEnabled) {
+      candidates = selectClearIncidentAngles(candidates, sourceShots, sourceScoreLedger);
       job = await updateJob(job, "tracking", 32, {
         moments: candidates,
         progressDetail: "Validating provisional scenes in the original 16:9 footage before selection is locked.",
       });
       const initialSemanticResult = await verifyCandidateSemanticsWithGemini(job.sourceKey, candidates, id);
-      candidates = initialSemanticResult.candidates;
+      candidates = await verifyIndependentGoalOutcomes(job.sourceKey, initialSemanticResult.candidates, id);
+      candidates=reconcileSourceScoreCandidates(candidates,sourceScoreLedger);
+      job=await updateJob(await readJob(id),'tracking',32,{moments:candidates});
+      // An extra-action draft may span a source cut. If its first atomic view
+      // is incomplete, inspect one already-discovered alternative in Step 1,
+      // not a new whole-video scan or a Step-2 scene replacement.
+      const extraAlternatives=selectClearIncidentAngles(candidates,sourceShots,sourceScoreLedger);
+      // Persist the post-observation source ranking even when every scene's
+      // review is already cached. Otherwise a corrected earlier miss can leave
+      // the actual goal marked deferred until another discovery round.
+      candidates=extraAlternatives;
+      if(extraAlternatives.some(scene=>scene.sourceAdditionalAction===true && scene.sourceAngleSelected===true
+        && needsSemanticReview(scene,process.env.GEMINI_MODEL))) {
+        candidates=await verifyIndependentGoalOutcomes(job.sourceKey,
+          (await verifyCandidateSemanticsWithGemini(job.sourceKey,extraAlternatives,id)).candidates,id);
+        candidates=reconcileSourceScoreCandidates(candidates,sourceScoreLedger);
+      }
+      if(sourceScoreLedger?.anchors.length) {
+        let coverage=sourceScoreCoverage(sourceScoreLedger,candidates);
+        // Coarse discovery can point at a later replay. First observe actual
+        // measured camera shots around the missing transition, scene by scene.
+        // This is Step 1 only; an immutable portrait queue is never replaced.
+        candidates=[...candidates,...sourceScoreShotProposals(
+          sourceScoreLedger.anchors.filter(anchor=>coverage.missing.some(item=>item.id===anchor.id)),
+          sourceShots,candidates)];
+        for(let attempt=2;coverage.missing.length&&attempt<=8;attempt++) {
+          const missingIds=new Set(coverage.missing.map(incident=>incident.id));
+          let revised=selectClearIncidentAngles(candidates,sourceShots,sourceScoreLedger);
+          const pending = revised.some(scene => missingIds.has(scene.sourceScoreAnchorId)
+            && scene.sourceAngleSelected && needsSemanticReview(scene,process.env.GEMINI_MODEL));
+          if (!pending) {
+            const anchored=await discoverScoreAnchoredActions(job.sourceKey,media,id,
+              sourceScoreLedger.anchors.filter(anchor=>missingIds.has(anchor.id)),attempt);
+            revised=selectClearIncidentAngles(mergeAnalyzedMoments([...anchored,...candidates]),sourceShots,sourceScoreLedger);
+          }
+          candidates=await verifyIndependentGoalOutcomes(job.sourceKey,
+            (await verifyCandidateSemanticsWithGemini(job.sourceKey,revised,id)).candidates,id);
+          candidates=reconcileSourceScoreCandidates(candidates,sourceScoreLedger);
+          candidates=selectClearIncidentAngles(candidates,sourceShots,sourceScoreLedger);
+          coverage=sourceScoreCoverage(sourceScoreLedger,candidates);
+          job=await updateJob(await readJob(id),'tracking',32,{moments:candidates,
+            progressDetail:`Source action review: ${coverage.incidents.filter(item=>item.covered).length}/${coverage.incidents.length} score incidents verified. Completed scene observations are saved.`});
+        }
+        await writeFile(join(outputRoot,id,'source-score-coverage.json'),JSON.stringify(coverage,null,2));
+        if(coverage.missing.length) throw new Error(`Step 1 source action coverage is unresolved for ${coverage.missing.map(item=>item.id).join(', ')}. Score context and source observations are saved; portrait tracking has not started.`);
+      }
+      const explicitGoalTotal = goalTotalFromFilename(job.sourceName);
+      if (explicitGoalTotal != null && liveGoalStoryCount(candidates) >= explicitGoalTotal) {
+        goalInventoryAnchor = candidates.filter(moment => moment.eventType === "goal"
+          && moment.semanticVerified === true && moment.keepDecision !== "reject"
+          && !moment.isReplay && moment.storyPhase !== "replay");
+      }
       const rejectedPriorityScenes = candidates.filter(moment => moment.semanticVerified === false
         && ["goal", "disallowed_goal", "save", "shot_on_target", "shot_off_target", "big_chance", "celebration"].includes(moment.eventType));
       const rejectedGoalScenes = rejectedPriorityScenes.filter(moment => ["goal", "disallowed_goal"].includes(moment.eventType));
@@ -745,25 +1127,35 @@ async function processJob(id) {
           && moment.semanticVerified !== false)))];
       const reactionOnlyGoalStories = orphanGoalReactionStories(candidates);
       const suspiciousLateReplays = suspiciousLateGoalReplays(candidates);
-      const verifiedCapacity = planningEvidenceCapacity(candidates, job.settings);
+      // Step 1 measures source evidence, not a portrait track that does not
+      // exist yet. Stale lock/tracking flags from an older retry must not
+      // turn complete source footage into zero pre-tracking capacity.
+      const verifiedCapacity = sourceSelectionCapacity(candidates);
       const requiredCapacity = minimumPlannedDuration(job.settings);
       // Rejected optional candidates are normal during exhaustive observation.
       // They must not trigger another whole-source Gemini sweep when the first
       // pass already supplies enough verified footage and every goal story has
       // a live action. Recovery is reserved for an actual coverage deficiency.
-      if (rejectedGoalScenes.length > 0 || replayOnlyGoalStories.length > 0 || reactionOnlyGoalStories.length > 0
-        || suspiciousLateReplays.length > 0 || verifiedCapacity < requiredCapacity) {
+      if ((!sourceScoreLedger?.anchors.length && (rejectedGoalScenes.length > 0 || replayOnlyGoalStories.length > 0
+        || reactionOnlyGoalStories.length > 0 || suspiciousLateReplays.length > 0)
+        )
+        || verifiedCapacity < requiredCapacity) {
+        const durationOnly=durationOnlyRecovery(sourceScoreLedger,candidates,explicitGoalTotal);
+        const scenesToRecover = durationOnly ? [] : scenesNeedingCoverageRecovery(rejectedPriorityScenes, requiredCapacity - verifiedCapacity);
+        const replayStoriesToRecover=durationOnly?[]:replayOnlyGoalStories;
+        const reactionStoriesToRecover=durationOnly?[]:reactionOnlyGoalStories;
+        const suspiciousReplaysToRecover=durationOnly?[]:suspiciousLateReplays;
         const recoveryRequests = [
-          ...rejectedPriorityScenes.map(moment => `Replace ${moment.id} (${moment.eventType}) with the complete live action, result, and matching reaction at exact source boundaries.`),
-          ...replayOnlyGoalStories.map(storyId => {
+          ...scenesToRecover.map(moment => `Reobserve ${moment.id} (provisional ${moment.eventType}) and find its complete live action, result, and matching reaction at exact source boundaries. Determine the actual outcome; a missed/saved shot must not become a goal to satisfy the provisional label.`),
+          ...replayStoriesToRecover.map(storyId => {
             const replay = candidates.find(moment => moment.storyId === storyId
               && (moment.isReplay || moment.storyPhase === "replay"));
             return `Story ${storyId} currently has only replay ${replay?.id || "evidence"} near ${Number(replay?.startTime || 0).toFixed(1)}s. Search earlier nearby source footage for the distinct complete LIVE scoring action: buildup, decisive contact, ball flight, goalmouth result, then reaction. Do not relabel the replay as live.`;
           }),
-          ...reactionOnlyGoalStories.map(({ storyId, reactionId, startTime }) =>
-            `Story ${storyId} currently has only verified post-goal reaction ${reactionId} near ${Number(startTime).toFixed(1)}s. Search the preceding 45 source seconds for the distinct complete LIVE scoring action: initiating movement, decisive contact, ball flight, visible goalmouth result, then this reaction. Return that action as eventType goal with this exact storyId; do not use the reaction itself as goal proof.`),
-          ...suspiciousLateReplays.map(({ replayId, replayStart, liveGoalId, gap }) =>
-            `Goal replay ${replayId} begins near ${Number(replayStart).toFixed(1)}s, ${Number(gap).toFixed(1)}s after linked live goal ${liveGoalId}. This may actually be proof of a later scoring incident. Search the preceding 45 source seconds for a DISTINCT complete live goal, including contact, ball flight, visible goalmouth result, and the subsequent scoreboard transition. If visible, return that live action with a new storyId and keep this replay with that new incident. Do not invent a goal when the live action is absent.`),
+          ...reactionStoriesToRecover.map(({ storyId, reactionId, startTime }) =>
+            `Story ${storyId} currently has only verified post-goal reaction ${reactionId} near ${Number(startTime).toFixed(1)}s. Search the preceding ${GOAL_RECOVERY_LOOKBACK_SECONDS} source seconds for the distinct complete LIVE scoring action: initiating movement, decisive contact, ball flight, visible goalmouth result, then this reaction. Return that action as eventType goal with this exact storyId; do not use the reaction itself as goal proof.`),
+          ...suspiciousReplaysToRecover.map(({ replayId, replayStart, liveGoalId, gap }) =>
+            `Goal replay ${replayId} begins near ${Number(replayStart).toFixed(1)}s, ${Number(gap).toFixed(1)}s after linked live goal ${liveGoalId}. This may actually be proof of a later scoring incident. Search the preceding ${GOAL_RECOVERY_LOOKBACK_SECONDS} source seconds for a DISTINCT complete live goal, including contact, ball flight, visible goalmouth result, and the subsequent scoreboard transition. If visible, return that live action with a new storyId and keep this replay with that new incident. Do not invent a goal when the live action is absent.`),
         ];
         const recoveryWindows = [
           // A whole-video observer can attach a correct incident description to
@@ -771,16 +1163,28 @@ async function processJob(id) {
           // repeatedly missed the live scoring action (and then validated the
           // wrong play). Keep the search local, but span the normal broadcast
           // replay/reaction cycle before the provisional boundary.
-          ...rejectedPriorityScenes.map(moment => ({ startTime: Math.max(0, Number(moment.startTime) - 45), endTime: Math.min(media.duration, Number(moment.endTime) + 12) })),
-          ...replayOnlyGoalStories.flatMap(storyId => candidates
+          // Retain the later decision too: an overturned finish may not be
+          // resolved until after several replays and the referee's VAR review.
+          ...scenesToRecover.map(moment => goalRecoveryWindow(moment.startTime, moment.endTime, media.duration,
+            ["goal", "disallowed_goal"].includes(moment.eventType) ? 45 : 12)),
+          ...replayStoriesToRecover.flatMap(storyId => candidates
             .filter(moment => moment.storyId === storyId && (moment.isReplay || moment.storyPhase === "replay"))
-            .map(moment => ({ startTime: Math.max(0, Number(moment.startTime) - 45), endTime: Math.min(media.duration, Number(moment.endTime) + 5) }))),
-          ...reactionOnlyGoalStories.map(({ startTime }) => ({ startTime: Math.max(0, Number(startTime) - 45), endTime: Math.min(media.duration, Number(startTime) + 8) })),
-          ...suspiciousLateReplays.map(({ replayStart }) => ({ startTime: Math.max(0, Number(replayStart) - 45), endTime: Math.min(media.duration, Number(replayStart) + 8) })),
+            .map(moment => goalRecoveryWindow(moment.startTime, moment.endTime, media.duration, 5))),
+          ...reactionStoriesToRecover.map(({ startTime }) => goalRecoveryWindow(startTime, startTime, media.duration)),
+          ...suspiciousReplaysToRecover.map(({ replayStart }) => goalRecoveryWindow(replayStart, replayStart, media.duration)),
         ];
+        if (verifiedCapacity < requiredCapacity) {
+          const uncovered = coverageRecoveryWindows(candidates, media.duration,
+            {limit:durationRecoveryWindowLimit(requiredCapacity-verifiedCapacity),contextSeconds:2,
+              minimumGap:4,searchedWindows:await completedDurationSearchWindows(id)});
+          recoveryWindows.push(...uncovered);
+          recoveryRequests.push(`The verified edit is ${Math.max(0, requiredCapacity - verifiedCapacity).toFixed(1)} seconds short. Inspect the uncovered source windows ${JSON.stringify(uncovered)} for distinct COMPLETE live shots, saves, big chances, or useful buildup that the first inventory missed. A defended attack may be useful; do not label every non-goal passage as filler. Do not invent action or repeat a selected interval.`);
+        }
         job = await updateJob(job, "tracking", 33, {
           moments: candidates,
-          progressDetail: `Repairing ${rejectedGoalScenes.length} rejected goal scene(s), ${replayOnlyGoalStories.length} replay-only goal story/stories, ${reactionOnlyGoalStories.length} reaction-only goal story/stories, and ${suspiciousLateReplays.length} suspicious late replay(s) before selection lock.`,
+          progressDetail: durationOnly
+            ? `All observed goals have complete source action. Finding one more complete chance in ${recoveryWindows.length} uncovered window(s) for the ${Math.max(0,requiredCapacity-verifiedCapacity).toFixed(1)}s shortfall.`
+            : `Repairing ${scenesToRecover.length} rejected scene(s), ${replayStoriesToRecover.length} replay-only story/stories, ${reactionStoriesToRecover.length} reaction-only story/stories, and ${suspiciousReplaysToRecover.length} suspicious replay(s) before selection lock.`,
         });
         const recovered = await discoverAdditionalCandidatesWithGemini(
           job.sourceKey,
@@ -792,56 +1196,238 @@ async function processJob(id) {
           1,
           recoveryRequests,
           recoveryWindows,
+          goalTotalFromFilename(job.sourceName),
+          durationOnly ? 'action_duration' : 'incident_coverage',
         );
-        candidates = linkImmediateGoalReplays(uniqueEvidenceCandidates(normalizeInventoryCandidateMetadata(recovered))
-          .map(moment => alignActionToShot(moment, sourceShots)));
+        candidates = selectClearIncidentAngles(linkImmediateGoalReplays(uniqueEvidenceCandidates(normalizeInventoryCandidateMetadata(recovered))
+          .map(moment => alignActionToShot(moment, sourceShots))),sourceShots,sourceScoreLedger);
         const recoveredSemanticResult = await verifyCandidateSemanticsWithGemini(job.sourceKey, candidates, id);
-        candidates = recoveredSemanticResult.candidates;
+        candidates = await verifyIndependentGoalOutcomes(job.sourceKey, recoveredSemanticResult.candidates, id);
+        candidates=reconcileSourceScoreCandidates(candidates,sourceScoreLedger);
+        candidates=selectClearIncidentAngles(candidates,sourceShots,sourceScoreLedger);
+        if (goalInventoryAnchor.length) candidates = filterUnprovedRecoveryGoals(goalInventoryAnchor, candidates, explicitGoalTotal);
       }
     }
-    candidates = linkImmediateGoalReplays(candidates);
-    if (process.env.GEMINI_API_KEY) {
+    candidates = linkImmediateGoalReplays(candidates).map(trimCompleteCameraView)
+      .map(moment => moment.semanticVerified === true ? {...moment,semanticSignature:semanticSignature(moment)} : moment);
+    if (geminiEnabled) {
       const synthesized = synthesizeMissingGoalReactions(candidates, media.duration);
       if (synthesized.additions.length > 0) {
         candidates = (await verifyCandidateSemanticsWithGemini(job.sourceKey, synthesized.candidates, id)).candidates;
       }
     }
     candidates = limitIncidentActionViews(candidates);
-    candidates = chooseInitialScenesForLock(candidates, job.settings);
-    candidates = lockInitialSceneSelection(candidates, { requireSemanticVerification: Boolean(process.env.GEMINI_API_KEY) });
+    // A readable scorebug for ONE goal is not whole-match coverage. Resolve
+    // the filename count in Step 1 even when duration and partial OCR pass.
+    // Completed negative searches rotate to fresh windows, not blind retries.
+    if(geminiEnabled&&isCompleteHighlights(job.settings)) {
+      const expected=goalTotalFromFilename(job.sourceName);
+      const restored=await restoreCompletedGoalCountCandidates(id,job.sourceKey,media,candidates);
+      if(restored.length) {
+        candidates=selectClearIncidentAngles(mergeAnalyzedMoments([...candidates,...restored]),sourceShots,sourceScoreLedger);
+        candidates=await verifyIndependentGoalOutcomes(job.sourceKey,
+          (await verifyCandidateSemanticsWithGemini(job.sourceKey,candidates,id)).candidates,id);
+        candidates=selectClearIncidentAngles(reconcileSourceScoreCandidates(candidates,sourceScoreLedger),sourceShots,sourceScoreLedger);
+      }
+      for(let pass=1;!sourceGoalCountCoverage(candidates,expected).complete;pass++) {
+        const coverage=sourceGoalCountCoverage(candidates,expected);
+        await writeFile(join(outputRoot,id,'source-goal-count-coverage.json'),JSON.stringify(coverage,null,2));
+        if(coverage.excess) throw new Error(`Step 1 has ${coverage.observed} independently observed goal stories for an expected ${expected}; resolve duplicate incidents or source metadata before locking scenes.`);
+        let scope='gaps';
+        let windows=goalCountRecoveryWindows(candidates,sourceScoreLedger,media.duration,
+          await completedRecoverySearchWindows(id,'goal_count',scope),4);
+        if(!windows.length) {
+          scope='source_shots';
+          windows=unobservedSourceShotWindows(candidates,sourceShots,media.duration,
+            await completedRecoverySearchWindows(id,'goal_count',scope),4);
+        }
+        if(!windows.length) throw new Error(`Step 1 exhausted fresh source windows after verifying ${coverage.observed}/${expected} goals. Saved source-goal-count-coverage.json needs source review; no incomplete scene lock was committed.`);
+        job=await updateJob(await readJob(id),'tracking',32,{moments:candidates,sceneSelectionComplete:false,
+          progressDetail:`Step 1: ${coverage.observed}/${expected} goals verified. Checking ${windows.length} fresh source windows for missing goal action; completed reviews are retained.`});
+        const recovered=await discoverAdditionalCandidatesWithGemini(job.sourceKey,media,job.settings.targetDuration,id,
+          candidates,0,pass,[`The upload name indicates ${expected} goals but ${coverage.observed} distinct complete live goals are independently observed. Locate missing live scoring actions in these windows. Do not return additional chances to fill a duration or invent goals to match the name; report only visible outcomes. Replays of known goals keep the same story identity.`],
+          windows,expected,'goal_count',scope);
+        // Review new/corrected proposals BEFORE overlap deduplication. A
+        // shorter previously approved save might stop before a rebound goal.
+        // The new source observation must resolve that, not an importance score.
+        const priorIds=new Set(candidates.map(scene=>scene.id));
+        const fresh=recovered.filter(scene=>!priorIds.has(scene.id));
+        const reviewedFresh=fresh.length?await verifyIndependentGoalOutcomes(job.sourceKey,
+          (await verifyCandidateSemanticsWithGemini(job.sourceKey,fresh,id)).candidates,id):[];
+        candidates=selectClearIncidentAngles(linkImmediateGoalReplays(uniqueEvidenceCandidates(normalizeInventoryCandidateMetadata(
+          mergeAnalyzedMoments([...candidates,...reviewedFresh])))
+          .map(moment=>alignActionToShot(moment,sourceShots))),sourceShots,sourceScoreLedger);
+        candidates=await verifyIndependentGoalOutcomes(job.sourceKey,
+          (await verifyCandidateSemanticsWithGemini(job.sourceKey,candidates,id)).candidates,id);
+        candidates=limitIncidentActionViews(selectClearIncidentAngles(reconcileSourceScoreCandidates(candidates,sourceScoreLedger),sourceShots,sourceScoreLedger));
+      }
+      await writeFile(join(outputRoot,id,'source-goal-count-coverage.json'),JSON.stringify(sourceGoalCountCoverage(candidates,expected),null,2));
+    }
+    // Brief immediate celebrations finish an independently verified goal's
+    // story. Review their pixels before counting them; unrelated reactions and
+    // VAR remain deferred. They were previously observed but never reviewed,
+    // so a complete match recap lost its actual emotional payoff.
+    if (geminiEnabled) {
+      candidates = selectClearIncidentAngles(candidates,sourceShots,sourceScoreLedger);
+      const goalReactions = candidates.filter(moment => moment.eventType === 'celebration'
+        && !moment.sourceSupportDeferred)
+        .map(moment => moment.id);
+      if (goalReactions.length) candidates = (await verifyCandidateSemanticsWithGemini(
+        job.sourceKey,candidates,id,goalReactions)).candidates;
+    }
+    // A planning estimate can exceed the minimum while the actual Step 1
+    // selection falls short after duplicate-angle and reaction limits. Keep
+    // discovery inside Step 1 instead of failing and making the user Resume.
+    for (let recoveryPass = 2; ; recoveryPass += 1) {
+      try {
+        // Account for source-origin cleanup BEFORE measuring/locking duration.
+        // Step 2 must not discover that its supposedly 60-second source pool
+        // included dead pre-roll which it then has to remove.
+        candidates=candidates.map(trimToVerifiedActionOrigin)
+          .map(moment=>moment.semanticVerified===true?{...moment,semanticSignature:semanticSignature(moment)}:moment);
+        candidates = selectRecapExtraActions(candidates, Number.MAX_SAFE_INTEGER, minimumPlannedDuration(job.settings));
+        job=await updateJob(job,'tracking',33,{sourceSections:sectionSelectionSummary(
+          uniqueEvidenceCandidates(candidates.filter(scene=>hasInitialSceneEvidence(scene,{requireSemanticVerification:geminiEnabled,minimumSeconds:MIN_SCENE_SECONDS}))),
+          step1DiscoveryPlan(media.duration,minimumPlannedDuration(job.settings)))});
+        candidates = chooseInitialScenesForLock(candidates, job.settings, {requireSemanticVerification:geminiEnabled,sourceDuration:media.duration});
+        break;
+      } catch (error) {
+        if (!(error instanceof Step1CoverageError) || !geminiEnabled) throw error;
+        const missingSeconds = error.minimum - error.selectedSeconds;
+        // Duration recovery is a bounded discovery assist, not a second
+        // selection loop. Once a fresh pass has failed to add distinct
+        // complete action, keep the reviewed scenes and start tracking them.
+        const boundedRecoveryExhausted = recoveryPass >= 3;
+        let windows = coverageRecoveryWindows(candidates, media.duration, {
+          limit:durationRecoveryWindowLimit(missingSeconds),contextSeconds:2,minimumGap:4,
+          searchedWindows:await completedDurationSearchWindows(id) });
+        let searchScope='gaps';
+        if(!windows.length) {
+          searchScope='source_shots';
+          windows=unobservedSourceShotWindows(candidates,sourceShots,media.duration,
+            await completedDurationSearchWindows(id,'source_shots'),4);
+        }
+        if (!windows.length || boundedRecoveryExhausted) {
+          candidates = chooseInitialScenesForLock(candidates, job.settings, {
+            requireSemanticVerification:geminiEnabled,
+            sourceDuration:media.duration,
+            allowCoverageShortfall:true,
+          });
+          const warning = `Step 1 found ${error.selectedSeconds.toFixed(1)} naturally paced seconds of distinct complete action after bounded discovery. Continuing with the reviewed scenes; no padding, duplicate replay, or artificial footage was added.`;
+          job = await updateJob(await readJob(id), "tracking", 33, {
+            moments:candidates,
+            sourceSelectionProgress:{verifiedSeconds:error.selectedSeconds,minimumSeconds:error.minimum,shortfallAccepted:true,searchScope,pass:recoveryPass},
+            progressDetail:warning,
+            warnings:[...(job.warnings || []), warning],
+          });
+          break;
+        }
+        job = await updateJob(job, "tracking", 33, {
+          moments: candidates,
+          sourceSelectionProgress:{verifiedSeconds:error.selectedSeconds,minimumSeconds:error.minimum,searchScope,pass:recoveryPass},
+          progressDetail: `Step 1 has ${error.selectedSeconds.toFixed(1)}/${error.minimum} verified seconds. Reviewing ${windows.length} ${searchScope==='source_shots'?'complete camera shot(s)':'source window(s)'} before scene lock (pass ${recoveryPass}).`,
+        });
+        const recovered = await discoverAdditionalCandidatesWithGemini(
+          job.sourceKey, media, job.settings.targetDuration, id, candidates,
+          missingSeconds, recoveryPass,
+          [`Find distinct complete LIVE football action in these uncovered windows. The previous selected scenes total ${error.selectedSeconds.toFixed(1)} seconds; do not repeat an existing goal angle or pad with an unrelated reaction.`],
+          windows,
+          goalTotalFromFilename(job.sourceName),
+          'action_duration',
+          searchScope,
+        );
+        candidates = selectClearIncidentAngles(linkImmediateGoalReplays(uniqueEvidenceCandidates(normalizeInventoryCandidateMetadata(recovered))
+          .map(moment => alignActionToShot(moment, sourceShots))), sourceShots, sourceScoreLedger);
+        candidates = await verifyIndependentGoalOutcomes(job.sourceKey,
+          (await verifyCandidateSemanticsWithGemini(job.sourceKey, candidates, id)).candidates, id);
+        candidates=reconcileSourceScoreCandidates(candidates,sourceScoreLedger);
+        candidates=selectClearIncidentAngles(candidates,sourceShots,sourceScoreLedger);
+        if (goalInventoryAnchor.length) candidates = filterUnprovedRecoveryGoals(goalInventoryAnchor, candidates, goalTotalFromFilename(job.sourceName));
+        candidates = limitIncidentActionViews(candidates);
+      }
+    }
+    if(sourceScoreLedger?.anchors.length) {
+      const finalCoverage=sourceScoreCoverage(sourceScoreLedger,candidates.filter(scene=>scene.sceneSelectionApproved));
+      await writeFile(join(outputRoot,id,'source-score-coverage.json'),JSON.stringify(finalCoverage,null,2));
+      if(finalCoverage.missing.length) throw new Error('Step 1 selection omitted a source-score incident; scenes have not been locked.');
+    }
+    const expectedGoalCount = goalTotalFromFilename(job.sourceName);
+    const selectedGoalCoverage=sourceGoalCountCoverage(candidates.filter(scene=>scene.sceneSelectionApproved),expectedGoalCount);
+    if(geminiEnabled && !selectedGoalCoverage.complete) {
+      throw new Error(`Step 1 selection changed verified goal coverage: expected ${expectedGoalCount}, selected ${selectedGoalCoverage.observed}. Source selection is not locked; narration and tracking have not started.`);
+    }
+    }
+    candidates = lockInitialSceneSelection(candidates, { requireSemanticVerification: geminiEnabled,
+      fixedSelection: isCompleteHighlights(job.settings) });
+    const scenePlan = candidates.filter(scene=>scene.selectionLocked===true)
+      .sort((a,b)=>Number(a.startTime)-Number(b.startTime));
+    const selectionSections=sectionSelectionSummary(scenePlan,job.passageInventorySummary?.sectionPlan
+      || step1DiscoveryPlan(media.duration,minimumPlannedDuration(job.settings)));
+    job=await updateJob(job,'tracking',33,{sourceSections:selectionSections,moments:candidates});
+    await writeFile(join(outputRoot,id,'step1-recap-plan.json'),JSON.stringify({
+      version:2,minimumSeconds:minimumPlannedDuration(job.settings),
+      observationPolicy:initialSectionWorkflow?'one_initial_video_response_per_section':'legacy_source_review',
+      verifiedSourceSeconds:renderableEvidenceCapacity(scenePlan,.08,{maximumReactionSeconds:7}),
+      order:'chronological_source_incidents',playbackRate:1,
+      stage:'source_split',combined:false,
+      scenePolicy:'one_separate_original_ratio_clip_per_selected_action',
+      combinePolicy:'after_tracking_effects_transitions_captions_narration',
+      sections:selectionSections,
+      scenes:scenePlan.map(scene=>({id:scene.id,storyId:scene.storyId,eventType:scene.eventType,
+        startTime:scene.startTime,endTime:scene.endTime})),
+      narrationPolicy:'basic_english_natural_pacing_after_visual_lock',
+    },null,2));
     await writeFile(join(outputRoot, id, "step1-scene-manifest.json"), JSON.stringify({
       version: 1,
       candidates,
       savedAt: new Date().toISOString(),
     }, null, 2));
-    // Preserve the verified whole-source incident inventory before any 9:16
-    // crop decision. Only same-incident action-angle alternatives may compete
-    // after tracking; no unrelated scene can be discovered or resurrected.
+    // Preserve the verified whole-source inventory. For the fixed workflow,
+    // every source-angle decision is finished here, before any 9:16 tracking.
     await writeFile(join(outputRoot, id, "incidents-observed.json"), JSON.stringify(incidentManifest(candidates), null, 2));
     observedIncidentCandidates = candidates.map(moment => ({ ...moment }));
     } else {
       observedIncidentCandidates = candidates.map(moment => ({ ...moment }));
     }
+    candidates = candidates.map(normalizeDecisionSceneEvidence);
+    observedIncidentCandidates = observedIncidentCandidates.map(normalizeDecisionSceneEvidence);
     const observedIncidentIds = new Set(observedIncidentCandidates.map(moment => moment.id));
     const incidentRequirementCandidates = (current) => {
-      const currentById = new Map(current.map(moment => [moment.id, moment]));
-      return [
-        ...observedIncidentCandidates.map(moment => currentById.get(moment.id)?.semanticVerified === true
-          ? currentById.get(moment.id) : moment),
-        ...current.filter(moment => !observedIncidentIds.has(moment.id)),
-      ];
+      // The discovery ledger is intentionally retained for diagnostics, but
+      // it can contain unselected alternate angles and stale Gemini
+      // candidates. After Step 1 and angle selection, only the live `current`
+      // set represents scenes that are allowed to block rendering. Reusing
+      // the whole ledger here caused valid 9:16 jobs to fail on discarded
+      // goal/disallowed-goal alternatives.
+      return current.filter(moment =>
+        moment.selectionLocked === true
+        || moment.sceneSelectionApproved === true
+        || moment.selectedForFinalVideo === true
+      );
     };
     // Verify the actual outcome before the camera is computed, not afterwards.
     // Semantic verification may refine action origin after the initial shot
     // split. Trim stale player-only/empty-field pre-roll before any 9:16 work.
-    candidates = candidates.map(trimToVerifiedActionOrigin);
-    job = await updateJob(job, "tracking", 34, {moments:candidates});
+    if (!isCompleteHighlights(job.settings)) candidates = candidates.map(trimToVerifiedActionOrigin);
+    const sceneQueue = isCompleteHighlights(job.settings) ? fixedSceneQueue(candidates) : null;
+    if (sceneQueue) await writeFile(join(outputRoot,id,'fixed-scene-queue.json'),JSON.stringify(sceneQueue,null,2));
+    if(sceneQueue) job=await updateJob(job,'tracking',34,{moments:candidates,sceneSelectionComplete:true,
+      progressDetail:`Selected ${sceneQueue.scenes.length} complete source scenes. Saving each separately before tracking.`});
+    if(sceneQueue) candidates=await prepareSplitSceneAssets({sourcePath:job.sourceKey,
+      fingerprint:await sourceContentFingerprint(job.sourceKey),candidates,media,
+      directory:join(outputRoot,id,'source-scenes'),ffmpeg:ffmpegPath,run,probe,
+      report:async progressDetail=>updateJob(await readJob(id),'tracking',34,{progressDetail}),
+      onScenePrepared:async scene=>{
+        const current=await readJob(id);
+        await updateJob(current,'tracking',34,{moments:current.moments.map(moment=>moment.id===scene.id?scene:moment)});
+      }});
+    job = await updateJob(await readJob(id), "tracking", 34, {moments:candidates,clearAngleWorkflowVersion:CLEAR_ANGLE_WORKFLOW_VERSION});
     let prepared = await prepareIncidentEvidence(job.sourceKey, candidates, media, id);
     candidates = linkImmediateGoalReplays(prepared.candidates);
     let tracking = prepared.tracking;
     const firstTrackedCapacity = planningEvidenceCapacity(candidates, job.settings);
     const requiredBeforePlanning = minimumPlannedDuration(job.settings);
-    if (firstTrackedCapacity + 0.01 < requiredBeforePlanning
+    if (!sceneQueue && firstTrackedCapacity + 0.01 < requiredBeforePlanning
       && candidates.some(moment => moment.selectionLocked !== true && moment.semanticVerified === true && moment.keepDecision !== "reject")) {
       job = await updateJob(job, "tracking", 36, {
         moments: candidates,
@@ -849,14 +1435,14 @@ async function processJob(id) {
         progressDetail: `Verified primary scenes provide ${firstTrackedCapacity.toFixed(1)} seconds. Promoting the already-discovered reserve pool without restarting Gemini discovery.`,
       });
       candidates = promoteRemainingScenesForLock(candidates);
-      prepared = await prepareIncidentEvidence(job.sourceKey, candidates, media, id);
+      prepared = await prepareIncidentEvidence(job.sourceKey, candidates, media, id, {
+        skipVisualRejectedIds: new Set(candidates.filter(scene=>scene.trackingRepairError).map(scene=>scene.id)),
+      });
       candidates = linkImmediateGoalReplays(prepared.candidates);
       tracking = prepared.tracking;
     }
-    // Each verified goal may have two source angles in the Step 1 probe set.
-    // Compare their real local player-and-ball tracks now, keep exactly one
-    // complete action angle per incident, and retain its separate reaction.
-    // This never returns to Gemini discovery and never drops a distinct goal.
+    // Legacy workflows may compare tracked alternatives. The fixed workflow
+    // instead verifies every scene in its saved queue without source swaps.
     const nativeLandscape = job.settings.aspectRatio === "16:9";
     const incidentAngleQuality = new Map(candidates.map(moment => [
       String(moment.id),
@@ -868,10 +1454,28 @@ async function processJob(id) {
         ? assessNativeFrameAction(moment, matchingTrackingEvidence(tracking, moment))
       : assessPlannedSceneTracking(moment, matchingTrackingEvidence(tracking, moment))).usable === true,
     ]));
-    if (nativeLandscape) {
+    if (nativeLandscape && !sceneQueue) {
       candidates = recoverNativeFullFrameIncidents(candidates, incidentAngleQuality, incidentAngleUsable);
     }
+    const unverifiedLockedGoals=candidates.filter(moment=>moment.selectionLocked===true && moment.eventType==="goal"
+      && !candidates.some(other=>other.selectionLocked===true && other.eventType==="goal"
+        && String(other.storyId||other.id)===String(moment.storyId||moment.id)
+        && incidentAngleUsable.get(String(other.id))===true));
+    if(unverifiedLockedGoals.length) {
+      // Do not let angle comparison erase a required incident and then write
+      // an incomplete recap. Preserve its scene lock for framing repair.
+      job=await updateJob(await readJob(id),"tracking",38,{moments:candidates,observedMoments:candidates,
+        resumeTrackingOnly:true,progressDetail:"Repairing the selected goal crops before script writing."});
+      throw new Error(`Locked goal framing still needs repair: ${unverifiedLockedGoals.map(moment=>
+        `${moment.id} (${assessPlannedSceneTracking(moment,matchingTrackingEvidence(tracking,moment)).issues?.join(", ")||moment.trackingDecision||"unverified crop"})`).join("; ")}. Selected incidents remain saved; narration has not started.`);
+    }
+    if (sceneQueue) {
+      const queueReview = assertFixedSceneQueue(sceneQueue, candidates);
+      await writeFile(join(outputRoot,id,'scene-queue-review.json'),JSON.stringify(queueReview,null,2));
+      assertFixedSceneQueue(sceneQueue, candidates, { requirePassed: true });
+    }
     candidates = chooseTrackedIncidentAngles(candidates, incidentAngleQuality, incidentAngleUsable);
+    if (sceneQueue) assertFixedSceneQueue(sceneQueue, candidates, { requirePassed: true });
     await writeFile(join(outputRoot, id, "incident-angle-selection.json"), JSON.stringify({
       version: 1,
       selected: candidates.filter(moment => moment.chosenIncidentAngle === true).map(moment => ({
@@ -904,10 +1508,47 @@ async function processJob(id) {
       await finishViralReelJob(job, candidates, media, overlayMasks, tracking, id);
       return;
     }
+    const incidentReport = incidentCoverage(incidentRequirementCandidates(candidates), candidates.filter(m=>m.keepDecision !== "reject").map(m=>({...m,selectedForFinalVideo:true})));
+    await writeFile(join(outputRoot, id, "incident-coverage.json"), JSON.stringify(incidentReport, null, 2));
+    job = await updateJob(job, "tracking", 38, {incidentCoverage:incidentReport,moments:candidates,observedMoments:candidates});
+    if (editableDuration < requiredPlannedDuration) {
+      const report = evidenceReport(candidates, editableDuration, requiredPlannedDuration);
+      await writeFile(join(outputRoot, id, "evidence-report.json"), JSON.stringify(report, null, 2));
+      await writeFile(join(outputRoot, id, "incidents-verified.json"), JSON.stringify(incidentManifest(candidates), null, 2));
+      job = await updateJob(job, "tracking", 38, { moments: candidates, observedMoments: candidates, evidenceReport: report, trackingSummary: tracking.summary });
+      const missingGoalEvidence = incidentReport.missing.some(incident => incident.eventTypes.includes("goal"));
+      if (isCompleteHighlights(job.settings) && !missingGoalEvidence && editableDuration > 0) {
+        // Step 1 already owns the complete source decision. Do not send the
+        // user back to discovery just because conservative caps leave a few
+        // seconds below the preferred floor. Continue with unique reviewed
+        // footage and lower the natural floor to what can really be rendered.
+        const naturalFloor = Number(editableDuration.toFixed(1));
+        const warning = `The reviewed source contains ${naturalFloor.toFixed(1)} naturally paced seconds after tracking. Continuing without padding or duplicate replay; the recap floor was adjusted to the available evidence.`;
+        job.settings = { ...job.settings, targetDuration: Math.min(Number(job.settings.targetDuration || naturalFloor), naturalFloor), durationMin: naturalFloor };
+        job.warnings = [...(job.warnings || []), warning];
+        requiredPlannedDuration = naturalFloor;
+      } else {
+        throw new Error(`The current verified edit plan supports ${editableDuration.toFixed(1)} of the required ${requiredPlannedDuration} seconds. ${report.repairable.length} scene(s) need tracking or framing repair. This is a verification shortfall, not proof that the source lacks good action. See the saved scene-level evidence report.`);
+      }
+    }
+    job = await updateJob(job, "tracking", 38, { moments: candidates, observedMoments: candidates });
+    const missingGoals = incidentReport.missing.filter(incident => incident.eventTypes.includes("goal"));
+    if (missingGoals.length) throw new Error(`Complete-match verification still needs ${missingGoals.length} goal(s). Their action is visible in the source but tracking has not passed. See incident-coverage.json; these goals will not be silently omitted.`);
+    const unprovedDecisions = incidentReport.missing.filter(incident => !incident.eventTypes.includes("goal"));
+    if (unprovedDecisions.length) job.warnings.push(`${unprovedDecisions.length} decision incident(s) could not be verified in a playable angle and will not be narrated or shown as confirmed.`);
+    await writeFile(join(outputRoot, id, "incidents-verified.json"), JSON.stringify(incidentManifest(candidates), null, 2));
+    if (job.settings.durationMode !== "auto" && verifiedEvidenceDuration < requiredPlannedDuration) {
+      job.warnings.push(`The unique verified footage provides ${verifiedEvidenceDuration.toFixed(1)} seconds. The target-aware plan will use only unique verified source intervals, including genuine alternate camera angles when present; synthetic replay duplication is forbidden.`);
+    }
+    if (highlightDeficiencies.length) {
+      job.warnings.push(`Goal-first discovery could not verify every preferred companion angle: ${highlightDeficiencies.join(", ")}. Gemini must use only the complete goal/shot evidence that passed local tracking.`);
+    }
+    // Do not spend grounded-search/narration calls while known crop repairs
+    // still prevent a complete visual story. Identity work follows the gates.
     let matchContext = job.matchContext || { identityResearchVersion: 5, status: "unverified", confidence: 0, reason: "not_researched", sources: [] };
-    if (isCompleteHighlights(job.settings) && process.env.GEMINI_API_KEY
+    if (isCompleteHighlights(job.settings) && geminiEnabled
       && Number(job.matchContext?.identityResearchVersion || 0) < 5) {
-      job = await updateJob(job, "tracking", 39, { progressDetail: "Researching the exact fixture and scorers with grounded sources before writing the recap." });
+      job = await updateJob(job, "tracking", 39, { progressDetail: "Researching the exact fixture and scorers after visual coverage passed." });
       try {
         matchContext = await researchMatchContextWithGemini(job.sourceName, job.settings.recapBrief, candidates);
         if (matchContext.status !== "verified") {
@@ -920,38 +1561,19 @@ async function processJob(id) {
       await writeFile(join(outputRoot, id, "match-context.json"), JSON.stringify(matchContext, null, 2));
       job.matchContext = matchContext;
     }
-    const incidentReport = incidentCoverage(incidentRequirementCandidates(candidates), candidates.filter(m=>m.keepDecision !== "reject").map(m=>({...m,selectedForFinalVideo:true})));
-    await writeFile(join(outputRoot, id, "incident-coverage.json"), JSON.stringify(incidentReport, null, 2));
-    job = await updateJob(job, "tracking", 38, {incidentCoverage:incidentReport,moments:candidates,observedMoments:candidates});
-    if (editableDuration < requiredPlannedDuration) {
-      const report = evidenceReport(candidates, editableDuration, requiredPlannedDuration);
-      await writeFile(join(outputRoot, id, "evidence-report.json"), JSON.stringify(report, null, 2));
-      await writeFile(join(outputRoot, id, "incidents-verified.json"), JSON.stringify(incidentManifest(candidates), null, 2));
-      job = await updateJob(job, "tracking", 38, { moments: candidates, observedMoments: candidates, evidenceReport: report, trackingSummary: tracking.summary });
-      throw new Error(`The current verified edit plan supports ${editableDuration.toFixed(1)} of the required ${requiredPlannedDuration} seconds. ${report.repairable.length} scene(s) need tracking or framing repair. This is a verification shortfall, not proof that the source lacks good action. See the saved scene-level evidence report.`);
-    }
-    job = await updateJob(job, "tracking", 38, { moments: candidates, observedMoments: candidates });
-    if (incidentReport.missing.length) throw new Error(`Complete-match verification still needs ${incidentReport.missing.length} incident(s). Their action is visible in the source but tracking has not passed. See incident-coverage.json; these goals will not be silently omitted.`);
-    await writeFile(join(outputRoot, id, "incidents-verified.json"), JSON.stringify(incidentManifest(candidates), null, 2));
-    if (job.settings.durationMode !== "auto" && verifiedEvidenceDuration < requiredPlannedDuration) {
-      job.warnings.push(`The unique verified footage provides ${verifiedEvidenceDuration.toFixed(1)} seconds. The target-aware plan will use only unique verified source intervals, including genuine alternate camera angles when present; synthetic replay duplication is forbidden.`);
-    }
-    if (highlightDeficiencies.length) {
-      job.warnings.push(`Goal-first discovery could not verify every preferred companion angle: ${highlightDeficiencies.join(", ")}. Gemini must use only the complete goal/shot evidence that passed local tracking.`);
-    }
     let automaticStory;
     if (isCompleteHighlights(job.settings) && job.settings.durationMode !== "auto") {
       const requestedGuide = Number(job.settings.targetDuration || 120);
       const evidenceFittedTarget = clamp(
         Math.min(requestedGuide, editableDuration),
-        Number(job.settings.durationMin || 60),
+        Number(job.settings.durationMin ?? COMPLETE_RECAP_MINIMUM_SECONDS),
         Number(job.settings.durationMax || Infinity),
       );
       if (evidenceFittedTarget + 0.1 < requestedGuide) {
-        job.warnings.push("Adjusted the preferred narration target from " + requestedGuide.toFixed(1) + " to " + evidenceFittedTarget.toFixed(1) + " seconds so the script fits unique verified football evidence. The 60-second delivery minimum remains enforced.");
+        job.warnings.push("Adjusted the preferred narration target from " + requestedGuide.toFixed(1) + " to " + evidenceFittedTarget.toFixed(1) + " seconds so the script fits unique verified football evidence. The " + Number(job.settings.durationMin ?? COMPLETE_RECAP_MINIMUM_SECONDS) + "-second delivery minimum remains enforced.");
       }
       job.settings = { ...job.settings, targetDuration: evidenceFittedTarget };
-      requiredPlannedDuration = Number(job.settings.durationMin || 60);
+      requiredPlannedDuration = Number(job.settings.durationMin ?? COMPLETE_RECAP_MINIMUM_SECONDS);
     }
     if (job.settings.durationMode === "auto") {
       candidates = shortReactionCandidates(candidates, isCompleteHighlights(job.settings) ? 7 : 3);
@@ -977,14 +1599,29 @@ async function processJob(id) {
         requestedDuration: job.settings.durationMode === "auto" ? null : job.settings.targetDuration,
         aiSelectedDuration: automaticStory?.targetDuration,
         durationRationale: automaticStory?.rationale,
-        minimumDuration: isCompleteHighlights(job.settings) ? job.settings.durationMin : (job.settings.durationMode === "auto" ? 30 : undefined),
+        minimumDuration: isCompleteHighlights(job.settings)
+          ? job.settings.durationMin : (job.settings.durationMode === "auto" ? 0 : undefined),
         verifiedEvidenceDuration,
         editableEvidenceDuration: editableDuration,
         planningMode: job.settings.durationMode === "auto" ? "ai_selected_complete_story" : "target_aware_verified_editorial_expansion",
         matchContext,
       },
     });
-    const scriptCandidates = selectDirectorCandidates(candidates).filter(narratableEvidence);
+    const scriptCandidates = sceneQueue ? candidates.filter(moment=>moment.selectionLocked)
+      : selectDirectorCandidates(candidates).filter(narratableEvidence);
+    if (!scriptCandidates.some(narratableEvidence)) {
+      const repairScenes = candidates.filter(moment => moment.selectionLocked === true
+        && moment.eventType !== "celebration" && moment.storyPhase !== "reaction");
+      const report = {
+        reason: "no_verified_narratable_action", sourceDuration: media.duration,
+        usableReactionSeconds: editableDuration,
+        repairScenes: repairScenes.map(moment => ({ id: moment.id, reason: moment.trackingDecision })),
+      };
+      await writeFile(join(outputRoot, id, "narration-readiness.json"), JSON.stringify(report, null, 2));
+      job = await updateJob(job, "tracking", 38, { moments: candidates, observedMoments: candidates,
+        narrationReadiness: report, resumeFromCandidates: true, resumeTrackingOnly: true });
+      throw new Error("The selected action scenes still need player-and-ball tracking repair. Narration has not started; celebration-only footage cannot support a recap. The locked scenes are saved for tracking retry.");
+    }
     const verifiedDirectorSlots = scriptCandidates.length;
     const verifiedGoalActionCount = verifiedLiveGoalActions(scriptCandidates).length;
     let contentPlan;
@@ -994,7 +1631,7 @@ async function processJob(id) {
       // transitions and duration first; Gemini writes only after that visual
       // timeline is immutable.
       contentPlan = buildLockedVisualOutline(scriptCandidates, job.settings, matchContext);
-    } else if (process.env.GEMINI_API_KEY) {
+    } else if (geminiEnabled) {
       try {
         contentPlan = await writeAnalysisContentWithGemini(scriptCandidates, media, job.settings, verifiedEvidenceDuration, editableDuration, verifiedDirectorSlots, verifiedGoalActionCount, matchContext);
       } catch (error) {
@@ -1034,14 +1671,14 @@ async function processJob(id) {
     planned = restoreContentBeatOrder(planned, contentPlan.contentBeats);
     let selected = applyCompleteHighlightTreatment(applyTrackingQuality(planned, tracking, job.settings), job.settings);
     let selectedDuration = selectedTimelineDuration(selected);
-    for (let repairPass = 0; selectedDuration < requiredPlannedDuration && repairPass < planned.length; repairPass += 1) {
+    for (let repairPass = 0; !sceneQueue && selectedDuration < requiredPlannedDuration && repairPass < planned.length; repairPass += 1) {
       const repaired = applyCompleteHighlightTreatment(repairPlanWithTrackedBackups(planned, selected, tracking, requiredPlannedDuration, job.settings.intensity, job.settings), job.settings);
       selected = restoreContentBeatOrder(repaired, contentPlan.contentBeats);
       const repairedDuration = selectedTimelineDuration(selected);
       if (repairedDuration <= selectedDuration + 0.01) break;
       selectedDuration = repairedDuration;
     }
-    if (job.settings.durationMode !== "auto") {
+    if (!sceneQueue && job.settings.durationMode !== "auto") {
       selected = expandVerifiedTimeline(selected, job.settings.targetDuration);
       selected = fitSelectedTimelineToCeiling(
         selected,
@@ -1050,23 +1687,38 @@ async function processJob(id) {
       );
     }
     selected = sanitizeUnverifiedMoments(selected, matchContext);
+    if (sceneQueue) assertFixedSceneQueue(sceneQueue, selected.filter(scene=>scene.selectedForFinalVideo), { requirePassed: true });
     let lockedNarrationCandidates = selected
       .filter((moment) => moment.selectedForFinalVideo)
-      .filter(narratableEvidence);
+      .filter(moment=>sceneQueue || narratableEvidence(moment));
     let lockedBindingProblems = contentEvidenceBindingProblems(contentPlan.contentBeats, lockedNarrationCandidates);
+    const visualIdentityBindings = bindVerifiedIdentitiesToIncidents(matchContext, lockedNarrationCandidates);
+    let visualReviewManifest = buildVisualReviewManifest(selected, tracking.summary, matchContext, visualIdentityBindings, tracking);
+    let completedVisual = null;
+    if (isCompleteHighlights(job.settings) && job.settings.commentary) {
+      job = await updateJob(job, 'editing', 44, { narrationProductionVersion: 1,
+        completedVisualReady: false, narrationRecorded: false, narrationScriptApproved: false, renderCompleted: false, progressDetail:
+        'Finishing the complete muted visual edit before Gemini watches it and writes the recap.' });
+      completedVisual = await prepareCompletedVisualNarration(job, selected, media, overlayMasks, tracking, matchContext, visualReviewManifest);
+      visualReviewManifest = completedVisual.manifest;
+      selectedDuration = visualReviewManifest.selectedDuration;
+    }
     await writeFile(join(outputRoot, id, "locked-visual-timeline.json"), JSON.stringify({
       version: 1,
       savedAt: new Date().toISOString(),
       selectedDuration,
       matchContext,
       trackingSummary: tracking.summary,
+      visualReviewManifest,
       moments: selected,
     }, null, 2));
     if (isCompleteHighlights(job.settings) || lockedBindingProblems.length) {
-      if (!process.env.GEMINI_API_KEY) {
+      if (!geminiEnabled) {
         throw new Error(`The locked visual timeline requires an exact narration rewrite: ${lockedBindingProblems.join(", ")}.`);
       }
       job = await updateJob(job, "writing_content", 46, {
+        visualEditLocked:true,
+        completedVisualReady:Boolean(completedVisual),
         progressDetail: "The visual edit is locked. Writing every narration beat against the exact scenes and final duration before voice recording.",
       });
       const lockedEvidenceDuration = availableVerifiedEvidenceDuration(lockedNarrationCandidates);
@@ -1084,6 +1736,10 @@ async function processJob(id) {
         lockedNarrationCandidates.length,
         lockedGoalCount,
         matchContext,
+        visualReviewManifest,
+        null,
+        id,
+        completedVisual?.videoPart || null,
       );
       contentPlan = fitContentPlanToEvidenceSlots(contentPlan, lockedNarrationCandidates.length, selectedDuration);
       contentPlan = sanitizeUnverifiedContentPlan(contentPlan, matchContext, job.settings);
@@ -1099,6 +1755,7 @@ async function processJob(id) {
     selected = applyNarrationToLockedVisualTimeline(selected, contentPlan);
     selected = restoreContentBeatOrder(selected, contentPlan.contentBeats);
     selectedDuration = selectedTimelineDuration(selected);
+    if (completedVisual) selectedDuration = completedVisual.manifest.selectedDuration;
     let frameable = selected.filter((moment) => moment.selectedForFinalVideo);
     const selectedBeatCount = new Set(
       frameable.filter((moment) => moment.commentary).map((moment) => String(moment.beatId || "")),
@@ -1108,12 +1765,14 @@ async function processJob(id) {
     if (sequenceProblems.length && isCompleteHighlights(job.settings)) {
       job.warnings.push(`Complete verified goal actions were preserved without optional companion footage: ${sequenceProblems.join(", ")}.`);
     }
-    const coverage = assertIncidentCoverage(incidentRequirementCandidates(candidates), frameable);
+    const finalRequirements = incidentRequirementCandidates(candidates).filter(moment =>
+      !unprovedDecisions.some(incident => incident.id === String(moment.storyId || moment.id)));
+    const coverage = assertIncidentCoverage(finalRequirements, frameable);
     await writeFile(join(outputRoot, id, "alignment-review.json"), JSON.stringify({
       contentPlan, alignment: editPlan, moments: selected, sequenceProblems, selectedDuration, coverage,
     }, null, 2));
     const deliveryFailures = [];
-    if (frameable.length < 2) deliveryFailures.push(`only_${frameable.length}_selected_scenes`);
+    if (frameable.length < 1) deliveryFailures.push("no_selected_action_scenes");
     if (uniqueEvidenceCandidates(frameable).length !== frameable.length) deliveryFailures.push("duplicate_source_intervals");
     if (selectedDuration < requiredPlannedDuration) deliveryFailures.push(`duration_short_${selectedDuration.toFixed(1)}s`);
     if (selectedDuration > planningCeiling(job.settings) + 3) deliveryFailures.push(`duration_long_${selectedDuration.toFixed(1)}s`);
@@ -1126,7 +1785,12 @@ async function processJob(id) {
         progressDetail: "The visual edit is locked. Recording narration as the final production stage.",
         editPlan: { ...job.editPlan, title: contentPlan.title, contentScript: contentPlan.contentScript, narrationScript: contentPlan.contentScript },
       });
-      for (let narrationAttempt = 0; narrationAttempt < 3; narrationAttempt += 1) {
+      if (completedVisual) {
+        const timed = await makeCompletedTimelineSpeech(contentPlan, completedVisual.manifest, id, matchContext, lockedNarrationCandidates);
+        masterTtsFiles = timed.files;
+        contentPlan = timed.content;
+        selected = applyNarrationToLockedVisualTimeline(selected, contentPlan);
+      } else for (let narrationAttempt = 0; narrationAttempt < 3; narrationAttempt += 1) {
         masterTtsFiles = await makeContinuousSpeech(contentPlan.contentScript, id);
         const measuredDuration = Number(masterTtsFiles.narrationDuration || 0);
         const timingRatio = measuredDuration / Math.max(1, selectedDuration);
@@ -1142,11 +1806,15 @@ async function processJob(id) {
         const timingSettings = { ...job.settings, durationMode: "requested", targetDuration: correctionTarget };
         lockedNarrationCandidates = selected
           .filter((moment) => moment.selectedForFinalVideo)
-          .filter(narratableEvidence);
+          .filter(moment=>sceneQueue || narratableEvidence(moment));
         const lockedEvidenceDuration = availableVerifiedEvidenceDuration(lockedNarrationCandidates);
         const lockedEditableDuration = planningEvidenceCapacity(lockedNarrationCandidates, timingSettings);
         const lockedGoalCount = verifiedLiveGoalActions(lockedNarrationCandidates).length;
-        contentPlan = await writeAnalysisContentWithGemini(lockedNarrationCandidates, media, timingSettings, lockedEvidenceDuration, lockedEditableDuration, lockedNarrationCandidates.length, lockedGoalCount, matchContext);
+        const narrationTiming={narration:masterTtsFiles.narrationScript||contentPlan.contentScript,duration:measuredDuration};
+        await writeFile(join(outputRoot,id,'speech','timing-feedback.json'),JSON.stringify({
+          visualDuration:selectedDuration,measuredDuration,wordBudget:narrationWordBudget(selectedDuration,'requested',isCompleteHighlights(job.settings),narrationTiming)
+        },null,2));
+        contentPlan = await writeAnalysisContentWithGemini(lockedNarrationCandidates, media, timingSettings, lockedEvidenceDuration, lockedEditableDuration, lockedNarrationCandidates.length, lockedGoalCount, matchContext, visualReviewManifest,narrationTiming,id);
         contentPlan = sanitizeUnverifiedContentPlan(contentPlan, matchContext, job.settings);
         const timingBindingProblems = contentEvidenceBindingProblems(contentPlan.contentBeats, lockedNarrationCandidates);
         if (timingBindingProblems.length) {
@@ -1157,7 +1825,7 @@ async function processJob(id) {
       if (!(Number(masterTtsFiles.narrationDuration || 0) > 0)) {
         throw new Error("Google Cloud TTS produced no narration recording.");
       }
-      masterTtsFiles = await fitContinuousNarrationToLockedTimeline(masterTtsFiles, selectedDuration, id);
+      if (!completedVisual) masterTtsFiles = await fitContinuousNarrationToLockedTimeline(masterTtsFiles, selectedDuration, id);
       contentPlan.narrationDuration = masterTtsFiles.narrationDuration;
       selected = applyNarrationToLockedVisualTimeline(selected, contentPlan);
       frameable = selected.filter((moment) => moment.selectedForFinalVideo);
@@ -1188,7 +1856,7 @@ async function processJob(id) {
     if (Number(tracking.summary.jointFitCoverage || 0) < 0.55) job.warnings.push(job.settings.aspectRatio === "16:9"
       ? "Some gameplay scenes had weak local detector evidence; the stable native frame was preserved and unsafe annotations were suppressed."
       : "Some gameplay scenes required conservative 9:16 repair; their scenes remain in the edit while unsafe highlights and effects are suppressed.");
-    if (job.settings.logoMasking && overlayMasks.length === 0) job.warnings.push("AI did not localize a persistent watermark, so the standard top-right corner watermark mask was applied.");
+    if (job.settings.logoMasking) job.warnings.push("Broadcast scorebug/header/channel cleanup is enabled; masks are limited to shallow edge graphics and do not cover the pitch action.");
     const ttsFiles = job.settings.commentary ? masterTtsFiles : new Map();
     if (job.settings.commentary && ttsFiles.size === 0 && selected.some((moment) => moment.commentary)) {
       job.warnings.push("Google Cloud TTS produced no narration audio; the result contains silence because source audio is muted in commentary mode.");
@@ -1202,14 +1870,16 @@ async function processJob(id) {
       : null;
     const outputPath = join(destination, "final.mp4");
     job = await updateJob(job, "rendering", 84);
-    const renderResult = await renderVideoV2(job.sourceKey, outputPath, selected, job.settings, media, ttsFiles, overlayMasks, tracking, stadiumAudioPath);
+    const renderResult = completedVisual
+      ? await finishCompletedVisualNarration(completedVisual, outputPath, selected, job.settings, ttsFiles)
+      : await renderVideoV2(job.sourceKey, outputPath, selected, job.settings, media, ttsFiles, overlayMasks, tracking, stadiumAudioPath, job.matchContext || job.editPlan?.matchContext);
     job = await updateJob(job, "validating", 96, {
       editPlan: { ...job.editPlan, synchronization: renderResult.synchronization },
     });
     const renderValidation = await validateRenderedVideo(outputPath, job.settings);
     await writeTransformationAudit(destination, job, media, frameable, contentPlan.contentScript);
     let qualityReview;
-    if (process.env.GEMINI_API_KEY && blockingAiQualityReview) {
+    if (geminiEnabled && blockingAiQualityReview) {
       try {
         qualityReview = await reviewRenderedVideoWithGemini(outputPath, renderValidation.media, id, job.settings, selected, job.matchContext);
         if (!qualityReview.approved) {
@@ -1237,14 +1907,38 @@ async function processJob(id) {
     console.error(`Job ${id} failed`, error);
     const saved = await readJob(id);
     job = { ...job, ...saved, warnings: [...new Set([...(saved.warnings || []), ...(job.warnings || [])])] };
-    job.error = { code: "PROCESSING_FAILED", message: error instanceof Error ? error.message : "Processing failed", retryable: true };
-    await updateJob(job, "failed", job.progress || 0);
+    await handleProcessingInterruption(id,error);
   } finally {
     if (activeGeminiJobId === id) activeGeminiJobId = null;
   }
 }
 
-async function loadStep1SceneManifest(id, settings) {
+function normalizeDecisionSceneEvidence(moment) {
+  const normalized = normalizeDecisionOnlyScene(moment);
+  return normalized === moment ? moment : { ...normalized, semanticSignature: semanticSignature(normalized) };
+}
+
+async function loadStep1SceneManifest(id, settings, {sourceOnly=false}={}) {
+  let sourceManifest=[];
+  try {
+    const saved=JSON.parse(await readFile(join(outputRoot,id,"step1-scene-manifest.json"),"utf8"));
+    if(Number(saved?.version||0)>=1 && Array.isArray(saved?.candidates)) sourceManifest=saved.candidates;
+    // The immutable lock predates clip preparation. Restore only matching
+    // already-saved assets so retry does not falsely display 0 saved clips.
+    try {
+      const assets=JSON.parse(await readFile(join(outputRoot,id,'source-scenes','manifest.json'),'utf8'));
+      sourceManifest=sourceManifest.map(scene=>{
+        const asset=assets.scenes?.find(value=>value.id===scene.id
+          &&value.sourceStartTime===scene.startTime&&value.sourceEndTime===scene.endTime);
+        return asset?{...scene,sourceSceneAsset:asset}:scene;
+      });
+    } catch { /* A source lock may not yet have saved its separate clips. */ }
+  } catch { /* Older jobs may only have semantic checkpoints. */ }
+  // A selection-policy upgrade reconciles the original independently reviewed
+  // source list, not a later payload whose boundaries/approvals may have been
+  // cleared by a framing attempt. It still does not rediscover the source.
+  if(sourceOnly) return sourceManifest.map(normalizeDecisionSceneEvidence);
+  const requiredLockedIds=sourceManifest.filter(moment=>moment.selectionLocked===true).map(moment=>String(moment.id));
   // A later visual checkpoint is more authoritative than the original Step-1
   // probe set. In particular, a script/TTS retry must preserve the exact
   // post-tracking scene boundaries and must never run scene selection again.
@@ -1253,18 +1947,14 @@ async function loadStep1SceneManifest(id, settings) {
       const checkpoint = JSON.parse(await readFile(join(outputRoot, id, checkpointName), "utf8"));
       if (Array.isArray(checkpoint?.moments)
         && checkpoint.moments.some(moment => moment.selectionLocked === true)
-        && checkpoint.moments.some(moment => moment.selectedForFinalVideo === true)) {
-        return checkpoint.moments;
+        && checkpoint.moments.some(moment => moment.selectedForFinalVideo === true)
+        && requiredLockedIds.every(requiredId=>checkpoint.moments.some(moment=>String(moment.id)===requiredId
+          && moment.selectionLocked===true && moment.selectedForFinalVideo===true))) {
+        return checkpoint.moments.map(normalizeDecisionSceneEvidence);
       }
     } catch { /* The job may not have reached this checkpoint yet. */ }
   }
-  const manifestPath = join(outputRoot, id, "step1-scene-manifest.json");
-  try {
-    const saved = JSON.parse(await readFile(manifestPath, "utf8"));
-    if (Number(saved?.version || 0) >= 1 && Array.isArray(saved?.candidates) && saved.candidates.length) {
-      return saved.candidates;
-    }
-  } catch { /* Older jobs predate the immutable Step 1 manifest. */ }
+  if(sourceManifest.length) return sourceManifest.map(normalizeDecisionSceneEvidence);
 
   // Upgrade an older failed job from its completed semantic batch caches. The
   // post-tracking job payload may contain only the previously passing angles;
@@ -1283,12 +1973,12 @@ async function loadStep1SceneManifest(id, settings) {
     } catch { /* Ignore an interrupted cache file; other batches remain usable. */ }
   }
   if (!byId.size) return [];
-  let candidates = uniqueEvidenceCandidates(normalizeInventoryCandidateMetadata([...byId.values()]));
+  let candidates = uniqueEvidenceCandidates(normalizeInventoryCandidateMetadata([...byId.values()].map(normalizeDecisionSceneEvidence)));
   candidates = linkImmediateGoalReplays(candidates);
   candidates = limitIncidentActionViews(candidates);
   candidates = chooseInitialScenesForLock(candidates, settings);
-  candidates = lockInitialSceneSelection(candidates, { requireSemanticVerification: Boolean(process.env.GEMINI_API_KEY) });
-  await writeFile(manifestPath, JSON.stringify({ version: 1, candidates, savedAt: new Date().toISOString(), recoveredFromSemanticCache: true }, null, 2));
+  candidates = lockInitialSceneSelection(candidates, { requireSemanticVerification: geminiEnabled });
+  await writeFile(join(outputRoot,id,"step1-scene-manifest.json"), JSON.stringify({ version: 1, candidates, savedAt: new Date().toISOString(), recoveredFromSemanticCache: true }, null, 2));
   return candidates;
 }
 
@@ -1316,7 +2006,7 @@ function applyCompleteHighlightTreatment(moments, settings) {
     if (!moment.selectedForFinalVideo) return moment;
     const currentEditIndex = editIndex++;
     const isReaction = moment.eventType === "celebration" || moment.storyPhase === "reaction" || moment.role === "reaction";
-    const isReplay = moment.isReplay || moment.storyPhase === "replay";
+    const isReplay = (moment.isReplay || moment.storyPhase === "replay") && !verifiedPrimaryReplayGoal(moment);
     const isDecisiveAction = decisive.has(moment.eventType) && !isReplay && !isReaction;
     const transitionIn = currentEditIndex === 0 ? "cut" : isReplay || isDecisiveAction ? "flash" : "crossfade";
     const transitionDuration = currentEditIndex === 0 ? 0.04 : isReplay || isDecisiveAction ? 0.10 : 0.14;
@@ -1420,11 +2110,11 @@ async function finishViralReelJob(job, candidates, media, overlayMasks, tracking
     : null;
   const outputPath = join(destination, "final.mp4");
   job = await updateJob(job, "rendering", 84);
-  const renderResult = await renderVideoV2(job.sourceKey, outputPath, selected, job.settings, media, ttsFiles, overlayMasks, tracking, stadiumAudioPath);
+  const renderResult = await renderVideoV2(job.sourceKey, outputPath, selected, job.settings, media, ttsFiles, overlayMasks, tracking, stadiumAudioPath, job.matchContext || job.editPlan?.matchContext);
   job = await updateJob(job, "validating", 96, { editPlan: { ...editPlan, synchronization: renderResult.synchronization } });
   const renderValidation = await validateRenderedVideo(outputPath, job.settings);
   let qualityReview;
-  if (process.env.GEMINI_API_KEY && blockingAiQualityReview) {
+  if (geminiEnabled && blockingAiQualityReview) {
     try {
       qualityReview = await reviewRenderedVideoWithGemini(outputPath, renderValidation.media, id, job.settings, selected, job.matchContext);
       if (!qualityReview.approved) {
@@ -1445,40 +2135,68 @@ async function finishViralReelJob(job, candidates, media, overlayMasks, tracking
 }
 
 function createGeminiClient() {
+  const traffic = geminiTrafficPolicy();
   return new GoogleGenAI({
     vertexai: true,
-    apiKey: process.env.GEMINI_API_KEY,
-    httpOptions: { timeout: geminiRequestTimeoutMs },
+    project: process.env.GOOGLE_CLOUD_PROJECT,
+    location: traffic.location,
+    ...(process.env.GEMINI_API_KEY ? { apiKey: process.env.GEMINI_API_KEY } : {}),
+    httpOptions: { timeout: geminiRequestTimeoutMs, ...traffic.httpOptions },
   });
 }
-async function recordGeminiCapacityWait(label, attempt, delayMs) {
+async function recordGeminiCapacityWait(label, attempt, delayMs, reason = "capacity", providerRetryAfterMs, model, limitEvidence) {
   if (!activeGeminiJobId) return;
   try {
     const current = await readJob(activeGeminiJobId);
     if (["completed", "failed"].includes(current.stage)) return;
+    const cooldown={active:true,reason,label,model,
+      ...(limitEvidence?{limitEvidence}:{}),attempt,
+      providerRetryAfterMs:Number.isFinite(providerRetryAfterMs)?providerRetryAfterMs:null,
+      retryAt:new Date(Date.now()+delayMs).toISOString()};
     await updateJob(current, current.stage, current.progress, {
-      aiCapacityWait: {
-        active: true,
-        label,
-        attempt,
-        retryAt: new Date(Date.now() + delayMs).toISOString(),
-      },
+      aiCapacityWait: cooldown,
+      ...(model?{aiModelCooldowns:{[model]:cooldown}}:{}),
       resumeFromCandidates: Boolean(current.media && Array.isArray(current.moments) && current.moments.length),
-      progressDetail: `Gemini capacity is busy. Saved progress; retrying ${label} in ${Math.ceil(delayMs / 1000)} seconds (attempt ${attempt}).`,
+      progressDetail: `${reason === "timeout" ? "Gemini request timed out" : reason === "service" ? "Gemini service temporarily unavailable" : limitEvidence ? geminiLimitMessage(limitEvidence) : "Gemini capacity is busy"}. Saved progress; retrying ${label} in ${Math.ceil(delayMs / 1000)} seconds (attempt ${attempt}).`,
     });
   } catch (error) {
     console.warn(`Could not persist Gemini capacity wait state: ${sanitizeProviderError(String(error?.message || error))}`);
   }
 }
 
-async function clearGeminiCapacityWait() {
+async function recordGeminiRequestStarted(label, model) {
+  if (!activeGeminiJobId) return;
+  try {
+    const current = await readJob(activeGeminiJobId);
+    // A wait expiring means a request can start, not that Google approved it.
+    // Do not leave a stale "capacity busy" status while that request runs,
+    // and never clear another parallel excerpt's still-active cooldown.
+    if (!current.aiCapacityWait?.active
+      || Date.parse(current.aiCapacityWait.retryAt) > Date.now()
+      || geminiRequestGate.status(model).nextRequestAt > Date.now()
+      || current.aiCapacityWait.model && current.aiCapacityWait.model !== model) return;
+    await updateJob(current, current.stage, current.progress, {
+      aiCapacityWait: { ...current.aiCapacityWait, active: false, retryStartedAt: new Date().toISOString() },
+      progressDetail: `Gemini request in progress: ${label}. Completed observations remain saved.`,
+    });
+  } catch (error) {
+    console.warn(`Could not update Gemini request status: ${sanitizeProviderError(String(error?.message || error))}`);
+  }
+}
+
+async function clearGeminiCapacityWait(completedLabel, model) {
   if (!activeGeminiJobId) return;
   try {
     const current = await readJob(activeGeminiJobId);
     if (!current.aiCapacityWait?.active) return;
+    if (current.aiCapacityWait.model && current.aiCapacityWait.model !== model) return;
+    // A parallel excerpt succeeding does not end another excerpt's cooldown.
+    // Expired restored waits may still be cleared by the first real response.
+    if (current.aiCapacityWait.label !== completedLabel
+      && Date.parse(current.aiCapacityWait.retryAt) > Date.now()) return;
     await updateJob(current, current.stage, current.progress, {
       aiCapacityWait: { ...current.aiCapacityWait, active: false, resumedAt: new Date().toISOString() },
-      progressDetail: `Gemini capacity restored. Continuing ${current.aiCapacityWait.label}.`,
+      progressDetail: `Gemini response received. Continuing ${completedLabel || current.aiCapacityWait.label}.`,
     });
   } catch (error) {
     console.warn(`Could not clear Gemini capacity wait state: ${sanitizeProviderError(String(error?.message || error))}`);
@@ -1486,47 +2204,160 @@ async function clearGeminiCapacityWait() {
 }
 
 async function generateGeminiContent(ai, request, label, attempts = 3) {
+  const performanceJobId=activeGeminiJobId;
+  const originalRequest=request;
+  const eligibleModels=geminiFailoverModels(request.model,process.env,label);
+  for(const candidateModel of eligibleModels) {
+  const cooldownRestoreKey = `${activeGeminiJobId}:${candidateModel}`;
+  if (activeGeminiJobId && !restoredCapacityCooldownJobs.has(cooldownRestoreKey)) {
+    restoredCapacityCooldownJobs.add(cooldownRestoreKey);
+    const saved = await readJob(activeGeminiJobId);
+    // A persisted Pro cooldown must not be restored into a Flash lane.
+    // Legacy waits have no model attribution and cannot safely be assigned
+    // to every model. The provider will return a new attributed wait if needed.
+    const savedCooldown=saved.aiModelCooldowns?.[candidateModel]||saved.aiCapacityWait;
+    if (savedCooldown?.active && savedCooldown.model === candidateModel) {
+      const remaining = restoredGeminiRetryDelay(savedCooldown, geminiQuotaMaximumDelayMs);
+      if (remaining > 0) {
+        geminiRequestGate.defer(remaining, candidateModel);
+        if (Date.parse(savedCooldown.retryAt) - Date.now() > remaining + 1000) {
+          await recordGeminiCapacityWait(savedCooldown.label, savedCooldown.attempt,
+            remaining, savedCooldown.reason, savedCooldown.providerRetryAfterMs, candidateModel, savedCooldown.limitEvidence);
+        }
+      }
+    }
+  }
+  }
   let transientAttempt = 0;
   let quotaAttempt = 0;
+  const timeoutCounts = new Map();
   for (;;) {
-    let timer;
+    const actualModel=chooseGeminiFailoverModel(eligibleModels,model=>geminiRequestGate.status(model),
+      Date.now(),new Set([...unavailableGeminiFailoverModels].filter(model=>model!==originalRequest.model)));
+    if(actualModel!==request.model) {
+      const previousModel=request.model;
+      request={...originalRequest,model:actualModel};
+      // Clear ONLY this logical request's old wait, not a parallel scene's wait.
+      // Other scenes still respect the rejected model's shared cooldown.
+      if(performanceJobId) {
+        const current=await readJob(performanceJobId);
+        await updateJob(current,current.stage,current.progress,{
+          ...(current.aiCapacityWait?.active && current.aiCapacityWait.label===label
+            && current.aiCapacityWait.model===previousModel
+            ? {aiCapacityWait:{...current.aiCapacityWait,active:false,switchedAt:new Date().toISOString()}}:{}),
+          aiModelSwitch:{label,from:previousModel,to:actualModel,at:new Date().toISOString()},
+          progressDetail:`Continuing ${label} with ${actualModel}; selected scenes and quality checks are unchanged.`});
+      }
+      console.info(`Gemini model switch: ${JSON.stringify({label,from:previousModel,to:actualModel})}`);
+    }
+    const requestStartedAt = Date.now();
+    let providerStartedAt;
+    const deadlineMs = geminiRetryDeadline(Math.max(geminiRequestTimeoutMs, Number(request.config?.httpOptions?.timeout) || 0), timeoutCounts.get(request.model)||0);
     try {
-      const response = await geminiRequestGate.schedule(() => Promise.race([
-        ai.models.generateContent(request),
-        new Promise((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error(`504 deadline exceeded: ${label} exceeded its ${Math.round(geminiRequestTimeoutMs / 1000)}-second hard deadline.`)),
-            geminiRequestTimeoutMs,
-          );
-        }),
-      ]));
-      if (quotaAttempt || transientAttempt) await clearGeminiCapacityWait();
+      const schedule=geminiRequestGate.scheduleAvailable && eligibleModels.length>1
+        && geminiRequestGate.status(request.model).nextRequestAt<=Date.now()
+        ? geminiRequestGate.scheduleAvailable : geminiRequestGate.schedule;
+      const response = await schedule(() => withGeminiDeadline(async signal => {
+        providerStartedAt=Date.now();
+        await recordGeminiRequestStarted(label, request.model);
+        return ai.models.generateContent({ ...request, config: { ...geminiGenerationConfig(request.model,request.config),
+          abortSignal: request.config?.abortSignal ? AbortSignal.any([signal, request.config.abortSignal]) : signal,
+          // The durable scheduler owns retries and checkpoints. Nested SDK
+          // retries must not outlive its hard deadline or hide provider errors.
+          httpOptions: { ...request.config?.httpOptions, timeout: deadlineMs, retryOptions: { attempts: 1 } } } });
+        },
+        deadlineMs, label), request.model);
+      const traffic = geminiTrafficResult(response, geminiTrafficPolicy());
+      workflowPerformance.request(performanceJobId,{label,model:request.model,status:'success',
+        providerStartedAt,
+        gateWaitMs:(providerStartedAt??Date.now())-requestStartedAt,
+        providerMs:providerStartedAt?Date.now()-providerStartedAt:0,usage:response.usageMetadata});
+      if (traffic.requestedTier === "priority") {
+        console.info(`Gemini traffic: ${JSON.stringify({ label, ...traffic,
+          elapsedSeconds: (Date.now() - requestStartedAt) / 1000,
+          promptTokens: response.usageMetadata?.promptTokenCount,
+          cachedTokens: response.usageMetadata?.cachedContentTokenCount,
+          outputTokens: response.usageMetadata?.candidatesTokenCount,
+          thinkingTokens: response.usageMetadata?.thoughtsTokenCount })}`);
+      }
+      // A restored worker can succeed on its first request while the saved
+      // job still has an active wait from the previous worker.
+      await clearGeminiCapacityWait(label, request.model);
+      recordGeminiGeneration(response,originalRequest.model,request.model);
       return response;
     } catch (error) {
+      if(error?.code==='GEMINI_MODEL_COOLDOWN')continue;
+      // Explicit cancellation belongs to the caller. A provider CANCELLED
+      // response without an aborted caller signal is a transport interruption:
+      // retry this request, not the entire scene-selection/tracking pipeline.
+      if (request.config?.abortSignal?.aborted) throw error;
       const raw = String(error?.message || error);
-      const quotaLimited = /429|resource_exhausted|quota|rate limit/i.test(raw);
+      const quotaLimited = geminiResourceExhausted(error);
+      workflowPerformance.request(performanceJobId,{label,model:request.model,
+        providerStartedAt,limitEvidence:quotaLimited?geminiLimitEvidence(error):undefined,
+        status:quotaLimited?'capacity':geminiServiceFailure(error)?.deadline?'timeout':'error',
+        gateWaitMs:(providerStartedAt??Date.now())-requestStartedAt,
+        providerMs:providerStartedAt?Date.now()-providerStartedAt:0});
       if (quotaLimited) {
         quotaAttempt += 1;
+        const retryAfterMs = retryAfterMilliseconds(error);
         const retryDelayMs = quotaRetryDelay(quotaAttempt, {
           baseDelayMs: geminiQuotaBaseDelayMs,
           maximumDelayMs: geminiQuotaMaximumDelayMs,
-          retryAfterMs: retryAfterMilliseconds(error),
+          retryAfterMs,
         });
-        await recordGeminiCapacityWait(label, quotaAttempt, retryDelayMs);
-        console.warn(`${label} received a temporary quota/rate-limit response; saved progress and retrying attempt ${quotaAttempt} after ${Math.round(retryDelayMs / 1000)} seconds.`);
-        await new Promise(resolvePromise => setTimeout(resolvePromise, retryDelayMs));
+        // Share the provider-requested cooldown with queued scenes on THIS model.
+        // Otherwise other scene workers keep hitting the same busy endpoint.
+        const cooldownMs=geminiFailoverCooldown(retryDelayMs,eligibleModels.length>1);
+        geminiRequestGate.defer(cooldownMs, request.model);
+        const limitEvidence=geminiLimitEvidence(error);
+        await recordGeminiCapacityWait(label, quotaAttempt, cooldownMs, "capacity", retryAfterMs, request.model, limitEvidence);
+        console.warn(`Gemini resource exhaustion: ${JSON.stringify({label,model:request.model,...limitEvidence})}`);
+        console.warn(`${label} received a temporary quota/rate-limit response; model cooldown ${Math.round(cooldownMs / 1000)} seconds. Checking eligible backups (attempt ${quotaAttempt}).`);
+        // The per-model gate owns waiting. The next loop can immediately use a
+        // healthy qualified backup instead of sleeping on this rejected model.
         continue;
       }
-      const deadline = /504|deadline[_ ]exceeded|deadline expired/i.test(raw);
-      const transient = deadline || /408|502|503|temporarily unavailable|internal error|socket hang up|ECONNRESET|ETIMEDOUT|fetch failed/i.test(raw);
-      if (!transient) throw error;
+      const failure=geminiServiceFailure(error);
+      const deadline = failure?.deadline===true
+        || (failure?.status===499 && Date.now()-requestStartedAt>=deadlineMs*.9);
+      if (deadline) timeoutCounts.set(request.model,(timeoutCounts.get(request.model)||0)+1);
+      const transient = Boolean(failure);
+      if (!transient) {
+        const status=Number(error?.status||error?.code||error?.response?.status);
+        if(request.model!==originalRequest.model && [403,404].includes(status)) {
+          // An optional model may not be available to this project. Do not keep
+          // probing it, and do not disguise a primary authentication failure.
+          unavailableGeminiFailoverModels.add(request.model);
+          continue;
+        }
+        const invalid=geminiInvalidRequestDetails(error,request,label);
+        if(invalid) {
+          console.error(`Gemini request validation: ${JSON.stringify(invalid)}`);
+          if(activeGeminiJobId) {
+            const diagnosticsDirectory=join(outputRoot,activeGeminiJobId,'request-diagnostics');
+            try {
+              await mkdir(diagnosticsDirectory,{recursive:true});
+              await writeFile(join(diagnosticsDirectory,`${Date.now()}-${randomUUID()}.json`),JSON.stringify(invalid,null,2));
+            } catch(diagnosticError) {console.warn(`Could not save request diagnostics: ${diagnosticError.code||'write failure'}`);}
+          }
+          const described=new Error(`Gemini rejected ${label} for model ${invalid.model} (400 INVALID_ARGUMENT). Request schema ${invalid.schemaHash?.slice(0,12)||'none'}; ${invalid.media.length} media part(s). Saved request metadata contains no credentials or footage.`);
+          described.code='GEMINI_INVALID_REQUEST';described.status=400;described.cause=error;throw described;
+        }
+        throw error;
+      }
       transientAttempt += 1;
-      const retryDelayMs = Math.min(60_000, 5_000 * (2 ** Math.min(4, transientAttempt - 1)));
-      await recordGeminiCapacityWait(label, transientAttempt, retryDelayMs);
+      const retryAfterMs = retryAfterMilliseconds(error);
+      const retryDelayMs = serviceRetryDelay(transientAttempt,{retryAfterMs});
+      const cooldownMs=geminiFailoverCooldown(retryDelayMs,eligibleModels.length>1);
+      geminiRequestGate.defer(cooldownMs, request.model);
+      await recordGeminiCapacityWait(label, transientAttempt, cooldownMs, deadline ? "timeout" : "service", retryAfterMs, request.model);
       console.warn(`${label} received a temporary timeout/service response on attempt ${transientAttempt}; saved progress and retrying after ${Math.round(retryDelayMs / 1000)} seconds.`);
-      await new Promise(resolvePromise => setTimeout(resolvePromise, retryDelayMs));
-    } finally {
-      clearTimeout(timer);
+      console.warn(`Gemini failed request: ${JSON.stringify({label,status:Number(error?.status || error?.code || raw.match(/\b(408|500|502|503|504)\b/)?.[1]) || null,
+        transportCode:String(error?.cause?.code || "").slice(0,64),
+        reason:deadline ? "deadline" : "service",elapsedSeconds:(Date.now()-requestStartedAt)/1000,deadlineSeconds:deadlineMs/1000})}`);
+      // Healthy backup calls have no artificial delay; if all are busy, the
+      // selected model gate waits until the earliest provider cooldown ends.
     }
   }
 }
@@ -1537,7 +2368,15 @@ async function generateGeminiJson(ai, request, label, attempts = 3) {
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const response = await generateGeminiContent(ai, nextRequest, `${label} JSON attempt ${attempt}`, 3);
     try {
-      return { response, parsed: JSON.parse(String(response.text || "{}")) };
+      if (geminiOutputTruncated(response) || !String(response.text || "").trim()) {
+        throw new Error("Gemini stopped before completing its JSON response.");
+      }
+      const parsed=parseGeminiJson(response.text);
+      // Persist transport provenance with raw evidence caches. Requested model
+      // is a cache-policy key; it is NOT a claim about who observed the pixels.
+      if(parsed && typeof parsed==='object' && !Array.isArray(parsed))
+        parsed.generationProvenance=geminiResponseProvenance(response);
+      return { response, parsed, model:geminiResponseProvenance(response)?.actualModel||request.model };
     } catch (error) {
       lastError = error;
       if (attempt >= attempts) break;
@@ -1552,7 +2391,7 @@ async function generateGeminiJson(ai, request, label, attempts = 3) {
         contents: [...request.contents, {
           text: "Your previous response was malformed or truncated JSON and could not be parsed. Rewatch the supplied evidence and return the complete required JSON object again. Output JSON only, close every array and object, include every required candidate exactly once, and do not use markdown fences.",
         }],
-        config: { ...request.config, responseMimeType: "application/json", temperature: 0 },
+        config: geminiJsonRetryConfig(nextRequest.config, response),
       };
     }
   }
@@ -1593,6 +2432,7 @@ function invalidateConflictingMatchContext(context, sourceName, verifiedGoalCoun
 }
 
 async function researchMatchContextWithGemini(sourceName, recapBrief, candidates) {
+  const researchModel=geminiWorkloadModel('research');
   const verifiedGoals = verifiedLiveGoalActions(candidates);
   if (String(process.env.MATCH_RESEARCH_ENABLED || "true").toLowerCase() === "false" || verifiedGoals.length === 0) {
     return { identityResearchVersion: 5, status: "unverified", confidence: 0, reason: verifiedGoals.length ? "match_research_disabled" : "no_verified_live_goals", sources: [] };
@@ -1620,9 +2460,9 @@ async function researchMatchContextWithGemini(sourceName, recapBrief, candidates
       "Each returned report page must explicitly name both teams, the final score, and every chronological scorer. If two such pages cannot be found, return matchFound false.",
     ].join(" ");
     const response = await generateGeminiContent(createGeminiClient(), {
-      model: process.env.GEMINI_MODEL,
+      model: researchModel,
       contents: [{ text: prompt + correction }],
-      config: { tools: [{ googleSearch: {} }], temperature: 0.05 },
+      config: { tools: [{ googleSearch: {} }], temperature: 0.05,thinkingConfig:{thinkingLevel:'LOW'} },
     }, `Gemini grounded match research attempt ${attempt}`, 2);
     const raw = parseGroundedJson(response.text);
     const groundingSources = extractGroundingSources(response);
@@ -1641,11 +2481,11 @@ async function researchMatchContextWithGemini(sourceName, recapBrief, candidates
       ...(Array.isArray(raw?.sources) ? raw.sources.map((source) => String(source?.uri || "")).filter(Boolean) : []),
       ...groundingSources.map((source) => source.uri),
     ])].slice(-12);
-    best = invalidateConflictingMatchContext(
+    best = {...invalidateConflictingMatchContext(
       normalizeMatchContext(raw, sources, verifiedGoals.length),
       sourceName,
       verifiedGoals.length,
-    );
+    ),researchModel};
     if (best.status === "verified") return best;
   }
   return best;
@@ -1655,16 +2495,11 @@ async function ensureShotBoundaries(sourcePath, id) {
   const outputPath = join(outputRoot, id, "shots.json");
   const sourceInfo = await stat(sourcePath, { bigint: true });
   try {
-    const saved = JSON.parse(await readFile(outputPath, "utf8"));
-    const signature = saved?.signature?.source;
-    if (Array.isArray(saved?.shots) && saved.shots.length > 0
-      && Array.isArray(signature)
-      && resolve(String(signature[0])) === resolve(sourcePath)
-      && BigInt(signature[1]) === sourceInfo.size
-      && BigInt(signature[2]) === sourceInfo.mtimeNs) return outputPath;
+    const saved = parseSourceShotCheckpoint(await readFile(outputPath, "utf8"));
+    if (sourceShotCheckpointMatches(saved,sourcePath,sourceInfo)) return outputPath;
   } catch { /* Missing, stale, or interrupted shot inventory. */ }
   await run(trackingPythonPath, [join(projectRoot, "local-processor", "shot-boundaries.py"),
-    "--source", sourcePath, "--output", outputPath]);
+    "--source", sourcePath, "--output", outputPath, "--ffmpeg", ffmpegPath]);
   return outputPath;
 }
 
@@ -1708,158 +2543,176 @@ function normalizeInventoryPassages(items, media, excerpt, excerptShots) {
   return normalizeMoments(constrained, media.duration, excerpt.startTime);
 }
 function buildPassageInventoryPrompt(targetDuration, excerpt, excerptNumber, excerptCount, shots, soccerNetAnchors = []) {
-  const requestedCoverage = Math.ceil(targetDuration * 1.65 / Math.max(1, excerptCount));
+  const requestedCoverage = Math.ceil(excerpt.requestedSeconds ?? targetDuration * 1.65 / Math.max(1, excerptCount));
   return [
-    `You are cataloguing excerpt ${excerptNumber} of ${excerptCount} for a professional football recap. Watch the complete excerpt once, then classify the supplied PySceneDetect broadcast-shot ledger from beginning to end.`,
+    `You are the INITIAL AND ONLY source selector for excerpt ${excerptNumber} of ${excerptCount} of a professional full-match football recap. Watch the entire excerpt from beginning to end and decide complete usable source passages in THIS response. There will be no later discovery, scoreboard sampling, missing-goal search or source-review reel. watchedThroughSeconds must record the excerpt-local end actually watched.`,
     `All response times are seconds RELATIVE to this ${excerpt.duration.toFixed(3)}-second excerpt. Every returned moment must declare shotIds as an ordered array containing one shotId or several consecutive supplied shotIds. A complete football action may cross rapid broadcast cuts, but it must remain inside the union of those consecutive shots and must never skip a shot.`,
-    `Build an evidence inventory, not the final edit. Return every useful complete action passage visible in the ledger, using its natural duration from setup through visible consequence: goals, disallowed goals, shots on target, shots off target, saves, big chances, blocks, clearances, set pieces, tactical buildup, transitions, pressing sequences, reactions, and genuine replay angles. Do not return highlights only. Aim for at least ${requestedCoverage} unique useful seconds in this excerpt when visible so later tracking losses cannot make the requested recap too short.`,
-    "A long shot may yield multiple non-overlapping passages, but split only after an action resolves or possession clearly resets. Join consecutive short shotIds when they visibly form one continuous live action; camera cuts do not end an attack. A short shot may also be a linked reaction or replay support passage of at least two seconds. Do not duplicate or overlap intervals.",
-    "For each goal incident, use one shared storyId for the live action, immediate reaction, and each real later replay shot. Label replay only when it occupies a different source interval and visibly changes camera viewpoint. The live goal must include the scorer's final contact, ball flight, goalkeeper or goalmouth, and visible outcome.",
+    `Return every useful DISTINCT complete action visible: all goals, disallowed goals, shots on target, misses, saves, big chances, blocks, set pieces and useful attacking combinations. Use natural NORMAL-SPEED durations from initiating player WITH BALL through pass/shot and resolved result. This section's SOFT share is ${requestedCoverage} seconds toward the combined recap; stronger sections may supply more and quiet sections less. Do not stop at an arbitrary number of moments. No padding, 5-second cutoff, repeated goal angles or inferred goals from score text.`,
+    "A long shot may yield multiple non-overlapping passages, but split only after an action resolves or possession clearly resets. Individual action passages usually last 5-20 seconds and may last up to 30; never force a five-second cut through an unfinished attack. Join consecutive short shotIds only when they visibly continue the SAME action, never its repeated replay. Do not duplicate or overlap intervals.",
+    "Choose ONE clearest COMPLETE angle per incident, preferably the first stable live wide view. Use a replay as the primary only if it actually shows the whole action more clearly. Never return both as separate incidents. Keep the initiating pass, scorer's final contact, ball flight, keeper/goalmouth and visible result before cutting. Exclude complex close-up replays, ads, idle players, long VAR and reaction-only 'goals'. An optional immediate celebration is a separate 2-3 second support clip sharing the action's storyId. Step 2 will track these exact clips separately, not remove or replace them.",
+    "Decide portrait suitability NOW, in this first observation. In sourceObservation.framingNotes record the starting player WITH BALL, movement/receiver handoff, and the keeper/goalmouth final focus; note any hidden decisive action, violent camera cut or difficult close-up. Give portraitReadability from 0 to 100 based on directly visible complete action and how clearly a 9:16 camera can follow it. Choose the clearest complete view before locking, not an inferior first angle that would need later repair. Do not invent pixel tracks in Step 1 or promise an unobserved crop. Step 2 makes ONE initial video camera plan; no repair/reselection loop exists.",
     "Use normal_play with storyPhase build_up for useful attacks or tactical context that are not special events. Correctly labelled buildup is valuable evidence and must not be rejected merely because it is not a shot or goal.",
     "SoccerNet CALF proposals are temporal search anchors, not final truth. Inspect the video around each proposal, correct an incorrect class label, and include the complete action across consecutive shotIds. Never accept a proposal without visible evidence.",
     `SoccerNet proposals in this excerpt: ${JSON.stringify(soccerNetAnchors)}`,
-    footballObservationContract(),
-    "Return JSON only as {moments:[...],overlayMasks:[],shotAudit:[{shotId,status,usefulSeconds,reason}]}. shotAudit must contain exactly one entry for every supplied shotId, including unusable shots, so no part of the excerpt silently disappears.",
-    "Every moment requires shotIds, startTime, endTime, eventType, storyId, storyPhase, keepDecision, actionComplete, completionReason, keyActionTimes, trackingBrief, importanceScore, hookScore, flowScore, visualClarity, excitementScore, narrativeCompleteness, description, rejectReason, confidence, ballVisible, mainPlayerVisible, isReplay, commentary, analysisPurpose, onScreenText, and focusX.",
+    "For each action, sourceObservation must describe the visibly observed setup, continuation and result in basic English; outcome MUST equal eventType. Set initiatorAndBallVisible, continuationVisible and resultVisible truthfully. A celebration only has a visible result and must not claim a kick or ball flight. Supply actual excerpt-local originTime, contactTime, flightStartTime, payoffStartTime and payoffEndTime in trackingBrief, never default percentages. For a goal, contactTime is the SCORER'S final touch; flightStartTime may be an earlier assist/pass. The goalmouth/payoff phase may overlap an incoming cross or rebound before that final touch; payoffEndTime must show the resolved result after the final contact. Preserve all these moments in one complete scene. Do not guess player names.",
+    "trackingBrief describes semantic action phases, NOT final portrait coordinates. Optional payoffEvidence is only a genuinely seen, time-bounded source result rectangle. Return null when uncertain; Step 2 observes the individual scene video to calculate and verify its own smooth position keyframes.",
+    "Return only the supplied JSON schema, with moments, uncertainties and watchedThroughSeconds. Report source uncertainties honestly rather than inventing action, repeating reviews or writing the recap voiceover now.",
     `Broadcast-shot ledger: ${JSON.stringify(shots.map(({ shotId, startTime, endTime, duration }) => ({ shotId, startTime, endTime, duration })))}`,
   ].join(" ");
 }
 
 async function analyzePassageInventoryWithGemini(sourcePath, media, targetDuration, id) {
-  const model = process.env.GEMINI_MODEL;
-  if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is missing.");
-  if (!process.env.GOOGLE_CLOUD_PROJECT || !process.env.GOOGLE_CLOUD_LOCATION) throw new Error("GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION are required for Gemini.");
-  if (!model) throw new Error("GEMINI_MODEL is required; no fallback model is configured.");
-  const inventoryPath = join(outputRoot, id, "passage-inventory.json");
+  const model=geminiWorkloadModel('discovery'),discoveryFps=initialDiscoveryFps();
+  if(!geminiEnabled||!model) throw new Error("Gemini is not configured for source selection.");
+  const fingerprint=await sourceContentFingerprint(sourcePath);
+  // A whole maximum-length action crossing a section edge must be visible in
+  // at least one initial request; otherwise two half-actions require a search.
+  const overlap=Math.max(analysisChunkOverlap,Math.min(MAX_SCENE_SECONDS,analysisChunkSeconds/3));
+  const sectionPlan=step1DiscoveryPlan(media.duration,targetDuration,analysisChunkSeconds,overlap);
+  const inventoryPath=join(outputRoot,id,'passage-inventory.json');
+  const inventoryKey=stableSignature({version:passageInventoryVersion,contract:INITIAL_SECTION_VERSION,
+    fingerprint,model,sectionPlan,discoveryFps,analysisHeight});
   try {
-    const saved = JSON.parse(await readFile(inventoryPath, "utf8"));
-    if (Number(saved?.version || 0) >= passageInventoryVersion && Array.isArray(saved?.candidates) && saved.candidates.length > 0) {
-      return {
-        moments: saved.candidates,
-        overlayMasks: Array.isArray(saved.overlayMasks) ? saved.overlayMasks : [],
-        warnings: ["Reused the saved whole-video passage inventory for this job."],
-        passageInventorySummary: {
-          shotCount: Array.isArray(saved.shots) ? saved.shots.length : 0,
-          candidateCount: saved.candidates.length,
-          uniqueCandidateSeconds: Number(saved.uniqueCandidateSeconds || 0),
-          soccerNetAnchorCount: Number(saved.soccerNet?.anchorCount || 0),
-        },
-      };
-    }
-  } catch { /* A new upload has no completed inventory yet. */ }
-  const inventory = await loadBroadcastShotInventory(id, media);
-  const soccerNet = await loadSoccerNetActionAnchors(sourcePath, id);
-  const proxies = await createAnalysisProxies(sourcePath, media, id);
-  const ai = createGeminiClient();
-  const discovered = [];
-  const masks = [];
-  const audits = [];
-  const warnings = [];
-  const excerptCacheDirectory = join(outputRoot, id, "inventory-excerpts");
-  await mkdir(excerptCacheDirectory, { recursive: true });
-  for (const [index, excerpt] of proxies.entries()) {
-    const excerptShots = inventoryForExcerpt(inventory, excerpt);
-    const excerptAnchors = (soccerNet.anchors || []).filter((anchor) => anchor.timeSeconds >= excerpt.startTime && anchor.timeSeconds <= excerpt.startTime + excerpt.duration)
-      .map((anchor) => ({ ...anchor, timeSeconds: Number((anchor.timeSeconds - excerpt.startTime).toFixed(3)) }));
-    const excerptKey = stableSignature({
-      version: passageInventoryExcerptVersion,
-      model,
-      analysisFps,
-      analysisHeight,
-      targetDuration,
-      startTime: excerpt.startTime,
-      duration: excerpt.duration,
-      shots: excerptShots.map(({ shotId, startTime, endTime }) => ({ shotId, startTime, endTime })),
-      anchors: excerptAnchors,
-    });
-    const excerptCachePath = join(excerptCacheDirectory, `excerpt-${String(index + 1).padStart(3, "0")}.json`);
-    let cachedExcerpt;
-    try {
-      const saved = JSON.parse(await readFile(excerptCachePath, "utf8"));
-      if (saved?.key === excerptKey && Array.isArray(saved?.moments)) cachedExcerpt = saved;
-    } catch { /* This excerpt has not completed successfully yet. */ }
-    if (cachedExcerpt) {
-      discovered.push(...cachedExcerpt.moments);
-      masks.push(...(cachedExcerpt.overlayMasks || []));
-      audits.push(...(cachedExcerpt.shotAudit || []));
-      const current = await readJob(id);
-      await updateJob(current, "analyzing", 14 + Math.round((index + 1) / proxies.length * 14), {
-        progressDetail: `Reused completed broadcast excerpt ${index + 1} of ${proxies.length}; ${discovered.length} useful passages restored.`,
-      });
-      continue;
-    }
-    const proxy = await readFile(excerpt.path);
-    const request = {
-      model,
-      contents: [
-        { inlineData: { data: proxy.toString("base64"), mimeType: "video/mp4" }, videoMetadata: { fps: analysisFps } },
-        { text: buildPassageInventoryPrompt(targetDuration, excerpt, index + 1, proxies.length, excerptShots, excerptAnchors) },
-      ],
-      config: { responseMimeType: "application/json", temperature: 0.08 },
-    };
-    let generated = await generateGeminiJson(ai, request, `Gemini broadcast inventory excerpt ${index + 1}`, 3);
-    let parsed = generated.parsed;
-    let normalized = normalizeInventoryPassages(parsed.moments, media, excerpt, excerptShots);
-    let auditedIds = new Set((Array.isArray(parsed.shotAudit) ? parsed.shotAudit : []).map((item) => String(item?.shotId || "")));
-    let missingAudit = excerptShots.filter((shot) => !auditedIds.has(shot.shotId));
-    if (!normalized.length || missingAudit.length) {
-      generated = await generateGeminiJson(ai, {
-        ...request,
-        contents: [...request.contents, { text: `Correct the inventory. ${normalized.length ? "Keep all valid moments." : "Return useful passages instead of an empty timeline."} Add one shotAudit entry for each missing shotId: ${missingAudit.map((shot) => shot.shotId).join(", ") || "none"}. Preserve strict shot boundaries and return the complete JSON again.` }],
-        config: { responseMimeType: "application/json", temperature: 0.03 },
-      }, `Gemini broadcast inventory correction excerpt ${index + 1}`, 3);
-      parsed = generated.parsed;
-      normalized = normalizeInventoryPassages(parsed.moments, media, excerpt, excerptShots);
-      auditedIds = new Set((Array.isArray(parsed.shotAudit) ? parsed.shotAudit : []).map((item) => String(item?.shotId || "")));
-      missingAudit = excerptShots.filter((shot) => !auditedIds.has(shot.shotId));
-    }
-    const normalizedMasks = normalizeMasks(parsed.overlayMasks);
-    const normalizedAudit = Array.isArray(parsed.shotAudit) ? parsed.shotAudit.map((item) => ({ ...item, excerpt: index + 1 })) : [];
-    if (!normalized.length) {
-      const auditedUsefulSeconds = normalizedAudit.reduce((sum, item) => sum + Math.max(0, Number(item?.usefulSeconds) || 0), 0);
-      if (missingAudit.length || auditedUsefulSeconds > 0.05) {
-        throw new Error(`The broadcast-shot inventory for excerpt ${index + 1} was internally inconsistent: it declared useful or unaudited shots but returned no complete passages.`);
+    const saved=JSON.parse(await readFile(inventoryPath,'utf8'));
+    if(saved.key===inventoryKey&&Array.isArray(saved.summary?.scoringObservations)
+      &&Array.isArray(saved.candidates)&&saved.candidates.length
+      &&saved.candidates.every(scene=>scene.sourceSelectionEvidence?.version===INITIAL_SECTION_VERSION))
+      return {moments:saved.candidates,overlayMasks:saved.overlayMasks||[],warnings:saved.warnings||[],
+        passageInventorySummary:saved.summary};
+  } catch { /* A fresh upload has no one-pass source selection yet. */ }
+  const inventory=await loadBroadcastShotInventory(id,media);
+  const soccerNet=await loadSoccerNetActionAnchors(sourcePath,id);
+  const proxies=await createAnalysisProxies(sourcePath,media,id,analysisChunkSeconds,`initial-v${INITIAL_SECTION_VERSION}`,overlap,discoveryFps);
+  const ai=createGeminiClient(),sourceJob=await readJob(id);
+  const directory=join(outputRoot,id,'inventory-excerpts');
+  await mkdir(directory,{recursive:true});
+  const sections=proxies.map((excerpt,index)=>({...excerpt,
+    requestedSeconds:sectionPlan.sections[index]?.requestedSeconds||0,
+    shots:inventoryForExcerpt(inventory,excerpt)}));
+  const currentWorkload={model,fps:discoveryFps,height:analysisHeight};
+  const inventoryKeyForWorkload=profile=>stableSignature({version:passageInventoryVersion,contract:INITIAL_SECTION_VERSION,
+    fingerprint,model:profile.model,sectionPlan,discoveryFps:profile.fps,analysisHeight:profile.height});
+  const sectionInputKey=section=>stableSignature({version:passageInventoryExcerptVersion,contract:INITIAL_SECTION_VERSION,
+    fingerprint,sectionPlan,startTime:section.startTime,duration:section.duration,
+    shots:section.shots.map(({shotId,startTime,endTime})=>({shotId,startTime,endTime}))});
+  const sectionKey=(section,profile=currentWorkload)=>stableSignature({inventoryKey:inventoryKeyForWorkload(profile),startTime:section.startTime,duration:section.duration,
+    shots:section.shots.map(({shotId,startTime,endTime})=>({shotId,startTime,endTime}))});
+  const cachePath=index=>join(directory,`excerpt-${String(index+1).padStart(3,'0')}.json`);
+  const results=await observeInitialSections({
+    sections,
+    readCached:async(section,index)=>{
+      try {
+        const saved=JSON.parse(await readFile(cachePath(index),'utf8'));
+        // Older checkpoints have an opaque key but the selection report records
+        // model provenance. It is a hint only: the full old key must still match.
+        // The base/framing model is also an authenticated-key candidate for
+        // legacy EMPTY sections, which have no accepted scene provenance.
+        let legacyModels=[geminiWorkloadModel('framing')].filter(Boolean);
+        if(saved.inputKey===undefined) try {
+          const selection=JSON.parse(await readFile(join(directory,`selection-${String(index+1).padStart(3,'0')}.json`),'utf8'));
+          legacyModels=[...new Set([...legacyModels,...(selection.accepted||[]).map(scene=>scene.sourceSelectionEvidence?.model).filter(Boolean)])];
+        } catch { /* No authenticated legacy profile; do not guess. */ }
+        const restored=restoreInitialSectionResponse(saved,{version:passageInventoryExcerptVersion,
+          inputKey:sectionInputKey(section),keyForWorkload:profile=>sectionKey(section,profile),currentWorkload,legacyModels});
+        if(restored) {
+          section.observedWorkload=restored.workload;
+          if(saved.inputKey===undefined) await writeFile(cachePath(index),JSON.stringify({...saved,
+            inputKey:sectionInputKey(section),workload:restored.workload}));
+          return restored.rawDraft;
+        }
+      } catch { /* Not completed: only this initial request will be sent. */ }
+    },
+    observe:async(section,index)=>{
+      await updateJob(await readJob(id),'analyzing',14+Math.round(index/sections.length*14),{
+        progressDetail:`Gemini is watching initial source section ${index+1}/${sections.length} (${section.startTime.toFixed(1)}–${(section.startTime+section.duration).toFixed(1)}s). Completed sections are saved; no repeated source reviews.`});
+      const anchors=(soccerNet.anchors||[]).filter(anchor=>anchor.timeSeconds>=section.startTime
+        &&anchor.timeSeconds<=section.startTime+section.duration)
+        .map(anchor=>({...anchor,timeSeconds:anchor.timeSeconds-section.startTime}));
+      const request={model,contents:[
+        footballVideoPart((await readFile(section.path)).toString('base64'),discoveryFps),
+        {text:buildPassageInventoryPrompt(targetDuration,section,index+1,sections.length,section.shots,anchors)
+          +` Source filename is context only: ${JSON.stringify(String(sourceJob.sourceName||'').slice(0,240))}. Verify the actual video, not model knowledge or that filename.`}],
+        config:{responseMimeType:'application/json',responseJsonSchema:INITIAL_SECTION_SCHEMA,
+          temperature:.05,maxOutputTokens:16384,
+          ...(/^gemini-3/.test(model)?{thinkingConfig:{thinkingLevel:'LOW'}}:{}),
+          httpOptions:{timeout:geminiVideoDeadline(geminiRequestTimeoutMs,section.duration)}}};
+      // Provider retries recover 429/5xx/timeouts using this SAME request.
+      // No JSON regeneration, shot-audit correction or rediscovery request.
+      return (await generateGeminiJson(ai,request,`Gemini initial source section ${index+1}`,1)).parsed;
+    },
+    save:async(section,index,rawDraft)=>{
+      section.observedWorkload=currentWorkload;
+      await writeFile(cachePath(index),JSON.stringify({
+        version:passageInventoryExcerptVersion,key:sectionKey(section),inputKey:sectionInputKey(section),
+        workload:currentWorkload,rawDraft,completedAt:new Date().toISOString()}));
+    },
+    consume:async(draft,section,index)=>{
+      if(!Array.isArray(draft?.moments)||!Array.isArray(draft.uncertainties)
+        ||!Number.isFinite(draft.watchedThroughSeconds)||draft.watchedThroughSeconds<section.duration-.5
+        ||draft.watchedThroughSeconds>section.duration+.5)
+        throw new Error(`Initial source section ${index+1} did not report a complete excerpt observation. Its raw response is saved; no automatic second discovery was made.`);
+      const rejected=[],accepted=[];
+      for(const item of draft.moments) {
+        const issues=initialObservationProblems(item,section.duration);
+        if(!passageFitsShotSequence(item,section.shots)) issues.push('invalid_camera_shot_interval');
+        if(issues.length) {rejected.push({item,issues});continue;}
+        const [normalized]=normalizeInventoryPassages([item],media,section,section.shots);
+        if(!normalized||normalized.actionComplete!==true) {
+          rejected.push({item,issues:['unusable_normalized_interval']});continue;
+        }
+        // Each singleton normalization starts at index 1; assign a unique ID.
+        normalized.id=`initial-${index+1}-${accepted.length+1}`;
+        normalized.sourceSelectionEvidence={version:INITIAL_SECTION_VERSION,
+          provider:'gemini_initial_section_video',independentReview:false,
+          model:(section.observedWorkload||currentWorkload).model,
+          fps:(section.observedWorkload||currentWorkload).fps,height:(section.observedWorkload||currentWorkload).height,
+          section:index+1,sourceFingerprint:fingerprint,
+          sectionStart:section.startTime,sectionDuration:section.duration,
+          startTime:normalized.startTime,endTime:normalized.endTime,
+          observation:item.sourceObservation};
+        // This flag means the initial video supplied a complete semantic
+        // observation. It does NOT assert a second opinion or passing crop QA.
+        normalized.semanticVerified=true;
+        normalized.semanticEvidenceProvider='gemini_initial_section_video';
+        normalized.semanticSignature=semanticSignature(normalized);
+        normalized.semanticNarrationFacts=[item.sourceObservation.setup,item.sourceObservation.continuation,item.sourceObservation.result];
+        accepted.push(normalized);
       }
-      warnings.push(`Broadcast excerpt ${index + 1} was fully audited and contained no complete useful football passage, so it was skipped.`);
-    }
-    discovered.push(...normalized);
-    masks.push(...normalizedMasks);
-    audits.push(...normalizedAudit);
-    // Commit each expensive cloud result independently. If a later excerpt is
-    // throttled or the process restarts, completed excerpts are never sent to
-    // Gemini again.
-    await writeFile(excerptCachePath, JSON.stringify({
-      version: passageInventoryExcerptVersion,
-      key: excerptKey,
-      moments: normalized,
-      overlayMasks: normalizedMasks,
-      shotAudit: normalizedAudit,
-      completedAt: new Date().toISOString(),
-    }));
-    const current = await readJob(id);
-    await updateJob(current, "analyzing", 14 + Math.round((index + 1) / proxies.length * 14), {
-      progressDetail: `Catalogued broadcast excerpt ${index + 1} of ${proxies.length}; ${discovered.length} useful passages found without tracking yet.`,
-    });
-  }
-  const moments = mergeAnalyzedMoments(discovered);
-  if (!moments.length) throw new Error("The complete broadcast-shot inventory contained no usable football passages.");
-  const uniqueSeconds = uniqueEvidenceCandidates(moments).reduce((sum, moment) => sum + Math.max(0, moment.endTime - moment.startTime), 0);
-  await writeFile(inventoryPath, JSON.stringify({
-    version: passageInventoryVersion,
-    detector: "PySceneDetect AdaptiveDetector+ContentDetector",
-    shots: inventory,
-    shotAudit: audits,
-    candidates: moments,
-    overlayMasks: mergeOverlayMasks(masks),
-    uniqueCandidateSeconds: uniqueSeconds,
-    soccerNet: { detector: soccerNet.detector, anchorCount: soccerNet.anchors?.length || 0 },
-  }, null, 2));
-  if (uniqueSeconds < targetDuration * 1.2) warnings.push(`The complete shot ledger exposed only ${uniqueSeconds.toFixed(1)} candidate seconds before semantic and tracking verification.`);
-  return { moments, overlayMasks: mergeOverlayMasks(masks), warnings, passageInventorySummary: { shotCount: inventory.length, candidateCount: moments.length, uniqueCandidateSeconds: uniqueSeconds, soccerNetAnchorCount: soccerNet.anchors?.length || 0 } };
+      await writeFile(join(directory,`selection-${String(index+1).padStart(3,'0')}.json`),
+        JSON.stringify({version:INITIAL_SECTION_VERSION,accepted,rejected,
+          uncertainties:draft.uncertainties,policy:'local_validation_only'},null,2));
+      return {moments:accepted,scoringObservations:initialScoringObservations(draft,section.startTime,index),
+        overlayMasks:normalizeMasks(draft.overlayMasks),warnings:[
+        ...draft.uncertainties.map(value=>`Source section ${index+1}: ${String(value).slice(0,240)}`),
+        ...(rejected.length?[`Section ${index+1}: ${rejected.length} incomplete or inconsistent draft passages were excluded locally before scene lock.`]:[])]};
+    },
+    onProgress:async({index,restored,results})=>{
+      const moments=results.flatMap(result=>result.moments);
+      await updateJob(await readJob(id),'analyzing',14+Math.round((index+1)/sections.length*14),{
+        moments,sourceSections:sectionSelectionSummary(selectInitialActionViews(moments)
+          .filter(scene=>scene.sourceAngleSelected),sectionPlan),
+        progressDetail:`${restored?'Restored':'Observed'} initial source section ${index+1}/${sections.length}; ${moments.length} complete action passages saved. No repeat source reviews; clips are not combined.`});
+    },
+  });
+  const moments=mergeAnalyzedMoments(results.flatMap(result=>result.moments))
+    .map(scene=>({...scene,sourceDiscoveryPassVersion:UNIFIED_DISCOVERY_VERSION}));
+  const masks=mergeOverlayMasks(results.flatMap(result=>result.overlayMasks));
+  const warnings=results.flatMap(result=>result.warnings);
+  const uniqueSeconds=selectInitialActionViews(moments).filter(scene=>scene.sourceAngleSelected)
+    .reduce((sum,scene)=>sum+scene.endTime-scene.startTime,0);
+  const summary=unifiedDiscoverySummary({shotCount:inventory.length,candidateCount:moments.length,
+    uniqueCandidateSeconds:uniqueSeconds,soccerNetAnchorCount:soccerNet.anchors?.length||0,
+    initialSectionVersion:INITIAL_SECTION_VERSION,observationPolicy:'one_initial_video_response_per_section',
+    scoringObservations:results.flatMap(result=>result.scoringObservations),
+    sectionPlan,completedSections:sections.length});
+  await writeFile(inventoryPath,JSON.stringify({version:passageInventoryVersion,key:inventoryKey,
+    model,candidates:moments,overlayMasks:masks,warnings,summary},null,2));
+  if(!moments.length) throw new Error("Initial section observations found no complete usable football action. See the saved source selection reports; no second discovery was made.");
+  return {moments,overlayMasks:masks,warnings,passageInventorySummary:summary};
 }
 async function analyzeWithGemini(sourcePath, media, targetDuration, id) {
   const model = process.env.GEMINI_MODEL;
-  if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is missing.");
+  if (!geminiEnabled) throw new Error("Gemini is not configured. Set Vertex AI project/location or an API key.");
   if (!process.env.GOOGLE_CLOUD_PROJECT || !process.env.GOOGLE_CLOUD_LOCATION) throw new Error("GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION are required for Gemini.");
   if (!model) throw new Error("GEMINI_MODEL is required; no fallback model is configured.");
   const ai = createGeminiClient();
@@ -1881,7 +2734,7 @@ async function analyzeWithGemini(sourcePath, media, targetDuration, id) {
       }
       const proxy = await readFile(excerpt.path);
       const contents = [
-        { inlineData: { data: proxy.toString("base64"), mimeType: "video/mp4" }, videoMetadata: { fps: analysisFps } },
+        footballVideoPart(proxy.toString("base64"), analysisFps),
         { text: buildAnalysisPrompt(targetDuration, excerpt, index + 1, proxies.length, Boolean(visionEvidence)) },
       ];
       if (visionEvidence) contents.push({
@@ -1897,7 +2750,7 @@ async function analyzeWithGemini(sourcePath, media, targetDuration, id) {
       if (normalized.length === 0) {
         warnings.push(`Gemini returned no usable numeric moments for excerpt ${index + 1}; the processor retried that excerpt with a simplified recovery prompt.`);
         const retryContents = [
-          { inlineData: { data: proxy.toString("base64"), mimeType: "video/mp4" }, videoMetadata: { fps: analysisFps } },
+          footballVideoPart(proxy.toString("base64"), analysisFps),
           { text: buildAnalysisRecoveryPrompt(excerpt, index + 1, proxies.length, targetDuration) },
         ];
         if (visionEvidence) retryContents.push({
@@ -1931,21 +2784,225 @@ async function analyzeWithGemini(sourcePath, media, targetDuration, id) {
   }
 }
 
-async function discoverAdditionalCandidatesWithGemini(sourcePath, media, targetDuration, id, candidates, missingDuration, pass, highlightDeficiencies = [], recoveryWindows = []) {
+function reconcileSourceScoreCandidates(candidates,ledger) {
+  return bindSourceScoreCandidates(candidates,ledger).map(scene=>{
+    if(contradictsStableLiveScore(scene,ledger)) return {...scene,semanticVerified:false,keepDecision:'reject',
+      selectedForFinalVideo:false,rejectReason:'Proposed live goal contradicts the independently observed unchanged source score; not accepted as a new goal.'};
+    return scene;
+  });
+}
+
+async function discoverRecapExtraActions(sourcePath,media,id,scoringCandidates,minimumSeconds=60) {
+  const directory=join(outputRoot,id,"extra-action-inventory");
+  await mkdir(directory,{recursive:true});
+  await ensureShotBoundaries(sourcePath,id);
+  const shots=JSON.parse(await readFile(join(outputRoot,id,"shots.json"),"utf8")).shots;
+  const budget=step1DiscoveryPlan(media.duration,minimumSeconds,Math.min(180,analysisChunkSeconds));
+  await writeFile(join(directory,'discovery-plan.json'),JSON.stringify(budget,null,2));
+  const proxies=(await createAnalysisProxies(sourcePath,media,id,Math.min(180,analysisChunkSeconds),"extra-budget-v5",6))
+    .map((excerpt,index)=>({...excerpt,requestedSeconds:budget.sections[index]?.requestedSeconds||0}));
+  const fingerprint=await sourceContentFingerprint(sourcePath),ai=createGeminiClient();
+  // This is broad passage discovery, not contact/outcome or crop approval.
+  // Use two frames per second so brief passes/chances are not skipped;
+  // selected actions are independently reobserved densely before scene lock.
+  const discoveryFps=Math.min(2,analysisFps);
+  const batches=await mapWithConcurrency(proxies,2,async(excerpt,index)=>{
+    const end=excerpt.startTime+excerpt.duration;
+    const localShots=shots.filter(shot=>shot.endTime>excerpt.startTime && shot.startTime<end)
+      .map(shot=>({id:shot.id||shot.shotId,start:Math.max(0,shot.startTime-excerpt.startTime),
+        end:Math.min(excerpt.duration,shot.endTime-excerpt.startTime)}));
+    const known=scoringCandidates.filter(scene=>scene.endTime>excerpt.startTime && scene.startTime<end)
+      .map(scene=>({storyId:scene.storyId,eventType:scene.eventType,isReplay:scene.isReplay,
+        start:Math.max(0,scene.startTime-excerpt.startTime),end:Math.min(excerpt.duration,scene.endTime-excerpt.startTime)}));
+    const prompt=recapExtraPrompt(excerpt,localShots,known,budget)+' '+footballObservationContract();
+    const key=stableSignature({version:RECAP_ACTION_INVENTORY_VERSION,fingerprint,model:process.env.GEMINI_MODEL,
+      start:excerpt.startTime,duration:excerpt.duration,fps:discoveryFps,prompt});
+    const cache=join(directory,`${key}.json`);let draft;
+    try {draft=JSON.parse(await readFile(cache,"utf8"));} catch { /* new source/excerpt */ }
+    if(!validRecapExtraDraft(draft,excerpt.duration) && discoveryFps!==analysisFps) {
+      const previousKey=stableSignature({version:RECAP_ACTION_INVENTORY_VERSION,fingerprint,model:process.env.GEMINI_MODEL,
+        start:excerpt.startTime,duration:excerpt.duration,fps:analysisFps,prompt});
+      try {draft=JSON.parse(await readFile(join(directory,`${previousKey}.json`),"utf8"));} catch {}
+    }
+    if(!validRecapExtraDraft(draft,excerpt.duration)) {
+      const current=await readJob(id);
+      await updateJob(current,"analyzing",22,{progressDetail:`Finding clear shots, saves and big chances in source excerpt ${index+1}/${proxies.length}. Goals stay independently verified.`});
+      const request={model:process.env.GEMINI_MODEL,contents:[
+        footballVideoPart((await readFile(excerpt.path)).toString("base64"),discoveryFps),{text:prompt}],
+        config:{responseMimeType:"application/json",responseJsonSchema:RECAP_EXTRA_SCHEMA,temperature:.05,
+          thinkingConfig:{thinkingLevel:"LOW"},
+          httpOptions:{timeout:geminiVideoDeadline(geminiRequestTimeoutMs,excerpt.duration)}}};
+      for(let correction=0;correction<2;correction++) {
+        draft=normalizeRecapExtraDraft((await generateGeminiJson(ai,request,`Gemini extra football actions excerpt ${index+1}${correction?' clock correction':''}`)).parsed);
+        await writeFile(join(directory,`${key}.draft-${correction}.json`),JSON.stringify({
+          fingerprint,model:process.env.GEMINI_MODEL,startTime:excerpt.startTime,duration:excerpt.duration,draft,
+          problems:recapExtraDraftProblems(draft,excerpt.duration)},null,2));
+        if(validRecapExtraDraft(draft,excerpt.duration)) break;
+        request.contents.push({text:`The draft failed validation: ${recapExtraDraftProblems(draft,excerpt.duration).join(', ')}. Reobserve the burnt-in LOCAL clocks, not source or match clocks. Return only actual complete non-goal actions. Do not clamp or invent an end timestamp. Rejected draft: ${JSON.stringify(draft)}`});
+      }
+      if(!validRecapExtraDraft(draft,excerpt.duration)) throw new Error(`Additional-action draft still needs source-clock repair: ${recapExtraDraftProblems(draft,excerpt.duration).join(', ')}. Exact rejected observations and the source excerpt are saved.`);
+      await writeFile(cache,JSON.stringify(draft));
+    }
+    return normalizeMoments(draft.moments,media.duration,excerpt.startTime)
+      .map(scene=>({...scene,id:`extra-${index+1}-${scene.id}`,sourceAdditionalAction:true,
+        sourceActionInventoryVersion:RECAP_ACTION_INVENTORY_VERSION}));
+  });
+  const extras=uniqueEvidenceCandidates(batches.flat());
+  await writeFile(join(directory,"inventory.json"),JSON.stringify({version:RECAP_ACTION_INVENTORY_VERSION,
+    candidateCount:extras.length,moments:extras},null,2));
+  return extras;
+}
+
+async function discoverScoreAnchoredActions(sourcePath,media,id,anchors,attempt) {
+  if(!anchors.length) return [];
+  const directory=join(outputRoot,id,'score-action-observation');await mkdir(directory,{recursive:true});
+  const fingerprint=await sourceContentFingerprint(sourcePath),ai=createGeminiClient();
+  const observeAnchor=async anchor=>{
+    const profile=scoreActionObservationProfile(anchor.endTime-anchor.startTime);
+    const key=stableSignature({version:6,profile,fingerprint,model:process.env.GEMINI_MODEL,anchor,attempt});
+    const cache=join(directory,`${key}.json`);let parsed;
+    try {parsed=JSON.parse(await readFile(cache,'utf8'));} catch {}
+    if (!validScoreActionDraft(parsed,anchor.endTime-anchor.startTime)) {
+      for(const version of [5,4]) {
+        const oldKey=stableSignature({version,profile,fingerprint,model:process.env.GEMINI_MODEL,anchor,attempt});
+        try {
+          const previous=JSON.parse(await readFile(join(directory,`${oldKey}.json`),'utf8'));
+          if (validScoreActionDraft(previous,anchor.endTime-anchor.startTime)
+            && hasCompleteLiveScoreCandidate(previous.moments,anchor,anchor.startTime)) {parsed=previous;break;}
+        } catch { /* No complete live-source observation to reuse. */ }
+      }
+    }
+    // A discovery sampling reduction must not discard paid, completed 4fps
+    // observations of this exact source/window. They are still candidates,
+    // and all independent source-outcome/portrait checks run afterwards.
+    if(!validScoreActionDraft(parsed,anchor.endTime-anchor.startTime) && profile.fps===2) {
+      const previousKey=stableSignature({version:4,profile:{...profile,fps:4},fingerprint,
+        model:process.env.GEMINI_MODEL,anchor,attempt});
+      try {
+        const previous=JSON.parse(await readFile(join(directory,`${previousKey}.json`),'utf8'));
+        if(validScoreActionDraft(previous,anchor.endTime-anchor.startTime)
+          && hasCompleteLiveScoreCandidate(previous.moments,anchor,anchor.startTime)) parsed=previous;
+      } catch { /* Replay-only drafts must be reobserved under the live-first policy. */ }
+    }
+    if(!validScoreActionDraft(parsed,anchor.endTime-anchor.startTime)) parsed=undefined;
+    if(!parsed && anchor.endTime-anchor.startTime>40) {
+      // Keep completed parent observations. New long searches use overlapping
+      // bounded video windows, not one large multi-angle request that can wait
+      // ten minutes. This does not cap the final action scene or its duration.
+      const windows=scoreActionSearchWindows(anchor);
+      const observed=[];
+      for(const window of windows) {
+        const scenes=await discoverScoreAnchoredActions(sourcePath,media,id,[window],attempt);
+        observed.push(...scenes);
+        // Do not buy later-window/replay observations after the selected live
+        // candidate exists. Independent source verification still follows.
+        if(hasCompleteLiveScoreCandidate(scenes,anchor)) break;
+      }
+      return observed;
+    }
+    if(!parsed) {
+      const current=await readJob(id);await updateJob(current,'tracking',32,{
+        progressDetail:`Locating complete source action for ${anchor.id} before scene lock (observation ${attempt}).`});
+      const path=join(directory,`${key}.mp4`),duration=anchor.endTime-anchor.startTime;
+      let ready=false;
+      try {const info=await stat(path);ready=info.size>1024&&info.size<profile.maximumBytes;} catch {}
+      if(!ready) await run(ffmpegPath,['-hide_banner','-loglevel','error','-y','-ss',String(anchor.startTime),'-i',sourcePath,
+        '-t',String(duration),'-vf',`setpts=PTS-STARTPTS,fps=${profile.fps},scale=-2:${profile.height},${semanticReviewLabel(anchor.id)}`,
+        '-an','-c:v','libx264','-preset','veryfast','-b:v',`${profile.bitrateKbps}k`,'-maxrate',`${profile.bitrateKbps}k`,
+        '-bufsize',`${profile.bitrateKbps*2}k`,'-movflags','+faststart',path]);
+      if((await stat(path)).size>profile.maximumBytes) throw new Error('Focused action preview exceeded its bounded upload size.');
+      const prompt=[
+        `Observe this ONE original football excerpt completely. Source ${anchor.startTime}-${anchor.endTime}s; duration ${duration}s. ALL returned scene times are excerpt-local, 0-${duration}. Read the LOCAL clock, not the match clock.`,
+        anchor.partialSearch?'This is ONE overlapping subwindow of the same score-transition search. The score samples may be outside this subwindow. Return zero moments if the responsible incident has no complete clear view here; do not substitute another chance or force a goal. The same storyId applies across subwindows.':'',
+        `Independent scorebug OCR saw ${anchor.before.homeGoals}-${anchor.before.awayGoals} near local ${(anchor.before.time-anchor.startTime).toFixed(1)}s, then ${anchor.after.homeGoals}-${anchor.after.awayGoals} near local ${(anchor.after.time-anchor.startTime).toFixed(1)}s.${anchor.status==='reversed'?` That score was later reversed near source ${anchor.reversalTime}s.`:''} These are search cues, NOT proof of a shot, scorer, team identity or ball coordinates.`,
+        'The responsible LIVE goal must occur before that first changed-score sample. A later live goal cannot cause a score already shown earlier. If only a replay is present after that sample, label it as replay rather than a new live goal. Return zero moments for a different scoring incident.',
+        'Find the scoring incident responsible for that transition. Select the FIRST clear COMPLETE LIVE view. Do not compare two or three repeated goal replays when the first live view already shows the action. Inspect the initiating pass/cross with player AND ball, receiving final shot/header, ball travel, goalkeeper/net and completed result. Start before the initiating touch; end after the real outcome. A genuine broadcast camera cut does not make a complete live action invalid: retain its ordered setup and finish. Only if this excerpt has no complete clear live view may ONE complete same-incident replay be selected; keep isReplay:true and explain the missing live evidence. Do not substitute an unrelated missed chance or invent a goal.',
+        'A cross has TWO contacts: the initial passer release and the receiving finish. contactTime means the FINAL shot/header, flightStartTime can be the earlier cross release. Capture both players at their respective contact and do not jump directly to the goalkeeper.',
+        'Return ONE complete primary action scene for this incident, not a replay backup. Optionally retain a short immediately related reaction after the visible result; no long VAR discussions, unrelated play or second/third repeated angle. This is source-scene splitting only: do not guess portrait coordinates or make the source interval shorter to fit an estimated voice script. No player or team names; identity is verified later.',
+        footballObservationContract(),
+        `Return JSON {moments:[...],uncertainties:[string]}. storyId is ${anchor.id}. Each moment requires startTime,endTime,eventType,storyPhase,keepDecision,actionComplete,completionReason,keyActionTimes,trackingBrief,importanceScore,confidence,ballVisible,mainPlayerVisible,isReplay,description,analysisPurpose. Allowed events goal|disallowed_goal|save|shot_on_target|shot_off_target|big_chance|celebration|var. Use source pixels for the actual outcome, not a desired score. trackingBrief times are excerpt-local, like scene boundaries.`,
+        attempt>1?'Earlier observations did not yield complete verified live action. Reinspect the actual source at high detail, independently; do not repeat missing setup, an unobserved touch, an unresolved finish or out-of-bounds clock values.':''
+      ].join(' ');
+      parsed=(await generateGeminiJson(ai,{model:process.env.GEMINI_MODEL,contents:[footballVideoPart((await readFile(path)).toString('base64'),profile.fps),{text:prompt}],
+        config:{responseMimeType:'application/json',responseJsonSchema:SCORE_ACTION_SCHEMA,thinkingConfig:{thinkingLevel:'LOW'},
+          httpOptions:{timeout:geminiVideoDeadline(Math.max(360000,geminiRequestTimeoutMs),duration)}}},`Source action ${anchor.id}`,3)).parsed;
+      if(!validScoreActionDraft(parsed,duration)) throw new Error(`Source action ${anchor.id} returned invalid scene bounds or confidence; not safe to lock.`);
+      await writeFile(cache,JSON.stringify(parsed));
+    }
+    return normalizeMoments(parsed.moments,media.duration,anchor.startTime).map((scene,index)=>({...scene,
+      id:`source-${anchor.id}-${Math.round(anchor.startTime*1000)}-${attempt}-${index+1}`,storyId:anchor.id,sourceScoreAnchorId:anchor.id,
+      sourceScoreObservation:true,importanceScore:Math.max(90,scene.importanceScore)}));
+  };
+  const batches=[];
+  for(const anchor of [...anchors].sort((a,b)=>a.after.time-b.after.time)) {
+    // Dense highlight edits can show the next goal in the preceding search
+    // window. Reuse that real source observation under its own score incident,
+    // instead of sending the same overlapping pixels again. It is still only
+    // a candidate; source semantics and outcome checks have not approved it.
+    const existing=batches.flat().filter(scene=>scoreAnchorForScene(scene,{anchors})?.id===anchor.id);
+    if(hasCompleteLiveScoreCandidate(existing,anchor)) continue;
+    batches.push(await observeAnchor(anchor));
+  }
+  return batches.flat();
+}
+
+async function completedDurationSearchWindows(id,scope='gaps') {
+  return completedRecoverySearchWindows(id,'action_duration',scope);
+}
+async function completedRecoverySearchWindows(id,purpose,scope='gaps') {
+  const directory=join(outputRoot,id,'recovery-cache');
+  const windows=[];
+  for(const name of await readdir(directory).catch(()=>[])) {
+    if(!name.endsWith('.json')) continue;
+    try {
+      const saved=JSON.parse(await readFile(join(directory,name),'utf8'));
+      if([2,3,4].includes(saved.search?.version) && (saved.search.scope||'gaps')===scope && saved.search.purpose===purpose
+        && saved.search.fps===8 && Array.isArray(saved.parsed?.moments)) windows.push(saved.search);
+    } catch { /* Partial or older observations are not completed dense searches. */ }
+  }
+  return windows;
+}
+
+// A worker may stop after one paid excerpt succeeds but before its siblings
+// finish. Restore those proposals BEFORE skipping completed search windows.
+// This is discovery only: independent source/outcome review remains required.
+async function restoreCompletedGoalCountCandidates(id,sourcePath,media,candidates) {
+  const directory=join(outputRoot,id,'recovery-cache');
+  const fingerprint=await sourceContentFingerprint(sourcePath),restored=[];
+  for(const name of await readdir(directory).catch(()=>[])) {
+    if(!name.endsWith('.json'))continue;
+    try {
+      const saved=JSON.parse(await readFile(join(directory,name),'utf8'));
+      if(saved.search?.version!==4||saved.search.purpose!=='goal_count'||saved.search.fps!==8
+        ||saved.search.sourceFingerprint!==fingerprint||saved.search.model!==geminiWorkloadModel('discovery')
+        ||!Array.isArray(saved.parsed?.moments))continue;
+      const drafts=normalizeMoments(saved.parsed.moments,media.duration,saved.search.startTime,
+        new Set(candidates.map(scene=>scene.storyId)));
+      restored.push(...drafts.filter(draft=>!candidates.some(scene=>scene.id===draft.id&&scene.semanticVerified!==undefined)));
+    } catch { /* Incomplete/unrelated search caches are not source evidence. */ }
+  }
+  return restored;
+}
+
+async function discoverAdditionalCandidatesWithGemini(sourcePath, media, targetDuration, id, candidates, missingDuration, pass, highlightDeficiencies = [], recoveryWindows = [], expectedGoalTotal = null, purpose = 'incident_coverage', searchScope='gaps') {
   const ai = createGeminiClient();
-  const allProxies = await createAnalysisProxies(sourcePath, media, id);
-  // A completeness shortfall may require another whole-source sweep. A known
-  // rejected/mislinked incident does not: inspect only excerpts overlapping
-  // its bounded source windows and retain every completed result elsewhere.
-  const targeted = Number(missingDuration || 0) <= 0.1 && recoveryWindows.length > 0;
-  const proxies = targeted ? allProxies.filter(excerpt => recoveryWindows.some(window =>
-    excerpt.startTime < Number(window.endTime) && excerpt.startTime + excerpt.duration > Number(window.startTime))) : allProxies;
-  const recoveryProxies = proxies.length ? proxies : allProxies;
-  const discovered = [];
+  // Use bounded clips even for a duration shortfall. Sending the same long
+  // proxy back to Gemini repeats the first-pass goal bias and overlooks brief
+  // non-goal actions elsewhere in the match.
+  const targeted = recoveryWindows.length > 0;
+  const recoveryModel=purpose==='goal_count'?geminiWorkloadModel('discovery'):process.env.GEMINI_MODEL;
+  const recoveryFps=targeted && (purpose==='action_duration'||purpose==='goal_count') ? 8 : analysisFps;
+  const recoveryProxies = targeted
+    ? await createRecoveryProxies(sourcePath, media, id, recoveryWindows, recoveryFps)
+    : await createAnalysisProxies(sourcePath, media, id);
+  const sourceInfo = await stat(sourcePath);
+  const recoverySourceFingerprint = await sourceContentFingerprint(sourcePath);
+  const recoveryCacheDirectory = join(outputRoot, id, "recovery-cache");
+  await mkdir(recoveryCacheDirectory, { recursive: true });
   const requestedPerExcerpt = Math.max(MIN_SCENE_SECONDS * 2, Math.ceil(missingDuration * 1.5 / Math.max(1, recoveryProxies.length)));
-  for (const [index, excerpt] of recoveryProxies.entries()) {
+  const recoveredBatches = await mapWithConcurrency(recoveryProxies, 2, async (excerpt, index) => {
     const currentJob = await readJob(id);
-    await updateJob(currentJob, currentJob.stage, currentJob.progress, { progressDetail: `Rechecking ${targeted ? "targeted " : ""}source excerpt ${index + 1} of ${recoveryProxies.length}, recovery pass ${pass} of 1. Existing incident tracking is retained.` });
+    await updateJob(currentJob, currentJob.stage, currentJob.progress, { progressDetail: `Rechecking ${targeted ? "targeted " : ""}source excerpt ${index + 1} of ${recoveryProxies.length}, recovery pass ${pass}. Existing incident tracking is retained.` });
     const excerptEnd = excerpt.startTime + excerpt.duration;
     const priorTimeline = candidates
       .filter((moment) => moment.endTime > excerpt.startTime && moment.startTime < excerptEnd)
@@ -1955,35 +3012,94 @@ async function discoverAdditionalCandidatesWithGemini(sourcePath, media, targetD
         eventType: moment.eventType,
         storyId: moment.storyId,
         storyPhase: moment.storyPhase,
-        result: moment.keepDecision === "reject" ? "rejected" : "verified",
+        result: coverageCandidateState(moment),
         reason: moment.trackingDecision || moment.rejectReason || "first_pass",
       }));
     const prompt = [
       `This is football discovery pass ${pass}. The current minimum planning coverage is ${targetDuration} seconds, and ${missingDuration.toFixed(1)} more verified seconds are still needed. Find complete strong actions; do not stop observing once that minimum is covered.`,
       `Goal-first completeness problems still to solve: ${highlightDeficiencies.length ? highlightDeficiencies.join(", ") : "none"}.`,
-      `Re-inspect excerpt ${index + 1} of ${recoveryProxies.length} from beginning to end. Return timestamps RELATIVE to this ${excerpt.duration.toFixed(3)}-second excerpt.`,
-      `Find at least ${requestedPerExcerpt} seconds of ADDITIONAL complete actions at their natural duration when visibly available. Return only new or corrected candidates; do not duplicate intervals already marked verified.`,
-      "Revisit rejected intervals intelligently. Split an overlong 13-plus-second interval only at a true broadcast cut, possession reset, whistle, replay boundary, or completed consequence. Never cut through an active pass, shot, save, duel, or run.",
+      `Re-inspect excerpt ${index + 1} of ${recoveryProxies.length}, source ${excerpt.startTime.toFixed(3)}-${(excerpt.startTime + excerpt.duration).toFixed(3)}s, from beginning to end. Return timestamps RELATIVE to this ${excerpt.duration.toFixed(3)}-second excerpt.`,
+      purpose==='goal_count'
+        ? 'This pass resolves missing goal evidence, not duration. Return only missing or corrected goal incidents and their immediate matching reactions. Prior non-goal classifications are not conclusive for this wider source context: inspect a rebound or delayed payoff when a previous short save/chance omitted it. Return zero moments if there is no new visible goal; never relabel a miss or save as a goal.'
+        : `Find at least ${requestedPerExcerpt} seconds of ADDITIONAL complete actions at their natural duration when visibly available. Return only new or corrected candidates; do not duplicate intervals already marked verified.`,
+      searchScope==='source_shots'?'This is a complete measured source camera shot, not a gap between old short clips. Check its earliest meaningful pass through the resolved outcome. If an earlier proposal omitted the initiating pass, return a corrected complete action with the same story identity for independent source review, not a second copy or replay.': '',
+      "Revisit rejected intervals intelligently. There is no fixed scene-length limit. Split only at a true broadcast cut, possession reset, whistle, replay boundary, or completed consequence. Never cut through an active pass, shot, save, duel, or run.",
       "For ball_not_visibly_continuous or insufficient_joint_framing, find a different source angle or nearby complete action where the ball and involved player stay visible together. For unstable_camera, choose a naturally stable broadcast passage; do not hide shaking by shortening an unfinished action.",
-      "Search specifically for complete goals, shots on target, shots off target, big chances, saves, blocks and last-ditch clearances. Around every detected goal, return the complete live scoring action, the immediate celebration directly after the goalmouth result, and any genuine replay proof as separate candidates sharing one exact storyId. A replay must begin at a real broadcast cut, occupy a different non-overlapping source interval, and visibly use a different camera viewpoint; never relabel the live interval as replay. For the live action, contactTime must be the scorer's decisive touch and primaryPlayerRole must be scorer. Do not substitute a later unrelated celebration or replay from another goal.",
+      purpose==='action_duration'
+        ? 'All observed goals already have complete source action. Find distinct complete football gameplay: shots, saves, blocks, clearances, dangerous combinations and defended attacks. Preserve the meaningful buildup through the completed consequence. Do NOT return celebrations, full-time reactions, statistics, long VAR discussions or duplicate goal replays to fill the duration. Return zero moments when this excerpt has no new complete action.'
+        : 'Find the first complete LIVE view of each missing incident, with initiating pass, final contact, ball flight and resolved result. Keep one complete source view, not mandatory second or third repeated replays. A genuine replay is eligible only when no complete live view is present; label it as replay of the same story. Optional short matching reactions cannot substitute for the action.',
       footballObservationContract(),
       "Return JSON only as {moments:[...],overlayMasks:[]}. Every moment requires startTime, endTime, eventType, storyId, storyPhase, keepDecision, actionComplete, completionReason, keyActionTimes, trackingBrief, importanceScore, hookScore, flowScore, visualClarity, excitementScore, narrativeCompleteness, description, rejectReason, confidence, ballVisible, mainPlayerVisible, isReplay, commentary, analysisPurpose, onScreenText, and focusX.",
       "Use eventType goal|disallowed_goal|offside|penalty|assist|big_chance|shot_on_target|shot_off_target|save|foul|yellow_card|red_card|free_kick|var|skill|dribble|tackle|celebration|normal_play. Mark only a fully resolved action as keep, support, or replay. Do not invent identities, scores, or outcomes.",
     ].join(" ");
-    const proxy = await readFile(excerpt.path);
-    const generated = await generateGeminiJson(ai, {
-      model: process.env.GEMINI_MODEL,
-      contents: [
-        { inlineData: { data: proxy.toString("base64"), mimeType: "video/mp4" }, videoMetadata: { fps: analysisFps } },
-        { text: prompt },
-        { text: JSON.stringify({ priorCandidateResults: priorTimeline }) },
-      ],
-      config: { responseMimeType: "application/json", temperature: 0.08 },
-    }, `Gemini goal-first discovery excerpt ${index + 1}`);
-    const parsed = generated.parsed;
-    discovered.push(...normalizeMoments(parsed.moments, media.duration, excerpt.startTime, new Set(candidates.map(moment => moment.storyId))));
-  }
-  return mergeAnalyzedMoments([...candidates, ...discovered]);
+    const recoveryKey = stableSignature({version:1,searchScope,model:recoveryModel,
+      sourcePath,sourceFingerprint:recoverySourceFingerprint,
+      start:excerpt.startTime,duration:excerpt.duration,fps:recoveryFps,prompt,priorTimeline});
+    const recoveryCachePath = join(recoveryCacheDirectory, `${recoveryKey}.json`);
+    let parsed;
+    try {
+      const saved = JSON.parse(await readFile(recoveryCachePath, "utf8"));
+      if (saved.key === recoveryKey && Array.isArray(saved.parsed?.moments)) parsed = saved.parsed;
+    } catch { /* Only completed matching excerpts can be restored. */ }
+    if(!parsed && purpose!=='action_duration' && purpose!=='goal_count' && recoveryFps!==analysisFps) {
+      const previousKey=stableSignature({version:1,model:process.env.GEMINI_MODEL,
+        sourcePath,size:sourceInfo.size,modified:sourceInfo.mtimeMs,
+        start:excerpt.startTime,duration:excerpt.duration,fps:analysisFps,prompt,priorTimeline});
+      try {
+        const saved=JSON.parse(await readFile(join(recoveryCacheDirectory,`${previousKey}.json`),'utf8'));
+        if(saved.key===previousKey && Array.isArray(saved.parsed?.moments)) parsed=saved.parsed;
+      } catch {}
+    }
+    if (!parsed) {
+      const proxy = await readFile(excerpt.path);
+      const generated = await generateGeminiJson(ai, {
+        model: recoveryModel,
+        contents: [
+          footballVideoPart(proxy.toString("base64"), recoveryFps),
+          { text: prompt },
+          { text: JSON.stringify({ priorCandidateResults: priorTimeline }) },
+        ],
+        config: { responseMimeType: "application/json", temperature: 0.08,
+          httpOptions: {timeout:geminiVideoDeadline(geminiRequestTimeoutMs, excerpt.duration)} },
+      }, `Gemini goal-first discovery excerpt ${index + 1}`);
+      parsed = generated.parsed;
+      // A later provider wait or worker restart must not discard paid results
+      // from earlier recovery windows and make the user repeat discovery.
+      await writeFile(recoveryCachePath, JSON.stringify({key:recoveryKey,parsed}));
+    }
+    await writeFile(recoveryCachePath, JSON.stringify({key:recoveryKey,parsed,
+      search:{version:4,purpose,scope:searchScope,fps:recoveryFps,startTime:excerpt.startTime,endTime:excerptEnd,
+        sourceFingerprint:recoverySourceFingerprint,model:recoveryModel}}));
+    return filterUnprovedRecoveryGoals(candidates,
+      normalizeMoments(parsed.moments, media.duration, excerpt.startTime, new Set(candidates.map(moment => moment.storyId)))
+        .filter(scene=>purpose!=='action_duration' || isDurationRecoveryAction(scene)),
+      expectedGoalTotal);
+  });
+  return mergeAnalyzedMoments([...candidates, ...recoveredBatches.flat()]);
+}
+
+async function createRecoveryProxies(sourcePath, media, id, windows, fps = analysisFps) {
+  const directory = join(outputRoot, id, "recovery-proxies");
+  await mkdir(directory, { recursive: true });
+  const bounded = boundedRecoveryWindows(windows, media.duration);
+  return mapWithConcurrency(bounded, Math.min(analysisProxyConcurrency, 3), async (window) => {
+    const duration = window.endTime - window.startTime;
+    const path = join(directory, `recovery-${Math.round(window.startTime * 1000)}-${Math.round(window.endTime * 1000)}-${fps}fps.mp4`);
+    let info;
+    try { info = await stat(path); } catch { /* Generate this focused clip. */ }
+    if (!info || info.size < 1024 || info.size > 15 * 1024 * 1024) {
+      const args = ["-hide_banner", "-y", "-ss", window.startTime.toFixed(3), "-i", sourcePath,
+        "-t", duration.toFixed(3), "-vf", `fps=${fps}:start_time=0:round=up,scale=-2:${analysisHeight}`,
+        "-c:v", "libx264", "-preset", "veryfast", "-b:v", "850k", "-maxrate", "850k", "-bufsize", "1700k", "-pix_fmt", "yuv420p"];
+      if (media.hasAudio) args.push("-c:a", "aac", "-b:a", "32k", "-ac", "1", "-ar", "16000");
+      else args.push("-an");
+      args.push("-movflags", "+faststart", path);
+      await run(ffmpegPath, args);
+      info = await stat(path);
+    }
+    if (info.size > 15 * 1024 * 1024) throw new Error("A focused Gemini recovery excerpt exceeds the inline upload limit.");
+    return { path, startTime: window.startTime, duration };
+  });
 }
 
 function buildAnalysisPrompt(targetDuration, excerpt, chunkNumber, chunkCount, hasVideoIntelligence = false) {
@@ -2001,9 +3117,9 @@ function buildAnalysisPrompt(targetDuration, excerpt, chunkNumber, chunkCount, h
     "Every moment must contain: startTime, endTime, eventType (goal|disallowed_goal|offside|penalty|assist|big_chance|shot_on_target|shot_off_target|save|foul|yellow_card|red_card|free_kick|var|skill|dribble|tackle|celebration|normal_play), storyId, storyPhase (hook|build_up|action|payoff|reaction|replay|standalone), keepDecision (keep|support|replay|reject), actionComplete boolean, completionReason, keyActionTimes as an ordered array of {time,detail}, trackingBrief, importanceScore 0-100, hookScore 0-100, flowScore 0-100, visualClarity 0-100, excitementScore 0-100, narrativeCompleteness 0-100, description, rejectReason, confidence 0-1, ballVisible, mainPlayerVisible, isReplay, commentary, analysisPurpose, onScreenText, and focusX 0-1.",
     "Prefer complete actions with a few seconds of context. Do not merge unrelated events. Do not discard replays; label them so the edit director can decide. Mark obstructed, static, duplicate, irrelevant, or unclear footage as reject.",
     "Never invent names, teams, scores, or events. Commentary must be one short evidence-based analytical sentence that adds explanation, criticism, or meaning rather than merely announcing what happens. analysisPurpose must state why this exact excerpt is needed. onScreenText must be a clean 2-to-6-word hook, never a paragraph.",
-    "For gameplay, mark keep or support only when the relevant player and football are both visible in the same composition. Player-only footage is allowed only for a celebration, reaction, or introduction. Do not select ball-only or player-only running footage.",
+    "Before contact, require the initiating player and ball in the original composition. During flight follow the real moving ball toward the receiver or goalmouth; the original passer/shooter may leave the frame naturally. Player-only running cannot substitute for action. Preserve every distinct visible goal and disallowed goal regardless of estimated duration or portrait framing difficulty. A VAR monitor or referee shot is brief supporting decision evidence, never a replacement for its scoring action.",
     hasVideoIntelligence ? "Use the supplied shot boundaries and tracked-object coordinates to improve temporal precision and horizontal focus, while trusting the visible video over an incorrect generic object label." : "",
-    "Detect persistent creator logos, channel badges, and attribution watermarks. Return each as overlayMasks entries with source-normalized x, y, width, height, and confidence. Mask only the tight persistent overlay region; do not classify the match scoreboard, game clock, stadium advertising, players, or ball as a watermark.",
+    "Detect persistent creator logos, channel badges, attribution watermarks, and broadcast score/header graphics (scoreline, game clock, UEFA/network header). Return each as overlayMasks entries with source-normalized x, y, width, height, and confidence. Mask only the tight persistent overlay region; never mask players, the ball, goalmouth action, or the main pitch.",
   ].filter(Boolean).join(" ");
 }
 
@@ -2013,7 +3129,7 @@ function buildAnalysisRecoveryPrompt(excerpt, chunkNumber, chunkCount, targetDur
     `The excerpt duration is ${excerpt.duration.toFixed(3)} seconds. Return startTime and endTime as JSON numbers in seconds RELATIVE to this excerpt, from 0 through ${excerpt.duration.toFixed(3)}. Never use HH:MM:SS strings.`,
     `The initial minimum coverage budget is ${targetDuration} seconds; final length will be planned later. Return JSON only as {moments:[...],overlayMasks:[]}. If football is visible, return every distinct complete action scene at its natural duration so the whole source can supply enough verified evidence. Include weak, incomplete, obstructed, or untrackable scenes with keepDecision reject instead of returning an empty array.`,
     footballObservationContract(),
-    "Every moment requires startTime, endTime, eventType, storyId, storyPhase, keepDecision, actionComplete, completionReason, keyActionTimes, trackingBrief, importanceScore, hookScore, flowScore, visualClarity, excitementScore, narrativeCompleteness, description, rejectReason, confidence, ballVisible, mainPlayerVisible, isReplay, commentary, analysisPurpose, onScreenText, and focusX. Also return tight source-normalized overlayMasks for persistent creator/channel logos or attribution watermarks; do not mask the scoreboard, game clock, or stadium advertising.",
+    "Every moment requires startTime, endTime, eventType, storyId, storyPhase, keepDecision, actionComplete, completionReason, keyActionTimes, trackingBrief, importanceScore, hookScore, flowScore, visualClarity, excitementScore, narrativeCompleteness, description, rejectReason, confidence, ballVisible, mainPlayerVisible, isReplay, commentary, analysisPurpose, onScreenText, and focusX. Also return tight source-normalized overlayMasks for persistent creator/channel logos, attribution watermarks, scorebugs, game clocks, or network headers; never mask the players, ball, goalmouth action, or pitch.",
     "Use eventType goal|disallowed_goal|offside|penalty|assist|big_chance|shot_on_target|shot_off_target|save|foul|yellow_card|red_card|free_kick|var|skill|dribble|tackle|celebration|normal_play. Do not invent identities, scores, or outcomes. Commentary must explain only visible evidence.",
   ].join(" ");
 }
@@ -2035,22 +3151,22 @@ function summarizeVideoIntelligence(summaries, totalChunks) {
   };
 }
 
-async function createAnalysisProxies(sourcePath, media, id) {
+async function createAnalysisProxies(sourcePath, media, id,chunkSeconds=analysisChunkSeconds,labelPrefix="",overlapSeconds=analysisChunkOverlap,proxyFps=analysisFps) {
   const directory = join(outputRoot, id, "analysis");
   await mkdir(directory, { recursive: true });
-  const tasks = analysisProxyWindows(media.duration, analysisChunkSeconds, analysisChunkOverlap)
+  const tasks = analysisProxyWindows(media.duration, chunkSeconds, overlapSeconds)
     .map((window, index) => ({ ...window, index }));
   return mapWithConcurrency(tasks, analysisProxyConcurrency, async ({ startTime, duration, index }) => {
     const proxyPath = join(
       directory,
-      `video-proxy-${String(index + 1).padStart(3, "0")}-${Math.round(startTime * 1000)}-${Math.round(duration * 1000)}.mp4`,
+      `video-proxy-${String(index + 1).padStart(3, "0")}-${Math.round(startTime * 1000)}-${Math.round(duration * 1000)}${labelPrefix?`-${labelPrefix}`:""}-fps${proxyFps}-h${analysisHeight}.mp4`,
     );
     const targetBytes = 13.5 * 1024 * 1024;
     const totalKbps = targetBytes * 8 / Math.max(1, duration) / 1000;
     const videoKbps = Math.round(clamp(totalKbps - (media.hasAudio ? 36 : 0), 140, 900));
     const args = [
       "-hide_banner", "-y", "-ss", startTime.toFixed(3), "-i", sourcePath, "-t", duration.toFixed(3),
-      "-vf", `fps=${analysisFps},scale=-2:${analysisHeight}`,
+      "-vf", `fps=${proxyFps},scale=-2:${analysisHeight}${labelPrefix?`,${semanticReviewLabel(`${labelPrefix}-${index+1}`)}`:""}`,
       "-c:v", "libx264", "-preset", "veryfast", "-b:v", `${videoKbps}k`, "-maxrate", `${videoKbps}k`, "-bufsize", `${videoKbps * 2}k`, "-pix_fmt", "yuv420p",
     ];
     if (media.hasAudio) args.push("-c:a", "aac", "-b:a", "32k", "-ac", "1", "-ar", "16000");
@@ -2230,6 +3346,9 @@ function trackingEvidenceQuality(scene, evidence, nativeLandscape = false) {
 }
 
 function fullBleedRepairEvidence(scene, evidence, media) {
+  // Never overwrite reviewed Gemini positions with local detector repair.
+  if (evidence?.provider === "gemini-vision") return evidence;
+  if (isDecisionScene(scene)) return repairDecisionFraming(scene, evidence, media);
   const duration = Math.max(0.1, Number(scene.endTime) - Number(scene.startTime));
   const sourceRatio = Number(media?.width || 16) / Math.max(1, Number(media?.height || 9));
   // A genuine full-bleed 9:16 crop. No padding, blurred fill, or smaller
@@ -2393,7 +3512,10 @@ function fullBleedRepairEvidence(scene, evidence, media) {
             // receiver takes possession during flight.
             if (pairFits) {
               const left = Math.min(ball, playerLeft), right = Math.max(ball, playerRight);
-              const preferredEdge = Math.min(.05, viewWidth * .16);
+              // Keep a real breathing margin around the complete player+ball
+              // span. A narrow margin lets the ball look centered while the
+              // carrier's body is clipped at the portrait edge.
+              const preferredEdge = Math.min(.075, viewWidth * .24);
               let margin = pairSpan + preferredEdge * 2 <= viewWidth ? preferredEdge : 0;
               low = Math.max(half, right + margin - half);
               high = Math.min(1 - half, left - margin + half);
@@ -2405,10 +3527,11 @@ function fullBleedRepairEvidence(scene, evidence, media) {
                 hardLow = Math.max(half, right - half);
                 hardHigh = Math.min(1 - half, left + half);
               }
-              // Ball-first composition: keep the involved player visible, but
-              // place the football near the visual center instead of centering
-              // empty space between bodies.
-              target = ball * .72 + Number(player.cx) * .28;
+              // Position keyframes belong to the complete action pair. Do not
+              // bias toward the ball alone: that is what previously produced
+              // crops with a visible ball and only half of the active player.
+              // Center the full player+ball span so both remain readable.
+              target = (left + right) / 2;
               target = clamp(target, low, high);
             }
           } else if (hasBall && (phase === "payoff"
@@ -2486,9 +3609,9 @@ function fullBleedRepairEvidence(scene, evidence, media) {
           // real speed ceiling. The former arrive-before-exit shortcut could
           // compress a large move into 450 ms, producing exactly the rushed,
           // shaky catch-up pan visible in portrait football edits.
-          lookAhead: 2.60, persistence: .20, minimumHold: .72, postPanHold: .45,
-          minimumPanDistance: .040, maximumSpeed: verifiedGoalRoute ? .32 : .18, durationScale: 1.0,
-          minimumPanDuration: .90, maximumPanDuration: 3.20,
+          lookAhead: 2.60, persistence: .24, minimumHold: .78, postPanHold: .55,
+          minimumPanDistance: .045, maximumSpeed: verifiedGoalRoute ? .24 : .14, durationScale: 1.15,
+          minimumPanDuration: 1.05, maximumPanDuration: 3.60,
           // The portrait camera is an editorial path, not a visualization of
           // every detector sample. A wide central safe zone and look-ahead
           // initiate the pan. A verified goal changes ownership only after the
@@ -2654,7 +3777,10 @@ function stabilizeTrackingForScenes(tracking, scenes, media, nativeLandscape = f
   for (const scene of scenes) {
     const reaction = scene.eventType === "celebration" || scene.storyPhase === "reaction";
     const evidence = moments[scene.id];
-    if (reaction || !evidence?.keyframes?.length) continue;
+    // These providers already reviewed this exact crop. A legacy projection
+    // would alter the pixels after approval and invalidate the review.
+    if (reaction || ["hybrid-football", "gemini-vision"].includes(evidence?.provider)
+      || !evidence?.keyframes?.length) continue;
     const stabilized = fullBleedRepairEvidence(scene, evidence, media);
     stabilized.fullBleedRepairReason = "verified_minimum_motion_projection";
     moments[scene.id] = stabilized;
@@ -2664,6 +3790,7 @@ function stabilizeTrackingForScenes(tracking, scenes, media, nativeLandscape = f
 
 function restorePossessionChainStarts(scenes) {
   return (Array.isArray(scenes) ? scenes : []).map((scene) => {
+    if (scene.sourceViewSplit === true) return scene;
     const previousOffset = Number(scene.boundaryCorrection?.trackingTrimOffset || 0);
     const restoredStart = previousOffset > 0
       ? Number((Number(scene.startTime) - previousOffset).toFixed(3))
@@ -2706,7 +3833,7 @@ function trimUnframeableDistributionLeadIns(scenes, tracking) {
     const reaction = scene.eventType === "celebration" || scene.storyPhase === "reaction";
     const evidence = moments[scene.id];
     const frames = Array.isArray(evidence?.keyframes) ? evidence.keyframes : [];
-    if (reaction || frames.length < 8) return scene;
+    if (reaction || ["gemini-vision", "hybrid-football"].includes(evidence?.provider) || frames.length < 8) return scene;
     const duration = Number(scene.endTime) - Number(scene.startTime);
     const pairLocked = frame => frame.directBall === true && frame.ballInFrame === true
       && frame.playerInFrame === true && Boolean(frame.jointFit);
@@ -2785,7 +3912,17 @@ function trimUnframeableDistributionLeadIns(scenes, tracking) {
   };
 }
 
-async function trackLockedSceneUntilVerified(sourcePath, scene, media, id, sceneIndex, sceneCount, tracking, nativeLandscape = false) {
+async function trackLockedSceneUntilVerified(sourcePath, scene, media, id, sceneIndex, sceneCount, tracking, nativeLandscape = false, repairRound = 0, options = {}) {
+  if (geminiKeyframing) {
+    const current=await readJob(id);
+    await updateJob(current,'tracking',Math.max(34,Number(current.progress||0)),{
+      activeTrackingScene:{id:scene.id,index:sceneIndex+1,total:sceneCount,status:'tracking',round:repairRound+1},
+      progressDetail:`Tracking separate scene ${sceneIndex+1}/${sceneCount} in ${nativeLandscape?'16:9':'9:16'}; its own camera clock starts at zero.`,
+    });
+    const partial = await trackFootball(sourcePath, [{ ...scene, selectedForFinalVideo: true }], media, id,{repairRound});
+    const merged = mergeTrackingResults(tracking, partial);
+    return { tracking: merged, assessment: assessGeminiFraming(scene, trackingEvidenceFor(merged, scene)) };
+  }
   const decisiveIncident = ["goal", "disallowed_goal"].includes(String(scene.eventType));
   const strategies = [
     // One temporal pass replaces the former 10/15/20-fps full-scene ladder.
@@ -2795,7 +3932,9 @@ async function trackLockedSceneUntilVerified(sourcePath, scene, media, id, scene
     // loading and running three separate detector processes per scene.
     { sampleFps: 15, coarseSampleFps: Math.min(5, trackingCoarseSampleFps), ballImageSize: 1600, imageSize: trackingImageSize },
   ];
-  if (decisiveIncident) strategies.push(
+  if (hybridKeyframing) strategies.splice(0, strategies.length,
+    { sampleFps: 12, coarseSampleFps: 6, ballImageSize: 1280, imageSize: 960 });
+  if (!hybridKeyframing && (decisiveIncident || ["shot_on_target", "shot_off_target", "save", "big_chance", "assist"].includes(String(scene.eventType)))) strategies.push(
     { sampleFps: 15, coarseSampleFps: 8, ballImageSize: 1600, imageSize: 1280 },
   );
   if (nativeLandscape) {
@@ -2810,8 +3949,13 @@ async function trackLockedSceneUntilVerified(sourcePath, scene, media, id, scene
       { sampleFps: 15, coarseSampleFps: 8, ballImageSize: 1600, imageSize: 1280 },
     );
   }
+  // The fast queue already ran native tracking and reviewed this exact crop.
+  // Repeating that unchanged pass cannot repair its rejected camera path.
+  if (options.skipNativePass && hybridKeyframing && !nativeLandscape) strategies.length=0;
   let merged = tracking;
-  let lastAssessment = { usable: false, mode: "not_tracked" };
+  let lastAssessment = options.skipNativePass
+    ? assessPlannedSceneTracking(scene,trackingEvidenceFor(tracking,scene))
+    : { usable: false, mode: "not_tracked" };
   for (const [attemptIndex, strategy] of strategies.entries()) {
     const current = await readJob(id);
     await updateJob(current, "tracking", Math.max(34, current.progress), {
@@ -2819,15 +3963,21 @@ async function trackLockedSceneUntilVerified(sourcePath, scene, media, id, scene
       activeTrackingScene: { id: scene.id, index: sceneIndex + 1, total: sceneCount, attempt: attemptIndex + 1 },
     });
     const partial = await trackFootball(sourcePath, [{ ...scene, selectedForFinalVideo: true }], media, id, strategy);
+    if (isDecisionScene(scene)) {
+      partial.moments[scene.id] = repairDecisionFraming(scene, partial.moments[scene.id],
+        nativeLandscape ? { ...media, viewportRatio: 16 / 9 } : media);
+    }
     const currentEvidence = trackingEvidenceFor(merged, scene);
     const partialEvidence = trackingEvidenceFor(partial, scene);
-    if (trackingEvidenceQuality(scene, partialEvidence, nativeLandscape) >= trackingEvidenceQuality(scene, currentEvidence, nativeLandscape)) {
+    if (!providerEvidenceMatches(activeKeyframeProvider, currentEvidence)
+      || trackingEvidenceQuality(scene, partialEvidence, nativeLandscape) >= trackingEvidenceQuality(scene, currentEvidence, nativeLandscape)) {
       merged = mergeTrackingResults(merged, partial);
     }
-    lastAssessment = nativeLandscape
+    lastAssessment = nativeLandscape && !hybridKeyframing
       ? assessNativeFrameAction(scene, trackingEvidenceFor(merged, scene))
       : assessPlannedSceneTracking(scene, trackingEvidenceFor(merged, scene));
     if (lastAssessment.usable) {
+      if (hybridKeyframing) return { tracking: merged, assessment: lastAssessment };
       if (nativeLandscape) return { tracking: merged, assessment: lastAssessment };
       // Passing detector evidence still contains frame-by-frame subject
       // centers. Project every gameplay scene onto the same minimum-motion
@@ -2839,6 +3989,40 @@ async function trackLockedSceneUntilVerified(sourcePath, scene, media, id, scene
       merged = { ...merged, moments, summary: summarizeTracking(moments) };
       return { tracking: merged, assessment: { ...lastAssessment, mode: "verified_minimum_motion" } };
     }
+    // Native 16:9 does not depend on detector coordinates to keep the ball and
+    // player inside a moving crop. Once one tracking pass has failed to prove
+    // marker positions, two denser passes are wasteful for a semantically
+    // verified complete incident. Keep its source frame and suppress overlays;
+    // never manufacture ball/player positions to satisfy the tracker.
+    if (nativeLandscape && canUseNativeSemanticFallback(scene)) {
+      return { tracking: merged, assessment: { usable: true, mode: "native_semantic_complete_action" } };
+    }
+  }
+  if (hybridKeyframing && !nativeLandscape) {
+    // A rejected actual crop is not repaired by asking the reviewer to approve
+    // the same path again. Reobserve this locked source scene with the visual
+    // camera planner and verify its NEW actual crop. Never rediscover footage,
+    // alter boundaries, or manufacture a detector observation.
+    const ai=createGeminiClient();
+    const dimensions=outputDimensions((await readJob(id)).settings);
+    const visual=await trackSceneWithGemini({sourcePath,sourceFingerprint:await sourceContentFingerprint(sourcePath),
+      scene,media,ratio:dimensions.width/dimensions.height,directory:join(outputRoot,id,'tracking','gemini'),
+      ffmpeg:ffmpegPath,run,model:process.env.GEMINI_KEYFRAME_MODEL||process.env.GEMINI_MODEL,
+      generate:async(request,label)=>(await generateGeminiJson(ai,request,label)).parsed,
+      report:async progressDetail=>updateJob(await readJob(id),'tracking',34,{progressDetail})});
+    const assessment=assessGeminiFraming(scene,visual);
+    if(assessment.usable) {
+      visual.hybridVisualRepairVersion=HYBRID_TRACKING_VERSION;
+      if(scene.sourceSceneAsset) {
+        visual.portraitSceneAsset=await savePortraitSceneAsset({scene,
+          sourceDirectory:join(outputRoot,id,'source-scenes'),directory:join(outputRoot,id,'portrait-scenes'),
+          evidence:visual,dimensions,ffmpeg:ffmpegPath,run,probe});
+        visual.splitSceneFileName=scene.sourceSceneAsset.fileName;
+      }
+      const repaired=mergeTrackingResults(merged,{moments:{[scene.id]:visual}});
+      return {tracking:repaired,assessment};
+    }
+    return {tracking:merged,assessment:lastAssessment};
   }
   if (nativeLandscape) return { tracking: merged, assessment: lastAssessment };
   const evidence = trackingEvidenceFor(merged, scene);
@@ -2847,20 +4031,37 @@ async function trackLockedSceneUntilVerified(sourcePath, scene, media, id, scene
   const moments = { ...(merged.moments || {}), [scene.id]: repairedEvidence };
   merged = { ...merged, moments, summary: summarizeTracking(moments) };
   const repairedAssessment = assessPlannedSceneTracking(scene, repairedEvidence);
+  // A semantically verified goal can occasionally fail only the last phase
+  // label after the final crop is already stable and the goalmouth/ball are
+  // clearly visible. Keep that incident with a static analytical presentation
+  // and suppress player markers; never use this path for weak or shaky footage.
+  const guardedGoalFallback = decisiveIncident
+    && scene.semanticVerified === true
+    && scene.actionComplete === true
+    && repairedEvidence.fullBleedRepair === true
+    && repairedEvidence.finalCropVerified === true
+    && Number(repairedEvidence.finalBallCoverage || 0) >= 0.70
+    && Number(repairedEvidence.actionBallFramingCoverage || 0) >= 0.70
+    && Number(repairedEvidence.goalPayoffCoverage || 0) >= 0.75
+    && Number(repairedEvidence.cameraStepP95 || 0) <= 0.035
+    && Number(repairedEvidence.cameraJerkP95 || 0) <= 0.080;
+  if (guardedGoalFallback) return { tracking: merged, assessment: { usable: true, mode: "native_semantic_complete_action" } };
   // Never convert a failed track into success. The alternative-angle selector
   // may choose another already-discovered view of this incident; if none pass,
   // coverage fails with scene-level evidence instead of rendering bad footage.
   return { tracking: merged, assessment: repairedAssessment };
 }
 
-async function prepareIncidentEvidence(sourcePath, candidates, media, id) {
+async function prepareIncidentEvidence(sourcePath, candidates, media, id, options = {}) {
   const trackingDirectory = join(outputRoot, id, "tracking");
   const trackingPath = join(trackingDirectory, "tracking.json");
   await mkdir(trackingDirectory, { recursive: true });
   const sourceJob = await readJob(id);
   const nativeLandscape = sourceJob.settings?.aspectRatio === "16:9";
-  candidates = restorePossessionChainStarts(candidates);
-  const lockedScenes = candidates
+  const fixedQueue = isCompleteHighlights(sourceJob.settings)
+    && candidates.some(scene=>scene.selectionLocked && scene.fixedSceneQueueVersion === 1);
+  if (!fixedQueue) candidates = restorePossessionChainStarts(candidates);
+  let lockedScenes = candidates
     .filter(moment => moment.selectionLocked === true)
     .sort((a, b) => Number(a.startTime) - Number(b.startTime));
   if (!lockedScenes.length) throw new Error("Step 1 did not lock any verified source scenes for keyframe tracking.");
@@ -2870,11 +4071,110 @@ async function prepareIncidentEvidence(sourcePath, candidates, media, id) {
     const savedTracking = JSON.parse(await readFile(trackingPath, "utf8"));
     if (Number(savedTracking?.version || 0) >= 91 && savedTracking?.moments) tracking = savedTracking;
   } catch { /* A new Step 2 run starts without cached keyframes. */ }
+  // Load detector models ONCE for the pending scene queue. Python maintains
+  // separate source intervals, camera clocks and scene checkpoints; no footage
+  // is concatenated here. Only the compact crop reviews run concurrently.
+  if (hybridKeyframing && fastTracking.enabled) {
+    const pending = lockedScenes.filter(scene => {
+      const evidence = trackingEvidenceFor(tracking, scene);
+      return !providerEvidenceMatches(activeKeyframeProvider, evidence)
+        || !assessPlannedSceneTracking(scene, evidence)?.usable || evidence.finalCropVerified!==true;
+    });
+    const pendingIds=new Set(pending.map(scene=>scene.id));
+    const current=await readJob(id);
+    const cachedApproved=lockedScenes.length-pending.length;
+    await updateJob(current,'tracking',Math.max(34,Number(current.progress)||34),{
+      sceneTrackingStates:{...current.sceneTrackingStates,...Object.fromEntries(lockedScenes.map(scene=>
+        [scene.id,pendingIds.has(scene.id)?{status:'pending',round:0,detail:'Waiting for current crop verification.'}
+          :{status:'verified',round:1,detail:'Saved player-and-ball camera verification reused.'}]))},
+      trackingProgress:{pass:'crop_review',completed:cachedApproved,total:lockedScenes.length,
+        approved:cachedApproved,needsRepair:0},
+    });
+    if (pending.length) {
+      const guided=await mapWithConcurrency(pending,fastTracking.reviewConcurrency,
+        scene=>prepareHybridActionGuide(sourcePath,scene,id));
+      const byId=new Map(guided.map(scene=>[scene.id,scene]));
+      lockedScenes=lockedScenes.map(scene=>byId.get(scene.id)||scene);
+      const streamed=new Map();
+      let streamedWrites=Promise.resolve();
+      const reviews=createStreamingWorkQueue(fastTracking.reviewConcurrency,async({scene,evidence})=>{
+        const observed=await verifyHybridScene(sourcePath,scene,media,id,evidence);
+        streamed.set(scene.id,observed);
+        streamedWrites=streamedWrites.then(async()=>{
+          tracking=mergeTrackingResults(tracking,{version:93,moments:{[scene.id]:observed}});
+          await writeFile(trackingPath,JSON.stringify(tracking));
+          // Persist UI approval with the completed crop, not after the entire
+          // detector batch. Later scene detection must not look like 0 verified
+          // clips while earlier independent crop reviews are already saved.
+          const current=await readJob(id);
+          const assessment=assessPlannedSceneTracking(scene,observed);
+          const states={...current.sceneTrackingStates,[scene.id]:{
+            status:assessment.usable?'verified':'needs_repair',round:1,
+            detail:assessment.usable?'Verified player-and-ball camera path saved.':
+              assessment.issues?.join('; ')||'Tracking needs repair'}};
+          const completed=lockedScenes.map(scene=>states[scene.id])
+            .filter(state=>['verified','needs_repair'].includes(state?.status));
+          const approved=completed.filter(state=>state.status==='verified').length;
+          await updateJob(current,'tracking',Math.max(34,Number(current.progress)||34),{
+            sceneTrackingStates:states,
+            trackingProgress:{pass:'crop_review',completed:completed.length,total:lockedScenes.length,
+              approved,needsRepair:completed.length-approved},
+          });
+        });
+        await streamedWrites;
+      });
+      let native;
+      try {
+        native = await trackFootball(sourcePath,
+          guided.map(scene => ({...scene, selectedForFinalVideo:true})), media, id,
+          {nativeOnly:true, sampleFps:fastTracking.sampleFps, coarseSampleFps:fastTracking.coarseSampleFps,
+            onSceneReady:(sceneId,evidence)=>{
+              const scene=byId.get(sceneId);
+              if(!scene||!Number.isFinite(evidence.sourceStartTime)||!Number.isFinite(evidence.sourceEndTime)
+                ||!hybridEvidenceWindowMatches(scene,evidence))
+                throw new Error('Native checkpoint does not match the locked review scene.');
+              reviews.enqueue({scene,evidence});
+            }});
+      } finally {
+        // A retry cannot overlap sibling model calls or overwrite their saved
+        // approvals with the unreviewed aggregate returned by Python.
+        await reviews.drain();
+      }
+      native=mergeTrackingResults(native,{version:93,moments:Object.fromEntries(streamed)});
+      tracking = mergeTrackingResults(tracking, native);
+      await writeFile(trackingPath, JSON.stringify(tracking));
+    }
+  }
   const baseline = tracking;
+  let checkpointWrites = Promise.resolve();
+  let checkedScenes=0,approvedScenes=0;
+  const saveCompletedScene = async completed => {
+    checkpointWrites = checkpointWrites.then(async () => {
+      tracking = mergeTrackingResults(tracking, completed.tracking);
+      await writeFile(trackingPath, JSON.stringify(tracking));
+      checkedScenes+=1;
+      if(completed.assessment.usable) approvedScenes+=1;
+      const current=await readJob(id);
+      await updateJob(current,'tracking',Math.max(Number(current.progress||34),34+Math.floor(3*checkedScenes/lockedScenes.length)),{
+        sceneTrackingStates:{...current.sceneTrackingStates,[completed.scene.id]:{
+          status:completed.assessment.usable?'verified':'needs_repair',
+          round:current.activeTrackingScene?.round||1,
+          detail:completed.assessment.usable?'Verified player-and-ball camera path saved.':completed.assessment.issues?.join('; ')||'Tracking needs repair'}},
+        activeTrackingScene:{id:completed.scene.id,index:completed.sceneIndex+1,total:lockedScenes.length,
+          status:completed.assessment.usable?'verified':'needs_repair'},
+        trackingProgress:{pass:options.provisional?'portrait_preflight':hybridKeyframing&&fastTracking.enabled?'crop_review':'gemini',completed:checkedScenes,total:lockedScenes.length,approved:approvedScenes,
+          needsRepair:checkedScenes-approvedScenes},
+        progressDetail:`Checked ${checkedScenes}/${lockedScenes.length} selected scenes: ${approvedScenes} crops verified${checkedScenes>approvedScenes?`, ${checkedScenes-approvedScenes} saved for repair`:''}. Completed keyframes are saved.`,
+      });
+    });
+    await checkpointWrites;
+    return completed;
+  };
   const completedScenes = await mapWithConcurrency(
     lockedScenes,
-    trackingSceneConcurrency,
+    hybridKeyframing && fastTracking.enabled ? fastTracking.reviewConcurrency : fixedQueue ? 1 : trackingSceneConcurrency,
     async (scene, sceneIndex) => {
+      if (!fixedQueue) scene=reviewedLeadInScene(scene,baseline.moments?.[scene.id]);
       const savedEvidence = trackingEvidenceFor(baseline, scene);
       const cachedAssessment = nativeLandscape
         ? assessNativeFrameAction(scene, savedEvidence)
@@ -2885,11 +4185,46 @@ async function prepareIncidentEvidence(sourcePath, candidates, media, id) {
         summary: savedEvidence ? summarizeTracking({ [scene.id]: savedEvidence }) : {},
         markerPaths: baseline.markerPaths || {},
       };
-      if (cachedAssessment.usable) return { scene, sceneIndex, tracking: sceneTracking, assessment: cachedAssessment };
-      const completed = await trackLockedSceneUntilVerified(
-        sourcePath, scene, media, id, sceneIndex, lockedScenes.length, sceneTracking, nativeLandscape,
-      );
-      return { scene, sceneIndex, ...completed };
+      const splitCacheMatches=!scene.sourceSceneAsset || !geminiKeyframing
+        || (savedEvidence?.splitSceneFileName===scene.sourceSceneAsset.fileName
+          && savedEvidence?.portraitSceneAsset?.verifiedCamera===true);
+      if (cachedAssessment.usable && splitCacheMatches && providerEvidenceMatches(activeKeyframeProvider, savedEvidence)
+        && (!hybridKeyframing || savedEvidence.finalCropVerified===true)) {
+        return saveCompletedScene({ scene, sceneIndex, tracking: sceneTracking, assessment: cachedAssessment });
+      }
+      // Reserve promotion in this SAME run adds new scenes; it is not a new
+      // repair strategy for unchanged scenes already rejected by visual QA.
+      // A later explicit retry still has no skip set and can repair them.
+      if(options.skipVisualRejectedIds?.has(scene.id) && scene.trackingRepairError) {
+        return saveCompletedScene({scene,sceneIndex,tracking:sceneTracking,assessment:{usable:false,
+          mode:'gemini_visual_repair_unverified',issues:[scene.trackingRepairError]}});
+      }
+      let completed;
+      try {
+        if (hybridKeyframing && fastTracking.enabled) {
+          const observed = await verifyHybridScene(sourcePath, scene, media, id, savedEvidence);
+          completed = {tracking:{...sceneTracking,moments:{[scene.id]:observed}},
+            assessment:assessPlannedSceneTracking(scene,observed)};
+          if(!completed.assessment.usable) {
+            completed=await trackLockedSceneUntilVerified(sourcePath,scene,media,id,sceneIndex,
+              lockedScenes.length,completed.tracking,nativeLandscape,0,{skipNativePass:true});
+          }
+        } else completed = await trackLockedSceneUntilVerified(sourcePath,scene,media,id,sceneIndex,
+          lockedScenes.length,sceneTracking,nativeLandscape,0);
+      } catch(error) {
+        if(!(error instanceof FramingVerificationError)) throw error;
+        if(fixedQueue) throw error;
+        // A scene-level visual rejection must not cancel unstarted siblings,
+        // including a later goal. Keep this scene locked and unapproved, save
+        // the exact reason, and finish the independent queue before coverage.
+        completed={tracking:sceneTracking,assessment:{usable:false,mode:'gemini_visual_repair_unverified',
+          issues:[error.message]}};
+        scene={...scene,trackingRepairError:error.message};
+      }
+      // Persist each completed scene before a sibling repair can fail. Retry
+      // must retain its verified keyframes, not repeat the entire locked queue.
+      if (!fixedQueue) scene=reviewedLeadInScene(scene,completed.tracking?.moments?.[scene.id]);
+      return saveCompletedScene({ scene, sceneIndex, ...completed });
     },
   );
   for (const completed of completedScenes) {
@@ -2897,10 +4232,25 @@ async function prepareIncidentEvidence(sourcePath, candidates, media, id) {
     tracking = mergeTrackingResults(tracking, completed.tracking);
     const approved = {
       ...preserveLockedSceneSelection([scene])[0],
+      ...(()=>{
+        const evidence=trackingEvidenceFor(tracking,scene),eventType=reviewedFramingEvent(scene,evidence);
+        if(!completed.assessment.usable || !eventType || eventType===scene.eventType) return {};
+        const narration=reviewedFramingNarration(scene,evidence);
+        return {eventType,sourceEventTypeBeforeCropReview:scene.eventType,
+          eventCorrectionEvidence:'independently_verified_actual_crop_outcome',
+          description:narration?.description||scene.description,
+          semanticNarrationFacts:narration?.facts||scene.semanticNarrationFacts};
+      })(),
+      ...(completed.assessment.usable && reviewedHybridPhaseBrief(scene,trackingEvidenceFor(tracking,scene))
+        ? {trackingBrief:reviewedHybridPhaseBrief(scene,trackingEvidenceFor(tracking,scene))}:{}),
       ...(completed.assessment.mode === "planned_reaction" ? { storyPhase: "reaction", role: "reaction" } : {}),
+      ...(completed.assessment.mode === "native_semantic_complete_action"
+        ? { nativeFullFrameEvidence: true, playerHighlight: false, tacticalDrawing: "none" } : {}),
       selectedForFinalVideo: false,
       trackingDecision: completed.assessment.mode,
       trackingPassed: completed.assessment.usable === true,
+      trackingRepairError: completed.assessment.usable ? undefined : scene.trackingRepairError,
+      ...(isDecisionScene(scene) ? { playerHighlight: false, tacticalDrawing: "none" } : {}),
       portraitRepairReason: undefined,
       fallbackPresentation: undefined,
     };
@@ -2909,17 +4259,17 @@ async function prepareIncidentEvidence(sourcePath, candidates, media, id) {
     await writeFile(trackingPath, JSON.stringify(tracking));
     const current = await readJob(id);
     await updateJob(current, "tracking", Math.max(34, current.progress), {
-      moments: result,
-      observedMoments: result,
+      moments: options.provisional ? result.map(scene=>({...scene,selectionLocked:false})) : result,
+      observedMoments: options.provisional ? result.map(scene=>({...scene,selectionLocked:false})) : result,
       trackingSummary: tracking.summary,
       progressDetail: completed.assessment.usable
-        ? `Scene ${sceneIndex + 1}/${lockedScenes.length} passed ${nativeLandscape ? "native-frame action" : "9:16 keyframe"} verification. Parallel scene results are being merged in source order.`
-        : `Scene ${sceneIndex + 1}/${lockedScenes.length} did not pass action verification (${completed.assessment.mode}). Another locked angle may still cover this incident.`,
+        ? `Scene ${sceneIndex + 1}/${lockedScenes.length} passed ${nativeLandscape ? "native-frame action" : "9:16 keyframe"} verification. Its keyframes are saved in the fixed scene queue.`
+        : `Scene ${sceneIndex + 1}/${lockedScenes.length} still needs camera repair (${completed.assessment.mode}). Its source selection is unchanged.`,
       activeTrackingScene: { id: scene.id, index: sceneIndex + 1, total: lockedScenes.length,
         status: completed.assessment.usable ? "passed" : "failed", reason: completed.assessment.mode },
     });
   }
-  const boundaryAdjusted = trimUnframeableDistributionLeadIns(result, tracking);
+  const boundaryAdjusted = fixedQueue ? { scenes: result, tracking } : trimUnframeableDistributionLeadIns(result, tracking);
   tracking = stabilizeTrackingForScenes(boundaryAdjusted.tracking, boundaryAdjusted.scenes, media, nativeLandscape);
   const verifiedScenes = boundaryAdjusted.scenes.map((scene) => {
     if (scene.selectionLocked !== true) return scene;
@@ -2931,6 +4281,7 @@ async function prepareIncidentEvidence(sourcePath, candidates, media, id) {
   return { candidates: verifiedScenes, tracking };
 }
 async function verifyCandidateSemanticsWithGemini(sourcePath, candidates, id, onlyIds = null) {
+  candidates = invalidateOlderGoalOutcomes(candidates);
   // Stored semantic reviews contain absolute source times. Re-normalize their
   // complete brief before the eligibility early return so newer geometry rules
   // apply without discarding or repeating a valid cloud review.
@@ -2938,11 +4289,18 @@ async function verifyCandidateSemanticsWithGemini(sourcePath, candidates, id, on
     ? { ...moment, trackingBrief: normalizeTrackingBrief(
       moment.trackingBrief, {eventType:moment.eventType}, moment.startTime, moment.endTime,
     ) } : moment);
+  candidates = candidates.map(moment => {
+    const normalized = normalizeDecisionOnlyScene(moment);
+    return normalized === moment ? moment : { ...normalized, semanticSignature: semanticSignature(normalized) };
+  });
   const sourceJob = await readJob(id);
   const sourceMedia = sourceJob.media;
   const targetRatio = outputDimensions(sourceJob.settings).width / outputDimensions(sourceJob.settings).height;
   const portraitWidth = Math.min(1, Number(sourceMedia?.height || 720) * targetRatio / Number(sourceMedia?.width || 1280));
   const tooWide = moment => {
+    // Step 1 verifies original action, not a portrait composition. A broad
+    // source result rectangle is not a reason to repeat semantic discovery.
+    if (moment.sourceScoreObservation) return false;
     const box = moment.trackingBrief?.payoffEvidence?.targetBox;
     return Array.isArray(box) && box[2] - box[0] > portraitWidth;
   };
@@ -2955,7 +4313,7 @@ async function verifyCandidateSemanticsWithGemini(sourcePath, candidates, id, on
   // semantic version. selectDirectorCandidates intentionally excludes rejects,
   // which previously made poisoned/incomplete cache decisions permanent.
   const staleSemanticReview = candidates.filter(moment =>
-    needsSemanticReview(moment)
+    needsSemanticReview(moment, process.env.GEMINI_MODEL)
     && moment.selectionLocked !== true
     && Boolean(moment.ballVisible || playerOnlyAllowed(moment))
   );
@@ -2965,7 +4323,8 @@ async function verifyCandidateSemanticsWithGemini(sourcePath, candidates, id, on
     ...forcedDecisionReview,
   ].map(moment => [moment.id, moment])).values()];
   const eligible = reviewPool.filter(framingEligible)
-    .filter(moment => needsSemanticReview(moment)
+    .filter(moment => !moment.sourceAngleDeferred && !moment.sourceSupportDeferred)
+    .filter(moment => needsSemanticReview(moment, process.env.GEMINI_MODEL)
       || forcedDecisionReview.some(candidate => candidate.id === moment.id)
       || (tooWide(moment) && moment.semanticGeometryVersion !== 1))
     .filter(moment => !onlyIds || onlyIds.includes(moment.id));
@@ -2974,171 +4333,240 @@ async function verifyCandidateSemanticsWithGemini(sourcePath, candidates, id, on
   // Validate compact, cacheable batches while preserving the complete candidate
   // pool for same-incident context and merge every result back by stable id.
   if (!onlyIds) {
-    const batches = [];
-    let batch = [];
-    let seconds = 0;
-    for (const moment of eligible) {
-      const duration = Math.max(0.5, Number(moment.endTime) - Number(moment.startTime));
-      if (batch.length && (seconds + duration > 45 || batch.length >= 4)) {
-        batches.push(batch);
-        batch = [];
-        seconds = 0;
-      }
-      batch.push(moment.id);
-      seconds += duration;
-    }
-    if (batch.length) batches.push(batch);
+    const batches = semanticReviewBatches(eligible);
     if (batches.length > 1) {
-      let reviewedCandidates = candidates;
-      let rejectedCount = 0;
-      for (const [batchIndex, ids] of batches.entries()) {
+      let completedBatches = 0;
+      const reviews = await mapWithConcurrency(batches, 2, async (ids, batchIndex) => {
         const current = await readJob(id);
         await updateJob(current, "tracking", Math.max(32, current.progress), {
-          progressDetail: `Validating source scenes in compact batch ${batchIndex + 1}/${batches.length}; completed batches stay cached.`,
+          progressDetail: `Validating source scenes in compact batch ${batchIndex + 1}/${batches.length}; ${completedBatches} complete. Completed batches stay cached.`,
         });
-        const result = await verifyCandidateSemanticsWithGemini(sourcePath, reviewedCandidates, id, ids);
-        reviewedCandidates = result.candidates;
-        rejectedCount += result.rejectedCount;
-      }
-      return { candidates: reviewedCandidates, rejectedCount };
+        const result = await verifyCandidateSemanticsWithGemini(sourcePath, candidates, id, ids);
+        completedBatches += 1;
+        const latest = await readJob(id);
+        await updateJob(latest, "tracking", Math.max(32, latest.progress), {
+          progressDetail: `Validated ${completedBatches}/${batches.length} source-scene batches. Completed batches stay cached.`,
+        });
+        return { ...result, ids };
+      });
+      // Each independent batch returns the complete pool for context. Merge
+      // only its own IDs, so an unchanged sibling snapshot cannot undo a
+      // concurrently completed correction.
+      const byId = new Map(reviews.flatMap(review => review.candidates
+        .filter(moment => review.ids.includes(moment.id)).map(moment => [moment.id, moment])));
+      const reviewedCandidates = candidates.map(moment => byId.get(moment.id) || moment);
+      const rejectedCount = reviews.reduce((total, review) => total + review.rejectedCount, 0);
+      return { candidates: reconcileVerifiedGoalDecisions(reviewedCandidates).map(moment =>
+        ({ ...moment, semanticSignature: semanticSignature(moment) })), rejectedCount };
     }
   }
   // Review all eligible incidents in one labeled evidence reel to avoid quota-heavy per-incident calls.
   const sourceInfo = await stat(sourcePath);
-  const reviewKey = stableSignature({ sourcePath, size: sourceInfo.size, modified: sourceInfo.mtimeMs,
-    model: process.env.GEMINI_MODEL, prompt: FOOTBALL_EDITOR_SKILL_VERSION, geometry: 1, incidentContext: 5,
-    semanticVersion: SEMANTIC_VERIFICATION_VERSION, candidates: eligible.map(semanticSignature) });
+  const sourceFingerprint=await sourceContentFingerprint(sourcePath);
+  const sourceObservationSignature=stableSignature({sourcePath,sourceFingerprint,model:process.env.GEMINI_MODEL});
+  const reviewKey = stableSignature({ sourcePath, sourceFingerprint,
+    model: process.env.GEMINI_MODEL, prompt: FOOTBALL_EDITOR_SKILL_VERSION, geometry: 1, incidentContext: 7,
+    semanticVersion: SEMANTIC_VERIFICATION_VERSION,
+    ...(eligible.some(moment=>moment.eventType==='celebration')?{reactionContract:1}:{}),
+    candidates: eligible.map(semanticSignature) });
   const reviewDir = join(outputRoot, id, "semantic-cache");
   await mkdir(reviewDir, { recursive: true });
   const reviewPath = join(reviewDir, `${reviewKey}.json`);
   try {
     const cached = JSON.parse(await readFile(reviewPath, "utf8"));
     const byId = new Map(cached.candidates.map(moment => [moment.id, moment]));
+    let rawReviews = new Map();
+    try {
+      const envelope = JSON.parse(await readFile(join(reviewDir, `${reviewKey}.response.json`), "utf8"));
+      if (invalidSemanticTimingIds(JSON.parse(envelope.responseText),envelope.clipManifest || []).length)
+        throw new Error("Cached semantic timing needs isolated source observation.");
+      rawReviews = new Map(JSON.parse(envelope.responseText).candidates.map(review => [String(review.id),
+        correctSemanticReelClock(review, envelope.clipManifest?.find(clip => clip.id === String(review.id)))]));
+    } catch (error) {
+      if (error.message === "Cached semantic timing needs isolated source observation.") throw error;
+      /* New cache entries carry the explicit observed-action flag. */
+    }
     return { candidates: candidates.map(moment => {
       if (!byId.has(moment.id)) return moment;
-      const merged = mergeSemanticReview(moment, byId.get(moment.id));
-      return { ...merged, trackingBrief: normalizeTrackingBrief(
-        merged.trackingBrief, {eventType:merged.eventType}, merged.startTime, merged.endTime,
-      ) };
+      // The review key already includes the model. Older cache envelopes may
+      // lack this provenance field; restore it from that exact matching key.
+      const merged = mergeSemanticReview(moment, { ...byId.get(moment.id), semanticModel: process.env.GEMINI_MODEL });
+      if (unsupportedNormalPlay(rawReviews.get(String(moment.id))) || merged.semanticObservedGameplay === false && merged.eventType === "normal_play") {
+        return { ...merged, semanticVerified: false, keepDecision: "reject", selectedForFinalVideo: false,
+          trackingDecision: "semantic_mismatch", rejectReason: "The source review supplies no observed player-and-ball gameplay." };
+      }
+      const rawReview = rawReviews.get(String(moment.id));
+      const normalized = normalizeDecisionOnlyScene({ ...merged, trackingBrief: rawReview?.timingCorrection
+        ? normalizeReviewedTrackingBrief(rawReview, merged, merged.eventType,merged.verifiedSourceActionWindow?.reviewSourceStartTime??merged.startTime)
+        : normalizeTrackingBrief(merged.trackingBrief, {eventType:merged.eventType}, merged.startTime, merged.endTime) });
+      return { ...normalized, semanticSignature: semanticSignature(normalized) };
     }), rejectedCount: cached.rejectedCount };
   } catch { /* Missing review: inspect actual footage, never guess. */ }
-  const proxyPath = join(outputRoot, id, "semantic-evidence-review.mp4");
-  const reviewWindow = (moment) => {
-    if (!["goal", "disallowed_goal"].includes(moment.eventType) || moment.isReplay || moment.storyPhase === "replay") return { start: moment.startTime, end: moment.endTime };
-    const companions = candidates.filter((candidate) => candidate.id !== moment.id && candidate.storyId === moment.storyId
-      && candidate.startTime >= moment.startTime && candidate.startTime <= moment.endTime + 12);
-    return { start: moment.startTime, end: Math.min(Number(sourceMedia?.duration || moment.endTime + 22), Math.max(moment.endTime, ...companions.map((candidate) => candidate.endTime))) };
-  };
+  const proxyPath = join(reviewDir, `${reviewKey}.mp4`);
+  const reviewWindow = moment => semanticReviewWindow(moment, candidates, Number(sourceMedia?.duration || moment.endTime + 22));
   const reviewWindows = eligible.map(reviewWindow);
   const reviewWindowById = new Map(eligible.map((moment, index) => [String(moment.id), reviewWindows[index]]));
-  let reviewReelCursor = 0;
-  const reviewClipManifest = eligible.map((moment, index) => {
-    const window = reviewWindows[index];
-    const duration = Math.max(0, Number(window.end) - Number(window.start));
-    const clip = {
-      id: String(moment.id),
-      reelStartTime: Number(reviewReelCursor.toFixed(3)),
-      reelEndTime: Number((reviewReelCursor + duration).toFixed(3)),
-      sourceStartTime: Number(Number(window.start).toFixed(3)),
-      sourceEndTime: Number(Number(window.end).toFixed(3)),
-      claimedEventType: String(moment.eventType || "normal_play"),
-    };
-    reviewReelCursor += duration;
-    return clip;
-  });
+  const reviewClipManifest = semanticClipManifest(eligible, reviewWindows);
   const filters = eligible.map((moment, index) => {
-    const label = String(moment.id).replace(/[^a-zA-Z0-9_-]/g, "-");
     const window = reviewWindows[index];
-    return `[0:v]trim=start=${Number(window.start).toFixed(3)}:end=${Number(window.end).toFixed(3)},setpts=PTS-STARTPTS,fps=8,scale=-2:720,drawtext=fontfile='C\\:/Windows/Fonts/arialbd.ttf':text='${label}':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.72:boxborderw=8:x=12:y=12,format=yuv420p[semantic${index}]`;
+    return `[${index}:v]trim=start=0:end=${(Number(window.end) - Number(window.start)).toFixed(3)},setpts=PTS-STARTPTS,fps=8,scale=-2:720,${semanticReviewLabel(moment.id)},format=yuv420p[semantic${index}]`;
   });
   filters.push(`${eligible.map((_, index) => `[semantic${index}]`).join("")}concat=n=${eligible.length}:v=1:a=0[semanticout]`);
   const totalDuration = reviewWindows.reduce((total, window) => total + Number(window.end) - Number(window.start), 0);
   const videoKbps = Math.round(clamp(12 * 1024 * 1024 * 8 / Math.max(1, totalDuration) / 1000, 300, 1800));
   await run(ffmpegPath, [
-    "-hide_banner", "-y", "-i", sourcePath,
+    "-hide_banner", "-y", ...semanticReviewInputArgs(sourcePath, reviewWindows),
+    "-filter_complex_threads", "2",
     "-filter_complex", filters.join(";"),
-    "-map", "[semanticout]", "-an", "-c:v", "libx264", "-preset", "veryfast",
+    "-map", "[semanticout]", "-an", "-c:v", "libx264", "-threads", "2", "-preset", "veryfast",
     "-b:v", `${videoKbps}k`, "-maxrate", `${videoKbps}k`, "-bufsize", `${videoKbps * 2}k`,
     "-pix_fmt", "yuv420p", "-movflags", "+faststart", proxyPath,
   ]);
   const proxy = await readFile(proxyPath);
+  const endWitnesses=[];
+  const endWitnessesById=new Map();
+  for(const [index,moment] of eligible.entries()) {
+    if(['celebration','var','offside'].includes(moment.eventType)) continue;
+    const window=reviewWindows[index];
+    const sceneWitnesses=[];
+    for(const sourceTime of sourceCompletionDetailTimes({start:Math.max(window.start,moment.startTime),
+      end:Math.min(window.end,moment.endTime)})) {
+      const imagePath=join(reviewDir,`${reviewKey}-end-${index}-${sourceTime}.jpg`);
+      await run(ffmpegPath,['-hide_banner','-loglevel','error','-y','-ss',String(sourceTime),'-i',sourcePath,
+        '-an','-frames:v','1','-q:v','2',imagePath]);
+      sceneWitnesses.push({text:`ORIGINAL native source evidence at the proposed candidate endpoint for exact scene ID ${moment.id}; scene LOCAL time ${(sourceTime-window.start).toFixed(4)} seconds. Inspect this endpoint in the context of its complete labeled clip. The proposed endpoint is not assumed complete. This is not a cropped frame or evidence from a different play.`},
+        {inlineData:{mimeType:'image/jpeg',data:(await readFile(imagePath)).toString('base64')},
+          mediaResolution:{level:'MEDIA_RESOLUTION_HIGH'}});
+    }
+    endWitnesses.push(...sceneWitnesses);
+    endWitnessesById.set(String(moment.id),sceneWitnesses);
+  }
   const prompt = [
-    "Act as a strict football evidence verifier. Watch every labeled candidate clip completely. The existing event names and descriptions are untrusted hypotheses; trust only the pixels in the labeled clip.",
-    "Return JSON only with candidates array. Return exactly one item for every supplied id with id, semanticMatch boolean, correctedEventType, correctedDescription, actionComplete boolean, narrationFacts array, and reason.",
+    "Act as an independent football evidence observer. Watch every labeled candidate clip completely. No claimed event or description has been supplied: determine the actual action and outcome from the pixels, without assuming a goal.",
+    "Return JSON only with candidates array. Return exactly one item for every supplied id with id, semanticMatch boolean, correctedEventType, correctedDescription, isReplay boolean, actionComplete boolean, narrationFacts array, and reason. Mark isReplay true for a visibly repeated action/alternate-angle replay, not a new live goal. A camera cut alone does not mean replay.",
     `The exact required ids are: ${eligible.map((moment) => moment.id).join(", ")}. Omitting an id is an invalid incomplete response. The supplied clipManifest gives each labeled clip's boundaries inside the concatenated review reel.`,
-    "semanticMatch is true only when the clip visibly supports a complete, resolved version of its claimed event and description. A clip labeled save must visibly show the shot, ball travel, goalkeeper contact, and outcome. A goal must visibly show setup, scorer and ball before contact, decisive touch, ball travel, and goalmouth payoff. Midfield build-up alone is not a save or goal.",
+    "Use the visible LOCAL clock printed beside each scene ID for EVERY returned action timestamp. It resets to zero for each scene. The video player's combined reel clock and the match scoreboard clock are not the requested clock.",
+    "semanticMatch is true only when a complete useful action or genuine reaction/decision is visible. Classify what happened independently. A save must visibly show the shot, ball travel, goalkeeper contact, and outcome. A goal must visibly show setup, scorer and ball before contact, decisive touch, ball travel, and goalmouth payoff. Midfield build-up alone is not a save or goal. A missed shot remains useful footage and must be classified honestly.",
+    "Follow the REAL MOVING MATCH BALL from the kicking foot through the result. Spare balls sitting behind or beside the net, advertising, white clothes and static objects are not the match ball. Set goal only when that real ball crosses the line inside the goal. A shot over/wide does not become a goal because a stationary spare ball is visible near the net.",
     "A celebration or reaction supports emotion and urgency only. It never proves the scoring action, the technique of a finish, a save, or the tactical cause of a goal.",
+    `These IDs are proposed REACTION SUPPORT clips, not claimed scoring actions: ${eligible.filter(moment=>moment.eventType==='celebration').map(moment=>moment.id).join(', ') || 'none'}. For these clips, a plainly visible brief player celebration is itself a complete reaction: use correctedEventType:celebration, semanticMatch:true and actionComplete:true only when that reaction is actually visible. Do not require a ball, setup, kick, flight or goal to be repeated inside a reaction clip. Use sourceActionWindow:null, outcomeReview:null and payoffEvidence:null, with only visible reaction facts. Reject a different restart, unrelated action or footage that is not a reaction. This reaction rule takes precedence over the gameplay grammar below.`,
+    "For a goal, save, shot or big chance, also return outcomeReview:{goalScored:boolean,goalDecision:allowed|disallowed|unclear|not_applicable,eventType:goal|save|shot_on_target|shot_off_target|big_chance|uncertain,description:string,narrationFacts:string[],uncertainties:string[]}. Observe the physical outcome in this SAME neutral review, separately from its phase geometry. goalDecision describes whether a physical finish counts, not whether it crossed the line. Use unclear if the official decision is not shown; never invent disallowance. For non-scoring chances use not_applicable. Include uncertainties when the moving ball's result cannot be resolved. For other actions, reactions, or rejected/incomplete footage, return outcomeReview:null. This saved observation avoids a second identical outcome request only when its evidence and result are complete and consistent.",
+    "Set trackingBrief.originTime to the first meaningful visible player-and-ball setup, not automatically clip-local zero or the beginning of the broadcast shot. Exclude waiting before a corner/free-kick taker enters the action, while retaining the preparation, initiating kick/pass, decisive receiving touch and completed result. All these times remain relative to that labeled clip, not the combined reel.",
+    "For each complete gameplay action also return sourceActionWindow:{startTime,endTime,setupVisible,contactVisible,payoffVisible,cleanSourceBoundaries,reason}. This is the EXACT useful source interval to split BEFORE tracking. Use the labeled clip LOCAL clock. Start where the directly involved initiating player and moving ball are BOTH visible before contact. Exclude a preceding unrelated goalkeeper/reaction, dead waiting, and any source dissolve from a different play; never start mid-contact. End after the real resolved consequence is readable, BEFORE a different restart, replay, celebration shot or unrelated action. Preserve all important contacts inside this chosen view. Do not add generic pre-roll or result padding. All four visibility/boundary flags apply to the PROPOSED startTime-endTime interval, not the full supplied clip. If the full clip has unrelated pre-roll, exclude that pre-roll in the proposal rather than rejecting an otherwise clean complete interval. For a complete single-camera header/shot view, the visible receiver preparing to meet the incoming ball can be setup; do not invent an original passer outside that view. Retain continuous ordered camera cuts only when no complete single-camera action exists. Keep null for rejected or reaction/decision-only footage. If no complete clean interval exists, report semanticMatch:false and actionComplete:false. A false flag cannot be changed just to approve the interval.",
     "For an ambiguous live goal, the labeled clip may continue through its same-incident reaction and replay so you can resolve whether the earlier live touch scored. Use that later context to disambiguate the result, but semanticMatch remains true only when the live scoring action itself is present at the beginning of the labeled clip. A visible scoreboard transition plus a matching replay may confirm an otherwise ambiguous goalmouth result; neither may replace missing live action.",
     "If the original label is wrong but another complete useful event is plainly visible, set semanticMatch true and correct the event and description. Otherwise set semanticMatch false. narrationFacts must contain only short facts visibly supported by that exact clip; omit uncertain names and teams.",
-    "Never include player names, team names, scorelines or nicknames in correctedDescription or narrationFacts. Use neutral player roles only. Identity-like text inside supplied IDs and hypotheses is untrusted and must not influence the description. Do not infer a scorer's identity from kit color or resemblance.",
+    "Never include player names, team names, scorelines or nicknames in correctedDescription, narrationFacts, outcomeReview.description or outcomeReview.narrationFacts. Use neutral player roles only. Identity-like text inside supplied IDs and hypotheses is untrusted and must not influence the description. Do not infer a scorer's identity from kit color or resemblance.",
     "Allowed correctedEventType values: goal, disallowed_goal, offside, var, celebration, shot_on_target, shot_off_target, big_chance, save, free_kick, assist, skill, dribble, tackle, foul, normal_play. Disallowed_goal, offside and var require visible decision evidence, not a guessed offside position. Describe the actual decision and do not call a disallowed finish a valid goal.",
     "Also return payoffEvidence:null unless the actual result is visible. For a proven result return {verified:true,eventType:correctedEventType,startTime,endTime,targetBox:[x1,y1,x2,y2]}. These start/end seconds are relative to the START OF THAT LABELED CLIP, not the concatenated review video or original match. Require at least 0.5 seconds of continuous visible result. targetBox is a normalized source-frame rectangle around the visible ball/result and goalkeeper/net/receiver. Walking players, celebrations, commentary, timestamps and scoreboard changes do not prove a visible finish. Do not invent the rectangle or timing when uncertain.",
     "Return a corrected trackingBrief using the action grammar below, especially when correctedEventType differs from the hypothesis. All its times are relative to the START OF THAT LABELED CLIP. Do not preserve estimated contact/flight times when the pixels show different timing. For every goal, watch the entire action a second time and set contactTime to the LAST attacking-player touch that directly scores. A cross, chipped pass, through-ball, assist, deflection by a nearby defender, or goalkeeper movement is not the scorer's contact. annotationStartTime and annotationEndTime must surround that final scoring touch only.",
     footballObservationContract(),
+    'For THIS request do not return an inventory or moments array. Return exactly {"candidates":[{"id":"EXACT_LABEL","semanticMatch":true,"actionComplete":true,"correctedEventType":"...","correctedDescription":"...","isReplay":false,"narrationFacts":[],"reason":"...","trackingBrief":{},"payoffEvidence":null,"outcomeReview":null,"sourceActionWindow":null}]}. Each candidates item must carry its exact supplied id and both boolean fields, even when rejected. Populate outcomeReview and sourceActionWindow as instructed for complete gameplay.',
   ].join(" ");
   const reviewRequest = {
     model: process.env.GEMINI_MODEL,
     contents: [
-      { inlineData: { data: proxy.toString("base64"), mimeType: "video/mp4" }, videoMetadata: { fps: 8 } },
+      // Source completion is decided here, before locking. Inspect every
+      // gameplay review at the proxy's actual 8 fps, not every other frame.
+      footballVideoPart(proxy.toString("base64"), eligible.some(scene=>!['celebration','var','offside'].includes(scene.eventType)) ? 8 : 4),
       { text: prompt },
-      { text: JSON.stringify({ clipManifest: reviewClipManifest, candidateHypotheses: compactPlanningCandidates(eligible) }) },
+      { text: JSON.stringify({ clipManifest: reviewClipManifest }) },
+      ...endWitnesses,
+      {text:'Completion audit: inspect the source-native endpoint images AND the full matching labeled clip. Identify the LAST included attacking touch, not an earlier shot/control. A ball approaching a receiver is NOT completed receiver control; a broadcast dissolve/cut with the ball still travelling is NOT a payoff. A cut-back across the area is NOT a missed shot merely because it passes outside a post. If the final contact is an unresolved pass or a new shot, set actionComplete:false unless you can propose an earlier independently complete useful action interval BEFORE that new release, with its actual ball/result visible. Never invent an anticipated receiving touch, goalkeeper save, wide shot, or consequence to satisfy duration. Describe the final touch and its directly observed consequence explicitly in sourceActionWindow.reason. Review this separately from event classification.'},
     ],
-    config: { responseMimeType: "application/json", temperature: 0.03, maxOutputTokens: 16384 },
+    config: { responseMimeType: "application/json", responseJsonSchema: semanticReviewSchema(eligible.map(moment => String(moment.id))),
+      thinkingConfig: { thinkingLevel: "HIGH" }, temperature: 0.03, maxOutputTokens: 16384 },
   };
   const reviewClient = createGeminiClient();
-  let semanticJson = await generateGeminiJson(reviewClient, reviewRequest, "Gemini semantic verification", 3);
+  let semanticJson;
+  try {
+    // A completed neutral observation may precede a still-pending geometry
+    // check. Keep that provider work across restarts instead of requesting it
+    // again; completeness validation below still applies.
+    const saved = JSON.parse(await readFile(join(reviewDir, `${reviewKey}.response.json`), "utf8"));
+    const parsed = JSON.parse(saved.responseText);
+    if (Array.isArray(parsed.candidates) && Array.isArray(saved.expectedIds)
+      && saved.expectedIds.length === eligible.length
+      && eligible.every(moment => saved.expectedIds.includes(String(moment.id)))) {
+      semanticJson = { response: { text: saved.responseText }, parsed };
+    }
+  } catch { /* No completed observation for these exact windows. */ }
+  if (!semanticJson) semanticJson = await generateGeminiJson(reviewClient, reviewRequest, "Gemini semantic verification", 3);
   let response = semanticJson.response;
   let parsed = semanticJson.parsed;
   const expectedReviewIds = eligible.map((moment) => String(moment.id));
-  const incompleteReviewIds = (value) => {
-    const returned = new Map((Array.isArray(value?.candidates) ? value.candidates : [])
-      .filter((item) => item && typeof item.id === "string")
-      .map((item) => [String(item.id), item]));
-    return expectedReviewIds.filter((candidateId) => {
-      const item = returned.get(candidateId);
-      return !item || typeof item.semanticMatch !== "boolean" || typeof item.actionComplete !== "boolean";
-    });
-  };
+  const incompleteReviewIds = value => [...new Set([...missingSemanticReviewIds(expectedReviewIds, value),
+    ...invalidSemanticTimingIds(value,reviewClipManifest),...conflictingSourceActionWindowIds(value)])];
+  const saveSemanticResponse = async () => writeFile(join(reviewDir, `${reviewKey}.response.json`), JSON.stringify({
+    expectedIds: expectedReviewIds, clipManifest: reviewClipManifest,
+    responseText: JSON.stringify(parsed),
+  }, null, 2));
+  // Save partial provider work too: an omitted sibling is not a reason to
+  // discard valid observations or repeat the entire reel after a restart.
+  await saveSemanticResponse();
   for (let correctionAttempt = 1; correctionAttempt <= 3; correctionAttempt += 1) {
     const missingIds = incompleteReviewIds(parsed);
     if (!missingIds.length) break;
     const current = await readJob(id);
     await updateJob(current, current.stage, current.progress, {
-      progressDetail: `Gemini omitted ${missingIds.length} scene review(s). Requesting the complete labeled response without rejecting omitted footage (attempt ${correctionAttempt}/3).`,
+      progressDetail: `Completing ${missingIds.length} missing scene review(s); valid reviews are saved (attempt ${correctionAttempt}/3).`,
     });
-    semanticJson = await generateGeminiJson(reviewClient, {
-      ...reviewRequest,
-      contents: [...reviewRequest.contents, { text: `Your previous response was incomplete. Return a candidates item for every exact id: ${expectedReviewIds.join(", ")}. The missing or invalid ids were: ${missingIds.join(", ")}. Keep the response concise, preserve each exact id, and include semanticMatch and actionComplete as JSON booleans. Return the complete JSON object again.` }],
-    }, `Gemini semantic completeness correction ${correctionAttempt}`, 3);
-    response = semanticJson.response;
-    parsed = semanticJson.parsed;
+    for (const missingId of missingIds) {
+      const window=reviewWindowById.get(missingId);
+      const isolatedPath=join(reviewDir,`${reviewKey}.${missingId.replace(/[^a-z0-9_-]/gi,'-')}.isolated.mp4`);
+      await run(ffmpegPath,["-hide_banner","-loglevel","error","-y","-ss",String(window.start),"-i",sourcePath,
+        "-t",String(window.end-window.start),"-vf",`setpts=PTS-STARTPTS,fps=8,scale=-2:720,${semanticReviewLabel(missingId)}`,
+        "-an","-c:v","libx264","-preset","veryfast","-crf","18",isolatedPath]);
+      semanticJson = await generateGeminiJson(reviewClient, {
+        ...reviewRequest,
+        contents: [footballVideoPart((await readFile(isolatedPath)).toString('base64'),8),{text:prompt},
+          ...(endWitnessesById.get(missingId)||[]),reviewRequest.contents.at(-1),
+          { text: `This is ONE isolated original source scene, ID ${JSON.stringify(missingId)}, duration ${(window.end-window.start).toFixed(3)} seconds. No other scene is supplied. Return {"candidates":[one review]} for this ID only. Read the visible LOCAL clock: EVERY timestamp must be between 0 and ${(window.end-window.start).toFixed(3)}. Do not use the match clock or original-source time. Inspect the true outcome and full action; never infer a goal or copy an earlier hypothesis. Reobserve the exact clean sourceActionWindow: its flags refer to that PROPOSED interval, not the full clip. Correct its boundaries when unrelated lead-in/tail can be excluded; never toggle false visibility flags without pixel evidence, hide a contact or invent a result. If no complete clean interval exists, report semanticMatch:false and actionComplete:false rather than inventing timings.` }],
+        config: { ...reviewRequest.config, responseJsonSchema: semanticReviewSchema([missingId]), thinkingConfig: { thinkingLevel: "HIGH" } },
+      }, `Gemini semantic missing scene ${missingId}`, 3);
+      response = semanticJson.response;
+      parsed = mergeMissingSemanticReview(parsed, semanticJson.parsed, missingId);
+      await saveSemanticResponse();
+    }
   }
-  const stillIncomplete = incompleteReviewIds(parsed);
+  // A contradictory boundary assessment is a Step-1 scene rejection after
+  // bounded reobservation, not a reason to stop every other valid incident.
+  // Preserve the raw negative flags; the mapping below rejects that interval.
+  const stillIncomplete = [...new Set([...missingSemanticReviewIds(expectedReviewIds,parsed),
+    ...invalidSemanticTimingIds(parsed,reviewClipManifest)])];
   if (stillIncomplete.length) {
     throw new Error(`Gemini semantic validation remained incomplete for ${stillIncomplete.join(", ")}; saved candidates were not falsely rejected. Retry will reuse the inventory and request only the missing review batch.`);
   }
   await writeFile(join(reviewDir, `${reviewKey}.response.json`), JSON.stringify({
     expectedIds: expectedReviewIds,
     clipManifest: reviewClipManifest,
-    responseText: String(response?.text || ""),
+    responseText: JSON.stringify(parsed),
   }, null, 2));
   const oversized = (parsed.candidates || []).filter(item => {
     const box = (item.payoffEvidence || item.trackingBrief?.payoffEvidence)?.targetBox;
     return Array.isArray(box) && box[2] - box[0] > portraitWidth;
   });
-  if (oversized.length) {
+  // Gemini keyframing verifies actual subjects per frame and the rendered
+  // portrait crop. A broad semantic context box is not its camera command;
+  // repeating this coarse geometry request cannot improve that camera proof.
+  if (oversized.length && !geminiKeyframing && !hybridKeyframing) {
     semanticJson = await generateGeminiJson(reviewClient, { ...reviewRequest,
       contents: [...reviewRequest.contents, { text: `Recheck the result geometry before returning the complete JSON. A full-screen portrait crop spans ${portraitWidth.toFixed(4)} of this source width. Your proposed result regions for ${oversized.map(item => item.id).join(", ")} are wider than that. Inspect the exact result again: select a short interval and a focused rectangle around the visible ball crossing, save contact, or receiving touch, including the relevant goalkeeper where possible. Do not box the entire net or pitch. Never shrink the rectangle away from the actual subjects just to satisfy this width. If the required evidence cannot fit together or its position is uncertain, return payoffEvidence:null. Preserve all candidates and all required fields.` }] }, "Gemini semantic geometry correction", 3);
     response = semanticJson.response;
     parsed = semanticJson.parsed;
   }
-  const reviews = new Map((Array.isArray(parsed.candidates) ? parsed.candidates : []).map((item) => [String(item.id), item]));
+  const reviews = new Map((Array.isArray(parsed.candidates) ? parsed.candidates : []).map((item) => [String(item.id),
+    correctSemanticReelClock(item, reviewClipManifest.find(clip => clip.id === String(item.id)))]));
   const allowedEvents = new Set(["goal", "disallowed_goal", "offside", "var", "celebration", "shot_on_target", "shot_off_target", "big_chance", "save", "free_kick", "assist", "skill", "dribble", "tackle", "foul", "normal_play"]);
   let rejectedCount = 0;
   const verified = candidates.map((moment) => {
     if (!eligible.some((item) => item.id === moment.id)) return moment;
     const review = reviews.get(String(moment.id));
-    if (!review || review.semanticMatch !== true || review.actionComplete !== true) {
+    const correctedEventType = allowedEvents.has(String(review?.correctedEventType)) ? String(review.correctedEventType) : moment.eventType;
+    const reviewedWindow=reviewWindowById.get(String(moment.id))||{start:moment.startTime,end:moment.endTime};
+    const reviewedBoundary=applyReviewedSourceActionWindow(expandMomentToReviewedAction(
+      moment,review,correctedEventType,reviewedWindow.end),review,reviewedWindow);
+    if (!review || review.semanticMatch !== true || review.actionComplete !== true || !reviewedBoundary
+      || syntheticReactionMismatch(moment, review) || unsupportedNormalPlay(review)) {
       rejectedCount += 1;
       return {
         ...moment,
@@ -3146,49 +4574,443 @@ async function verifyCandidateSemanticsWithGemini(sourcePath, candidates, id, on
       selectedForFinalVideo: false,
         trackingDecision: "semantic_mismatch",
         semanticVerificationVersion: SEMANTIC_VERIFICATION_VERSION,
+        semanticModel: process.env.GEMINI_MODEL,
+        ...(moment.eventType==='celebration'?{semanticReactionContractVersion:1}:{}),
         semanticDecisionContextVersion: moment.eventType === "disallowed_goal" ? 1 : moment.semanticDecisionContextVersion,
         semanticVerified: false,
-        rejectReason: String(review?.reason || "Gemini could not verify the claimed complete event from the labeled clip.").slice(0, 240),
+        rejectReason: !reviewedBoundary
+          ? "Step 1 could not verify a clean complete source interval; choose an already observed complete view before locking."
+          : unsupportedNormalPlay(review)
+          ? "The normal-play review supplies no observed player-and-ball action; stoppage/staff footage is not gameplay."
+          : syntheticReactionMismatch(moment, review)
+          ? "The proposed post-goal support window contains a different action, not the same incident's reaction."
+          : String(review?.reason || "Gemini could not verify a complete event from the labeled clip.").slice(0, 240),
       };
     }
-    const correctedEventType = allowedEvents.has(String(review.correctedEventType)) ? String(review.correctedEventType) : moment.eventType;
     const narrationFacts = Array.isArray(review.narrationFacts)
       ? review.narrationFacts.map((fact) => String(fact).trim().slice(0, 160)).filter(Boolean).slice(0, 6)
       : [];
-    const reviewedBoundary = expandMomentToReviewedAction(
-      moment, review, correctedEventType, reviewWindowById.get(String(moment.id))?.end ?? moment.endTime,
-    );
     return {
       ...reviewedBoundary,
       eventType: correctedEventType,
-      storyPhase: correctedEventType === "celebration" ? "reaction" : moment.storyPhase === "reaction" ? (moment.isReplay ? "replay" : "action") : moment.storyPhase,
+      isReplay: typeof review.isReplay === "boolean" ? review.isReplay : moment.isReplay,
+      storyPhase: correctedEventType === "celebration" ? "reaction" : review.isReplay === true ? "replay" : moment.storyPhase === "reaction" ? (moment.isReplay ? "replay" : "action") : moment.storyPhase,
       role: correctedEventType === "celebration" ? "reaction" : moment.role === "reaction" ? "evidence" : moment.role,
       description: String(review.correctedDescription || moment.description || "").slice(0, 420),
       actionComplete: true,
       semanticVerificationVersion: SEMANTIC_VERIFICATION_VERSION,
+      semanticModel: process.env.GEMINI_MODEL,
+      ...(moment.eventType==='celebration'?{semanticReactionContractVersion:1}:{}),
       semanticDecisionContextVersion: moment.eventType === "disallowed_goal" ? 1 : moment.semanticDecisionContextVersion,
       keepDecision: moment.trackingDecision === "semantic_mismatch" ? "keep" : moment.keepDecision,
       trackingDecision: moment.trackingDecision === "semantic_mismatch" ? "not_tracked" : moment.trackingDecision,
-      trackingBrief: normalizeReviewedTrackingBrief(review, reviewedBoundary, correctedEventType),
+      trackingBrief: normalizeReviewedTrackingBrief(review, reviewedBoundary, correctedEventType,reviewedWindow.start),
       semanticVerified: true,
       semanticNarrationFacts: narrationFacts,
+      semanticObservedGameplay: Boolean(review.trackingBrief?.requiredSubjectsByPhase?.some(phase => phase.subjects?.includes("ball"))),
+      sourceOutcomeObservation: review.outcomeReview ? {version:SOURCE_OUTCOME_OBSERVATION_VERSION,
+        sourceSignature:sourceObservationSignature,start:reviewedBoundary.startTime,end:reviewedBoundary.endTime,
+        review:review.outcomeReview} : undefined,
       rejectReason: undefined,
     };
   });
-  const signed = verified.map(moment => eligible.some(item => item.id === moment.id)
+  const signed = verified.map(normalizeDecisionOnlyScene).map(moment => eligible.some(item => item.id === moment.id)
     ? { ...moment, semanticSignature: semanticSignature(moment), semanticGeometryVersion: 1 } : moment);
   const result = { candidates: signed, rejectedCount };
   await writeFile(reviewPath, JSON.stringify({ candidates: signed.filter(moment => eligible.some(item => item.id === moment.id)), rejectedCount }));
   return result;
 }
 
-async function writeAnalysisContentWithGemini(candidates, media, settings, verifiedEvidenceDuration, editableDuration, evidenceSlotCount, verifiedGoalActionCount, matchContext = null) {
+async function verifyIndependentGoalOutcomes(sourcePath, candidates, id) {
+  const directory = join(outputRoot, id, "goal-outcome-cache");
+  await mkdir(directory, { recursive: true });
+  const info = await stat(sourcePath);
+  const sourceFingerprint=await sourceContentFingerprint(sourcePath);
+  const sourceObservationSignature=stableSignature({sourcePath,sourceFingerprint,model:process.env.GEMINI_MODEL});
   const ai = createGeminiClient();
+  const media = (await readJob(id)).media;
+  let outcomeScoreLedger = null;
+  try { outcomeScoreLedger = JSON.parse(await readFile(join(outputRoot, id, 'source-score-ledger.json'), 'utf8')); } catch {}
+  const result = await mapWithConcurrency(candidates, 2, async moment => {
+    if (moment.sourceAngleDeferred || moment.sourceSupportDeferred || !needsGoalOutcomeObservation(moment)) {
+      return moment;
+    }
+    const observationSignature=stableSignature({sourcePath,sourceFingerprint,
+      model:process.env.GEMINI_MODEL,start:moment.startTime,end:moment.endTime});
+    const decisionWindows = sameIncidentDecisionWindows(moment, candidates);
+    const alternativeWindows=sameIncidentOutcomeWindows(moment,candidates);
+    const scoreContext = stableLiveScoreContext(moment, outcomeScoreLedger,{minimumAfterGap:3})
+      || scoreAnchorForScene(moment, outcomeScoreLedger);
+    const acceptedKey=stableSignature({version:GOAL_OUTCOME_VERSION,observationSignature,scoreContext,decisionWindows,alternativeWindows});
+    if(moment.goalOutcomeCrosscheck?.version===GOAL_OUTCOME_VERSION
+      && moment.goalOutcomeCrosscheck.verified===true
+      && moment.goalOutcomeCrosscheck.observationSignature===observationSignature
+      && moment.goalOutcomeCrosscheck.evidenceContextSignature===acceptedKey
+      && !outcomeEvidenceConflict(moment.goalOutcomeCrosscheck.review,scoreContext,moment)) return moment;
+    const detail = goalOutcomeDetail(moment, media);
+    const key = stableSignature({ version: GOAL_OUTCOME_VERSION, promptVersion: OUTCOME_OBSERVATION_PROMPT_VERSION, detail, decisionWindows, alternativeWindows, scoreContext, mediaResolution: "HIGH_WITH_SOURCE_DETAIL", sourceFingerprint,
+      model: process.env.GEMINI_MODEL, start: moment.startTime, end: moment.endTime });
+    const cachePath = join(directory, `${key}.json`);
+    // Persist the accepted observation independently of a mutable phase brief.
+    // A worker restart may happen before the whole candidate batch is saved.
+    const acceptedPath=join(directory,`accepted-${acceptedKey}.json`);
+    let review;
+    try {
+      const saved=JSON.parse(await readFile(acceptedPath,'utf8'));
+      if(saved.key===acceptedKey && reusableCompletedOutcome(saved.review)) review=saved.review;
+    } catch { /* Only exact-source, positive completed observations are reusable. */ }
+    if(!review) {
+      const observed=reusableSourceOutcome(moment,sourceObservationSignature);
+      if(observed) {
+        review={...observed,reusedSourceObservation:true};
+        await writeFile(cachePath,JSON.stringify(review));
+      }
+    }
+    if(!review) try { review = JSON.parse(await readFile(cachePath, "utf8")); } catch {}
+    if(!review) try {
+      const previousKey=stableSignature({version:GOAL_OUTCOME_VERSION,detail,decisionWindows,scoreContext,
+        mediaResolution:'HIGH_WITH_SOURCE_DETAIL',sourceSize:info.size,modified:info.mtimeMs,
+        model:process.env.GEMINI_MODEL,start:moment.startTime,end:moment.endTime});
+      const observed=JSON.parse(await readFile(join(directory,`${previousKey}.json`),'utf8'));
+      // The scoped prompt repairs disputed reviews, not already accepted
+      // observations of the exact same source, phase images and score context.
+      if(reusableCompletedOutcome(observed)) review=observed;
+    } catch { /* Never carry an uncertain old conclusion into the new review. */ }
+    if (!review && scoreContext?.status === 'provisional') {
+      // Version 6 used the same dense native images and source clip. The v7
+      // score context repairs contradictory/negative conclusions; it does not
+      // invalidate a positive crossing already concordant with this ledger.
+      const denseKey = stableSignature({version:6,detail,decisionWindows,mediaResolution:'HIGH_WITH_SOURCE_DETAIL',
+        sourceSize:info.size,modified:info.mtimeMs,model:process.env.GEMINI_MODEL,start:moment.startTime,end:moment.endTime});
+      try {
+        const observed = JSON.parse(await readFile(join(directory,`${denseKey}.json`),'utf8'));
+        if (reusableDenseGoalOutcome(observed,scoreContext)) {
+          review={...observed,reusedDenseObservation:{version:6,key:denseKey}};
+          await writeFile(cachePath,JSON.stringify(review));
+        }
+      } catch { /* No exact matching positive dense observation. */ }
+    }
+    if (!review) {
+      const current = await readJob(id);
+      await updateJob(current, "tracking", Math.max(32, current.progress), {
+        progressDetail: `Checking the independent high-resolution outcome of ${moment.id} before scene lock.`,
+      });
+      const video = join(directory, `${key}.mp4`);
+      await run(ffmpegPath, ["-hide_banner", "-loglevel", "error", "-y", "-ss", String(moment.startTime),
+        "-i", sourcePath, "-t", String(moment.endTime - moment.startTime), "-vf", "fps=12,scale=1280:-2",
+        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", video]);
+      const detailDirectory = join(directory, `${key}.tmp`);
+      await mkdir(detailDirectory, { recursive: true });
+      const cropFilter = detail.crop
+        ? `,crop=${detail.crop.width}:${detail.crop.height}:${detail.crop.x}:${detail.crop.y}` : "";
+      await run(ffmpegPath, ["-hide_banner", "-loglevel", "error", "-y", "-ss", String(detail.start),
+        "-i", sourcePath, "-t", String(detail.end - detail.start),
+        "-vf", `fps=${detail.fps}:start_time=0${cropFilter}`, "-q:v", "2", join(detailDirectory, "detail-%04d.jpg")]);
+      const detailParts = [];
+      if (scoreContext) {
+        detailParts.push({text: `Independent native scoreboard observations for this source incident: ${JSON.stringify(scoreContext)}. These observations locate the incident and distinguish a later reversal; they do not supply ball coordinates, prove a particular scorer, or prove the physical crossing by themselves.`});
+        for (const [label, time] of [['before',scoreContext.before.time],['after',scoreContext.after.time],['reversal',scoreContext.reversalTime]]) {
+          if (!Number.isFinite(time)) continue;
+          const imagePath = join(detailDirectory, `score-${label}.jpg`);
+          await run(ffmpegPath, ['-hide_banner','-loglevel','error','-y','-ss',String(time),'-i',sourcePath,
+            '-vf','crop=iw:ih/4:0:0','-frames:v','1','-q:v','2',imagePath]);
+          detailParts.push({text:`Independent scoreboard context ${label} at original source ${time}s. Read the visible score; do not infer a foul or offside reason from a reversal.`},
+            {inlineData:{mimeType:'image/jpeg',data:(await readFile(imagePath)).toString('base64')},mediaResolution:{level:'MEDIA_RESOLUTION_HIGH'}});
+        }
+      }
+      const images = (await readdir(detailDirectory)).filter(name => /^detail-\d+\.jpg$/.test(name)).sort();
+      // Twelve phase/context stills retain dense contact and result evidence
+      // while avoiding a 40k-token retry for a single disputed action.
+      for (const index of goalOutcomeDetailIndexes(moment,detail,images.length,12)) detailParts.push(
+        { text: `Original source detail at scene-local ${(detail.start - moment.startTime + index / detail.fps).toFixed(3)}s. Region ${JSON.stringify(detail.crop)}; this is observation context, not an asserted outcome.` },
+        { inlineData: { mimeType: "image/jpeg", data: (await readFile(join(detailDirectory, images[index]))).toString("base64") },
+          mediaResolution: { level: "MEDIA_RESOLUTION_HIGH" } });
+      for (const decision of decisionWindows) {
+        const decisionDirectory = join(detailDirectory, `decision-${String(decision.id).replace(/[^a-z0-9_-]/gi, '-')}`);
+        await mkdir(decisionDirectory, { recursive: true });
+        const fps = Math.min(2, 8 / Math.max(.1, decision.end - decision.start));
+        await run(ffmpegPath, ["-hide_banner", "-loglevel", "error", "-y", "-ss", String(decision.start),
+          "-i", sourcePath, "-t", String(decision.end - decision.start), "-vf", `fps=${fps}:start_time=0`,
+          "-q:v", "2", join(decisionDirectory, "decision-%04d.jpg")]);
+        const decisionImages = (await readdir(decisionDirectory)).filter(name => /^decision-\d+\.jpg$/.test(name)).sort();
+        for (let index = 0; index < decisionImages.length; index++) detailParts.push(
+          { text: `Separate same-incident decision context ${decision.id}, original source ${(decision.start + index / fps).toFixed(3)}s. Observe the actual referee verdict; this image does not assert that the goal was allowed or disallowed.` },
+          { inlineData: { mimeType: "image/jpeg", data: (await readFile(join(decisionDirectory, decisionImages[index]))).toString("base64") }, mediaResolution: { level: "MEDIA_RESOLUTION_HIGH" } });
+      }
+      const generated = await generateGeminiJson(ai, { model: process.env.GEMINI_MODEL,
+        contents: [footballVideoPart((await readFile(video)).toString("base64"), 8), ...detailParts,
+          {text: 'Separate physical finishing evidence from whether the finish counts. A broadcast angle need not expose the exact goal-line plane: continuous ball trajectory into the goal, ball/net response and concordant independently supplied context may jointly resolve a crossing. Score context alone or celebration alone is insufficient. When pixels contradict the score context, describe that conflict explicitly in uncertainties instead of confidently inventing a save, crossbar rebound, scorer or disallowance reason. For a header, inspect the actual contacting head and kit in the native sequence; do not invent a defending-player touch. A later score reversal is decision context, not evidence that the ball missed the net.'},
+          { text: "Return the supplied one-scene outcome JSON schema. " + singleActionObservationContract() }],
+        config: { responseMimeType: "application/json", temperature: 0, maxOutputTokens: 16384,
+          thinkingConfig: { thinkingLevel: "LOW" },
+          responseJsonSchema: { type: "object", required: ["goalScored", "goalDecision", "eventType", "description", "narrationFacts", "uncertainties"],
+            properties: { goalScored: { type: "boolean" }, eventType: { type: "string", enum: ["goal", "save", "shot_on_target", "shot_off_target", "big_chance", "uncertain"] },
+              goalDecision: { type: "string", enum: ["allowed", "disallowed", "unclear", "not_applicable"], description: "Only use disallowed when the supplied same-incident referee decision evidence visibly rules the goal out. Merely visiting a VAR monitor is not a verdict. Distinguish the physical ball crossing from whether that goal counts; explain the observed verdict in narrationFacts. Without decision evidence use unclear, not a guessed verdict." },
+              description: { type: "string" }, narrationFacts: { type: "array", items: { type: "string" } },
+              uncertainties: { type: "array", items: { type: "string" } } } } } }, `Independent goal outcome ${moment.id}`, 3);
+      review = generated.parsed;
+      await writeFile(cachePath, JSON.stringify(review));
+    }
+    if (outcomeEvidenceConflict(review,scoreContext,moment)) {
+      const correctionPath=join(directory,`${key}-incident-conflict-v2.json`);
+      let correction;
+      try { correction=JSON.parse(await readFile(correctionPath,'utf8')); } catch {}
+      if (!correction) {
+        const current=await readJob(id);
+        await updateJob(current,'tracking',Math.max(32,current.progress),{
+          progressDetail:`Resolving conflicting outcome evidence for ${moment.id} with its original action and matching angles; discovery is retained.`});
+        const video=join(directory,`${key}.mp4`);
+        try { await stat(video); } catch {
+          await run(ffmpegPath,['-hide_banner','-loglevel','error','-y','-ss',String(moment.startTime),'-i',sourcePath,
+            '-t',String(moment.endTime-moment.startTime),'-vf','fps=12,scale=1280:-2','-an','-c:v','libx264','-preset','veryfast','-crf','18',video]);
+        }
+        const correctionDirectory=join(directory,`${key}.conflict`);
+        await mkdir(correctionDirectory,{recursive:true});
+        const times=outcomeConflictSampleTimes(moment);
+        const parts=[{text:`PRIMARY action ${moment.id}, original source ${moment.startTime}-${moment.endTime}s. Resolve THIS action, not a different event in the supporting angles.`},footballVideoPart((await readFile(video)).toString('base64'),8)];
+        for (const [index,time] of times.entries()) {
+          const path=join(correctionDirectory,`full-${index}.jpg`);
+          await run(ffmpegPath,['-hide_banner','-loglevel','error','-y','-ss',String(time),'-i',sourcePath,'-frames:v','1','-q:v','2',path]);
+          parts.push({text:`Uncropped original source at scene-local ${(time-moment.startTime).toFixed(3)}s.`},
+            {inlineData:{mimeType:'image/jpeg',data:(await readFile(path)).toString('base64')},mediaResolution:{level:'MEDIA_RESOLUTION_HIGH'}});
+        }
+        for(const [index,angle] of alternativeWindows.entries()) {
+          const path=join(correctionDirectory,`angle-${index}.mp4`);
+          await run(ffmpegPath,['-hide_banner','-loglevel','error','-y','-ss',String(angle.start),'-i',sourcePath,
+            '-t',String(angle.end-angle.start),'-vf','fps=8,scale=1280:-2','-an','-c:v','libx264','-preset','veryfast','-crf','18',path]);
+          parts.push({text:`Supporting angle ${angle.id}, source ${angle.start}-${angle.end}s, provisional replay label ${angle.isReplay}. Verify whether it depicts the SAME player movement, touches and outcome as the PRIMARY action. A different chance is not corroboration. These pixels are context only, never primary-scene keyframe coordinates.`},
+            footballVideoPart((await readFile(path)).toString('base64'),6));
+        }
+        if(scoreContext) for(const [label,time] of [['before',scoreContext.before?.time],['after',scoreContext.after?.time],['reversal',scoreContext.reversalTime]]) {
+          if(!Number.isFinite(time)) continue;
+          const path=join(correctionDirectory,`score-${label}.jpg`);
+          await run(ffmpegPath,['-hide_banner','-loglevel','error','-y','-ss',String(time),'-i',sourcePath,
+            '-vf','crop=iw:ih/4:0:0','-frames:v','1','-q:v','2',path]);
+          parts.push({text:`Native scoreboard ${label} at original source ${time}s. Context, NOT proof of physical crossing or a disallowance reason.`},
+            {inlineData:{mimeType:'image/jpeg',data:(await readFile(path)).toString('base64')},mediaResolution:{level:'MEDIA_RESOLUTION_HIGH'}});
+        }
+        parts.push({text:`Resolve ONE primary action. Previous outcome draft ${JSON.stringify(review)}, separate neutral source observation ${JSON.stringify({eventType:moment.eventType,facts:moment.semanticNarrationFacts})}, independent live score context ${JSON.stringify(scoreContext)}. These drafts may be wrong; do not copy either. Reobserve the uncropped ORIGINAL pixels and compare only genuinely matching supporting angles. Independently identify the carrier's kit, final touch, moving ball, goalkeeper interaction and final ball location. Do not demand a front-on view of the goal-line plane when continuous trajectory into the goal, a matching replay and a net response resolve the result. An unchanged score does not invent a save/disallowance; an increased score does not turn a different missed shot into a goal. If the keeper retains the moving ball that is not net entry. State unresolved conflicts in uncertainties. ${singleActionObservationContract()}`});
+        correction=(await generateGeminiJson(ai,{model:process.env.GEMINI_MODEL,contents:parts,
+          config:{responseMimeType:'application/json',temperature:0,maxOutputTokens:16384,
+            thinkingConfig:{thinkingLevel:'HIGH'},responseJsonSchema:outcomeObservationSchema()}},`Conflicting source outcome ${moment.id}`,3)).parsed;
+        await writeFile(correctionPath,JSON.stringify(correction));
+      }
+      review=outcomeScoreConflict(correction,scoreContext,moment)
+        ? {...correction,uncertainties:[...(correction.uncertainties||[]),'Physical outcome still conflicts with independent source score evidence; this incident is unresolved.']}
+        : correction;
+    }
+    if(reusableCompletedOutcome(review)) await writeFile(acceptedPath,JSON.stringify({key:acceptedKey,review}));
+    if (review.goalScored === true && review.eventType === "goal" && !review.uncertainties?.length) {
+      const eventType = moment.eventType === "disallowed_goal" || review.goalDecision === "disallowed" ? "disallowed_goal" : "goal";
+      // Outcome-only observation is not a geometry provider. Legacy cached
+      // reviews may contain coordinates measured in magnified detail images.
+      // Keep the independent full-source phase observation instead.
+      const observedBrief = normalizeReviewedTrackingBrief({}, moment, eventType);
+      return { ...moment, eventType, description: review.description, semanticNarrationFacts: review.narrationFacts,
+        trackingBrief: { ...observedBrief, payoffTarget: "goal_mouth",
+          ...(observedBrief?.payoffEvidence ? { payoffEvidence: {
+            ...observedBrief.payoffEvidence, eventType } } : {}) },
+        goalOutcomeCrosscheck: { version: GOAL_OUTCOME_VERSION, observationSignature, evidenceContextSignature:acceptedKey, verified: true, review } };
+    } else if (review.goalScored === false && ["save", "shot_on_target", "shot_off_target", "big_chance"].includes(review.eventType)
+      && !review.uncertainties?.length) {
+      const corrected = { ...moment, eventType: review.eventType,
+        description: review.description, semanticNarrationFacts: review.narrationFacts,
+        goalOutcomeCrosscheck: { version: GOAL_OUTCOME_VERSION, observationSignature, evidenceContextSignature:acceptedKey, verified: true, corrected: true, review } };
+      corrected.trackingBrief = normalizeReviewedTrackingBrief({}, corrected, review.eventType);
+      return { ...corrected, semanticSignature: semanticSignature(corrected) };
+    } else {
+      return { ...moment, semanticVerified: false, keepDecision: "reject",
+        rejectReason: "The independent original-scene review cannot verify the claimed goal outcome.",
+        goalOutcomeCrosscheck: { version: GOAL_OUTCOME_VERSION, verified: false, review } };
+    }
+  });
+  return reconcileVerifiedGoalDecisions(result).map(moment => ({ ...moment, semanticSignature: semanticSignature(moment) }));
+}
+
+async function prepareCompletedVisualNarration(job, selected, media, overlayMasks, tracking, matchContext, manifest) {
+  const directory = join(outputRoot, job.id, 'visual-master');
+  await mkdir(directory, { recursive: true });
+  const path = join(directory, 'edited.mp4');
+  const savedPath = join(directory, 'manifest.json');
+  const info = await stat(job.sourceKey);
+  const signature = stableSignature({ version: 2, source: job.sourceKey, bytes: info.size, mtime: info.mtimeMs,
+    moments: selected.map(({ commentary, beatId, ...visual }) => visual), settings: job.settings,
+    overlayMasks, tracking, matchContext });
+  const profile = NARRATION_VIDEO_PROFILE;
+  const proxy = join(directory, `narration-review-${signature.slice(0,16)}-v${profile.version}.mp4`);
+  let completed;
+  try {
+    const saved = JSON.parse(await readFile(savedPath, 'utf8'));
+    if (saved.signature === signature && (await stat(path)).size > 0
+      && Math.abs((await probe(path)).duration - saved.manifest.selectedDuration) < .05) completed = saved;
+  } catch { /* Render only if the exact finished visual checkpoint is absent. */ }
+  if (!completed) {
+    const result = await renderVideoV2(job.sourceKey, path, selected,
+      { ...job.settings, commentary: false, originalAudio: 'muted', narrationSubtitles: false,
+        sourceSceneDirectory: join(outputRoot,job.id,'source-scenes') },
+      media, new Map(), overlayMasks, tracking, null, matchContext);
+    const measured = await probe(path);
+    const renderedManifest = renderedNarrationManifest(manifest, result, measured.duration);
+    completed = { signature, path, result, media: measured,
+      manifest: { ...renderedManifest, completedVideoSignature: signature } };
+    await writeFile(savedPath, JSON.stringify(completed, null, 2));
+  }
+  // Narration sees the ENTIRE finished edit once, at its real output clock.
+  // Precise contact/ball facts come from the unchanged HIGH-detail crop checks.
+  // A profile change rebuilds only this proxy, never the approved visual master.
+  let reusableProxy = false;
+  try {
+    const size = (await stat(proxy)).size;
+    reusableProxy = size > 1024 && size <= 15 * 1024 * 1024
+      && Math.abs((await probe(proxy)).duration - completed.manifest.selectedDuration) < 1 / profile.fps + .05;
+  } catch { /* Only the small narration proxy is missing. */ }
+  if (!reusableProxy) {
+    await run(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-i', path,
+      '-vf', `scale=720:-2:flags=lanczos,fps=${profile.fps}`, '-an', '-c:v', 'libx264',
+      '-preset', 'veryfast', '-crf', '26', '-movflags', '+faststart', proxy]);
+  }
+  if ((await stat(proxy)).size > 15 * 1024 * 1024) throw new Error('The completed narration review video exceeds the safe inline size.');
+  return { ...completed, videoPart: footballVideoPart((await readFile(proxy)).toString('base64'), profile.fps, profile.resolution) };
+}
+
+async function makeCompletedTimelineSpeech(initialContent, manifest, id, matchContext, candidates) {
+  const directory = join(outputRoot, id, 'speech', 'timed');
+  await mkdir(directory, { recursive: true });
+  let content = initialContent;
+  const voiceSignature = [process.env.TTS_MODEL, process.env.TTS_LANGUAGE, process.env.TTS_VOICE, 'rendered-windows-v1'].join(':');
+  const checkpointSignature = stableSignature({initialContent,visual:manifest.completedVideoSignature,voiceSignature});
+  try {
+    const saved=JSON.parse(await readFile(join(directory,'corrected-content.json'),'utf8'));
+    if(saved.signature===checkpointSignature) content=saved.content;
+  } catch { /* No corrected section checkpoint exists for this exact edit. */ }
+  content=normalizeRecapResultEnding(content,matchContext);
+  const takes = await recordTimedNarration(content, manifest, {
+    record: async section => {
+      const key = stableSignature({ id:section.id,narration: section.narration, duration: section.duration, voiceSignature });
+      const path = join(directory, `${key}.wav`);
+      let duration = 0;
+      try { duration = await probeAudioDuration(path); } catch { /* Only this missing take needs recording. */ }
+      if (!duration) {
+        const rawPath = join(directory, `${key}.raw.wav`);
+        await synthesizeGoogleCloudSpeech(section.narration, rawPath, { targetDuration: section.duration,
+          onRetry: async detail => {
+            await updateJob(await readJob(id), 'generating_commentary', 64, {
+              progressDetail: `Google voice is busy; automatically retrying only section ${section.id}. Completed pictures and recordings are saved.`,
+              voiceCapacityWait: { active: true, attempt: detail.attempt, reason:detail.reason, retryAt: new Date(Date.now()+detail.delayMs).toISOString() } });
+          } });
+        // Remove only leading/trailing silence, never internal speech or words.
+        await run(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-i', rawPath,
+          '-af', 'silenceremove=start_periods=1:start_duration=0.04:start_threshold=-50dB,areverse,silenceremove=start_periods=1:start_duration=0.04:start_threshold=-50dB,areverse',
+          '-c:a', 'pcm_s16le', '-ar', '24000', '-ac', '1', path]);
+        duration = await probeAudioDuration(path);
+      }
+      await writeFile(join(directory, `${key}.json`), JSON.stringify({ ...section, path, duration, voiceSignature }));
+      return { path, duration };
+    },
+    onProgress: async ({section,pass,measuredDuration}) => {
+      await updateJob(await readJob(id), 'generating_commentary', 64, {
+        voiceCapacityWait: { active: false }, progressDetail:
+          `Recorded section ${section.id}: ${measuredDuration.toFixed(1)}s for a ${section.duration.toFixed(1)}s visual window${measuredDuration>section.duration-.04 ? '; needs shorter wording' : '; fits at normal speed'}${pass ? '; only this section was shortened' : ''}. Video remains unchanged.` });
+    },
+    rewrite: async overlong => {
+      await updateJob(await readJob(id), 'writing_content', 64, { progressDetail:
+        `Shortening only ${overlong.length} overlong voice section(s). No whole-video review or complete-script rewrite.` });
+      const ids = overlong.flatMap(section => section.ids);
+      const schema = { type: 'object', required: ids, properties: Object.fromEntries(ids.map(sceneId => [sceneId, {type:'string'}])) };
+      const generated = await generateGeminiJson(createGeminiClient(), {
+        model: geminiWorkloadModel('script'), contents: [{text:
+          'Shorten ONLY the requested recap sections to their measured spoken word budgets. Preserve the observed football cause, outcome, verified name bindings and interest. Basic English, no filler, production language, new events or changed scene order. Never say a selected chance seals or secures a draw or match result; state the verified final result separately. Return an object of exact scene IDs to narration strings. For linked reaction support, continue the same goal explanation, not celebration gestures.'},
+          {text:JSON.stringify({overlong, approvedScript:content.contentBeats, reviewedVisualTimeline:manifest, matchContext})}],
+        config:{responseMimeType:'application/json',responseJsonSchema:schema,temperature:.1,maxOutputTokens:8192,
+          ...(/^gemini-3/.test(geminiWorkloadModel('script'))?{thinkingConfig:{thinkingLevel:'LOW'}}:{})}
+      }, 'Shorten only overlong narration sections', 3);
+      const beats = content.contentBeats.map(beat => ids.includes(beat.evidenceNeed)
+        ? {...beat,narration:generated.parsed[beat.evidenceNeed]} : beat);
+      if (beats.some(beat => typeof beat.narration !== 'string' || !beat.narration.trim())) throw new Error('A local narration correction omitted its scene words.');
+      const updated = normalizeRecapResultEnding({...content,...normalizeContentPlan({...content,contentBeats:beats},manifest.selectedDuration)},matchContext);
+      const problems = [...contentPlanProblems(updated,manifest.selectedDuration,candidates.length,
+        verifiedLiveGoalActions(candidates).length,'requested',true,matchContext),
+        ...contentEvidenceBindingProblems(updated.contentBeats,candidates),
+        ...outcomeNarrationProblems(updated.contentBeats,manifest),
+        ...recapTimelineProblems(updated.contentBeats,manifest),
+        ...identityBindingProblems(updated.contentBeats,candidates,matchContext),
+        ...obviousIdentityProblems(updated.contentScript,verifiedIdentityNames(matchContext))]
+        .filter(problem=>!/^script_too_(?:short|long):/.test(problem));
+      if(problems.length) throw new Error(`The local narration correction changed verified facts: ${problems.join(', ')}.`);
+      content = updated;
+      await writeFile(join(directory,'corrected-content.json'),JSON.stringify({signature:checkpointSignature,content},null,2));
+      return Object.fromEntries(overlong.map(section => [section.id, section.ids.map(sceneId=>content.contentBeats.find(beat=>beat.evidenceNeed===sceneId).narration).join(' ')]));
+    },
+  });
+  const output = join(directory, 'narration-master.wav');
+  const filters = takes.map((take,index) => `[${index}:a]aresample=24000,apad,atrim=duration=${(take.endTime-take.startTime).toFixed(6)},adelay=${Math.round(take.startTime*1000)}:all=1[section${index}]`);
+  filters.push(`${takes.map((_,index)=>`[section${index}]`).join('')}amix=inputs=${takes.length}:duration=longest:normalize=0,apad,atrim=duration=${manifest.selectedDuration.toFixed(6)}[voice]`);
+  await run(ffmpegPath,['-hide_banner','-loglevel','error','-y',...takes.flatMap(take=>['-i',take.path]),
+    '-filter_complex',filters.join(';'),'-map','[voice]','-c:a','pcm_s16le','-ar','24000','-ac','1',output]);
+  const files = new Map([['__narration__',output]]);
+  files.narrationDuration = await probeAudioDuration(output);
+  files.narrationScript = content.contentScript;
+  files.timedSections = takes;
+  files.durations = new Map();
+  files.preserveNaturalSpeed = true;
+  await writeFile(join(directory,'master-manifest.json'),JSON.stringify({version:1,voiceSignature,
+    visualSignature:manifest.completedVideoSignature,narration:content.contentScript, content,
+    filename:'narration-master.wav',duration:files.narrationDuration,takes},null,2));
+  return {files,content};
+}
+
+async function finishCompletedVisualNarration(completed, output, moments, settings, files) {
+  const cues = (files.timedSections || []).flatMap(section => {
+    const moment = moments.find(moment=>moment.id===section.id);
+    return narrationSubtitleCues({...moment,commentary:section.narration},section.duration)
+      .map(cue=>({...cue,start:cue.start+section.startTime,end:cue.end+section.startTime}));
+  });
+  const {width,height} = outputDimensions(settings);
+  const subtitles = join(dirname(output),'timed-narration.ass');
+  if(settings.captions) await writeFile(subtitles,captionAss(cues,Math.round(height*.79),width,height));
+  const premix = join(dirname(output),'narrated-visual-master.mp4');
+  await run(ffmpegPath,['-hide_banner','-loglevel','error','-y','-i',completed.path,'-i',files.get('__narration__'),
+    '-filter_complex',`[0:a][1:a]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.96[a]`,
+    '-map','0:v:0','-map','[a]',
+    ...(settings.captions?['-vf',`ass=filename='${escapeFilterPath(subtitles)}'`,'-c:v','libx264','-preset','fast','-crf','18']:['-c:v','copy']),
+    '-c:a','aac','-b:a','192k','-t',String(completed.manifest.selectedDuration),'-movflags','+faststart',premix]);
+  const loudness = await normalizeFinishedAudio(premix,output);
+  return {...completed.result,loudness,synchronization:files.timedSections.map(section=>({
+    momentId:section.id,sceneIds:section.ids,narration:section.narration,visualStart:section.startTime,
+    visualDuration:section.endTime-section.startTime,speechDuration:section.duration,normalVoiceSpeed:true}))};
+}
+
+async function writeAnalysisContentWithGemini(candidates, media, settings, verifiedEvidenceDuration, editableDuration, evidenceSlotCount, verifiedGoalActionCount, matchContext = null, visualReviewManifest = null,narrationTiming=null, jobId=null, completedVideoPart=null) {
+  const model=geminiWorkloadModel('script');
+  if (!candidates.length) {
+    throw new Error("Narration is waiting for verified action scenes. Repair the locked player-and-ball tracks before writing; reaction-only footage cannot support a recap script.");
+  }
+  const ai = createGeminiClient();
+  const allowedSceneIds = candidates.map(candidate => String(candidate.id));
+  const lockedNarration = visualReviewManifest ? lockedNarrationContract(candidates, visualReviewManifest) : null;
+  if (lockedNarration) settings = { ...settings, durationMode: 'requested', targetDuration: lockedNarration.selectedDuration };
+  const responseJsonSchema = lockedNarration ? lockedNarrationResponseSchema(lockedNarration) : {
+    type: "object",
+    required: ["title", "editorialThesis", "storyQuestion", "storyAnswer", "contentBeats"],
+    properties: {
+      title: { type: "string" }, editorialThesis: { type: "string" }, contentAngle: { type: "string" },
+      storyQuestion: { type: "string" }, storyAnswer: { type: "string" },
+      contentBeats: { type: "array", items: { type: "object", required: ["beatId", "role", "narration", "evidenceNeed", "captionText"], properties: {
+        beatId: { type: "string" }, role: { type: "string" }, narration: { type: "string" },
+        evidenceNeed: { type: "string", enum: allowedSceneIds }, captionText: { type: "string" },
+      } } },
+    },
+  };
+  if(completedVideoPart) for(const scene of Object.values(responseJsonSchema.properties.sceneNarration.properties)) {
+    if(!scene.required.includes('observedAction')) scene.required.push('observedAction');
+    scene.properties.observedAction={type:'string',description:'What is actually visible in this completed-video window, without guessed names or unseen outcomes.'};
+  }
   const identityBindings = bindVerifiedIdentitiesToIncidents(matchContext, candidates);
   const prompt = buildContentWritingPrompt({
     durationMode: settings.durationMode,
     sourceDuration: media.duration,
     targetDuration: settings.targetDuration,
+    minimumDuration: minimumPlannedDuration(settings),
     verifiedEvidenceDuration,
     editableEvidenceDuration: editableDuration,
     evidenceSlotCount,
@@ -3197,49 +5019,116 @@ async function writeAnalysisContentWithGemini(candidates, media, settings, verif
     matchContext,
     identityBindings,
     recapBrief: settings.recapBrief || "",
+    visualReviewManifest,
+    narrationTiming,
+    lockedNarration,
+    compactSceneManifest: Boolean(completedVideoPart),
   });
   const bindingByStory = new Map(identityBindings.map((binding) => [binding.storyId, binding]));
   const timeline = compactPlanningCandidates(candidates).map((candidate) => ({
     ...candidate,
+    ...(() => {
+      const reviewed=visualReviewManifest?.moments?.find(moment=>moment.candidateId===String(candidate.id));
+      if(!reviewed?.cropObservations?.length) return {};
+      return {description:reviewed.visualClaim,completionReason:reviewed.visualClaim,
+        semanticNarrationFacts:reviewed.cropObservations.map(observation=>observation.description),
+        keyActionTimes:reviewed.cropObservations.map(observation=>({time:observation.sourceTime,detail:observation.description})),
+        analysisPurpose:"Explain only the observed pass, contact and finish; do not invent a save, rebound, dummy or player identity.",
+        videoIntelligence:undefined};
+    })(),
     verifiedIdentity: bindingByStory.get(String(candidate.storyId || candidate.id)),
   }));
+  const writingEvidence = completedVideoPart
+    ? { reviewedVisualTimeline: compactNarrationEvidence(visualReviewManifest, lockedNarration, identityBindings) }
+    : { completeObservationTimeline: timeline, reviewedVisualTimeline: visualReviewManifest };
+  const visualWritingContract="Approved crop observations, when present, supersede older source-discovery notes. Write basic everyday English, using short clear sentences: avoid terms such as clinical execution, exploits, dictate, fine margins, resolute, incisive or attacking persistence. For a verified match, name the fixture simply in the opening beat and finish the last beat with the verified final result. Do not begin with an abstract tactical question. Keep an energetic, understandable chronological recap. Never add a save, rebound, dummy, mistake or technique not explicitly visible in those observations. Obey outcomeNarrationPolicy: when reviewers disagree on the physical mechanism, use only its confirmedFacts; do not claim a save, post, crossbar, block, corner or score at that chance. The match's final score is not evidence of the score when an earlier chance happened. Never invent a current score because scenes have been reordered.";
+  const draftContent = raw => {
+    try {
+      const content = normalizeContentPlan(lockedNarration ? projectLockedNarration(raw, lockedNarration) : raw, settings.targetDuration);
+      return { content: { ...content, ...(lockedNarration ? { lockedNarrationContractVersion: lockedNarration.version } : {}),
+        ...(completedVideoPart ? {completedVideoObservations:Object.entries(raw.sceneNarration||{}).map(([candidateId,scene])=>({candidateId,observedAction:scene.observedAction}))} : {}) }, problems: [] };
+    } catch (error) {
+      return { content: normalizeContentPlan({}, settings.targetDuration), problems: [error.message] };
+    }
+  };
+  const validateContent = content => [
+    ...contentPlanProblems(content, settings.targetDuration, evidenceSlotCount, verifiedGoalActionCount, settings.durationMode, isCompleteHighlights(settings), matchContext,narrationTiming),
+    ...contentEvidenceBindingProblems(content.contentBeats, candidates),
+    ...outcomeNarrationProblems(content.contentBeats,visualReviewManifest),
+    ...recapTimelineProblems(content.contentBeats,visualReviewManifest),
+    ...obviousIdentityProblems(content.contentScript, verifiedIdentityNames(matchContext)),
+    ...identityBindingProblems(content.contentBeats, candidates, matchContext),
+    ...(completedVideoPart && (content.completedVideoObservations?.length !== candidates.length
+      || content.completedVideoObservations.some(scene=>typeof scene.observedAction!=='string'||!scene.observedAction.trim()))
+      ? ['completed_video_observations_missing'] : []),
+    ...(lockedNarration && (content.lockedNarrationContractVersion !== lockedNarration.version
+      || content.contentBeats.length !== lockedNarration.slots.length
+      || content.contentBeats.some((beat,index)=>beat.evidenceNeed !== lockedNarration.slots[index]?.candidateId))
+      ? ['locked_narration_must_cover_every_reviewed_scene'] : []),
+  ].filter(problem => !visualReviewManifest?.completedVideoRendered || !/^script_too_(?:short|long):/.test(problem));
+  const scriptKey = jobId && lockedNarration ? stableSignature({ version: 1, model,
+    contract: lockedNarration, timeline, visualReviewManifest, settings, matchContext, narrationTiming }) : null;
+  const scriptDirectory = jobId ? join(outputRoot, jobId, 'narration') : null;
+  const scriptPath = scriptKey ? join(scriptDirectory, `${scriptKey}.json`) : null;
+  if (scriptPath) {
+    await mkdir(scriptDirectory, { recursive: true });
+    try {
+      const saved = JSON.parse(await readFile(scriptPath, 'utf8'));
+      if (saved.approved === true && validateContent(saved.content).length === 0) return saved.content;
+    } catch { /* The exact approved script is not available yet. */ }
+    if(completedVideoPart) try {
+      const saved = JSON.parse(await readFile(join(scriptDirectory,`${scriptKey}.draft.json`),'utf8'));
+      const draft=draftContent(saved.raw);
+      if(!draft.problems.length && !validateContent(draft.content).length) {
+        const approved={...draft.content,verifiedIdentityBindings:identityBindings,
+          completedVideoReviewed:true,narrationProductionVersion:1};
+        await writeFile(scriptPath,JSON.stringify({approved:true,content:approved},null,2));
+        return approved;
+      }
+    } catch { /* A genuinely invalid draft still needs a new script, not approval. */ }
+  }
   let generated = await generateGeminiJson(ai, {
-    model: process.env.GEMINI_MODEL,
-    contents: [{ text: prompt }, { text: JSON.stringify({ completeObservationTimeline: timeline }) }],
-    config: { responseMimeType: "application/json", temperature: 0.16 },
+    model,
+    contents: [{ text: prompt }, {text:visualWritingContract},
+      ...(completedVideoPart ? [{ text: 'Watch this ENTIRE completed muted edit once, in playback order, before writing. Its output timestamps are the narration clock, not source timestamps. For each scene record observedAction from this video before composing its narration. If the actual video and older text notes disagree about a save, post, block or miss, describe only the confirmed non-goal chance rather than asserting the disputed mechanism. Player names remain restricted to verified incident bindings. Establish the verified fixture immediately, build interest with specific visible causes and turning points, then conclude with the verified result. Use basic English. Do not introduce unseen events or narrate production instructions.' }, completedVideoPart,
+        ] : []),
+      { text: JSON.stringify(writingEvidence) }],
+    config: { responseMimeType: "application/json", responseJsonSchema, temperature: 0.16,
+      maxOutputTokens:16384,...(/^gemini-3/.test(model)?{thinkingConfig:{thinkingLevel:'LOW'}}:{}) },
   }, "Gemini recap script", 3);
-  let response = generated.response;
-  let content = normalizeContentPlan(generated.parsed, settings.targetDuration);
-  let problems = contentPlanProblems(content, settings.targetDuration, evidenceSlotCount, verifiedGoalActionCount, settings.durationMode, isCompleteHighlights(settings), matchContext);
-  problems.push(...contentEvidenceBindingProblems(content.contentBeats, candidates));
-  problems.push(...obviousIdentityProblems(content.contentScript, verifiedIdentityNames(matchContext)));
-  problems.push(...identityBindingProblems(content.contentBeats, candidates, matchContext));
-  for (let correctionAttempt = 1; problems.length && correctionAttempt <= 3; correctionAttempt += 1) {
-    const minimumWords = Math.round(settings.targetDuration * (isCompleteHighlights(settings) ? 3.0 : settings.durationMode === "auto" ? 0.9 : 2.05));
-    const maximumWords = Math.round(settings.targetDuration * (isCompleteHighlights(settings) ? 3.2 : settings.durationMode === "auto" ? 1.55 : 2.30));
+  let parsed = draftContent(generated.parsed);
+  let content = parsed.content;
+  let problems = [...parsed.problems, ...validateContent(content)];
+  for (let correctionAttempt = 1; problems.length && correctionAttempt <= (completedVideoPart ? 1 : 3); correctionAttempt += 1) {
+    if (scriptKey) await writeFile(join(scriptDirectory, `${scriptKey}.draft.json`), JSON.stringify({
+      approved: false, correctionAttempt, problems, raw: generated.parsed }, null, 2));
+    const { minimumWords, maximumWords } = narrationWordBudget(settings.targetDuration, settings.durationMode, isCompleteHighlights(settings),narrationTiming);
     generated = await generateGeminiJson(ai, {
-      model: process.env.GEMINI_MODEL,
+      model,
       contents: [
         { text: prompt },
+        {text:visualWritingContract},
         { text: [
           `Correction attempt ${correctionAttempt} of 3. Rewrite the content completely and correct every validation failure: ${problems.join(", ")}.`,
-          `The narration contentScript must contain ${minimumWords}-${maximumWords} words after normalization; count the words before returning it.`,
+          completedVideoPart ? 'Keep each narration inside its rendered scene window. Do not expand wording to satisfy an estimated global word count.'
+            : `The narration contentScript must contain ${minimumWords}-${maximumWords} words after normalization; count the words before returning it.`,
           "Expand with concrete, visible tactical explanation inside the same evidence beats, never filler, invented action, or a different candidateId.",
           "Preserve every verified scorer, team, and incident binding exactly. Return the required JSON only.",
         ].join(" ") },
-        { text: JSON.stringify({ completeObservationTimeline: timeline, rejectedDraft: content }) },
+        { text: JSON.stringify({ ...writingEvidence, rejectedDraft: content }) },
       ],
-      config: { responseMimeType: "application/json", temperature: 0.1 },
+      config: { responseMimeType: "application/json", responseJsonSchema, temperature: 0.1,
+        maxOutputTokens:16384,...(/^gemini-3/.test(model)?{thinkingConfig:{thinkingLevel:'LOW'}}:{}) },
     }, `Gemini recap script correction ${correctionAttempt}`, 3);
-    response = generated.response;
-    content = normalizeContentPlan(generated.parsed, settings.targetDuration);
-    problems = contentPlanProblems(content, settings.targetDuration, evidenceSlotCount, verifiedGoalActionCount, settings.durationMode, isCompleteHighlights(settings), matchContext);
-    problems.push(...contentEvidenceBindingProblems(content.contentBeats, candidates));
-    problems.push(...obviousIdentityProblems(content.contentScript, verifiedIdentityNames(matchContext)));
-    problems.push(...identityBindingProblems(content.contentBeats, candidates, matchContext));
+    parsed = draftContent(generated.parsed);
+    content = parsed.content;
+    problems = [...parsed.problems, ...validateContent(content)];
   }
   if (problems.length) throw new Error("Gemini content draft failed validation: " + problems.join(", "));
-  return { ...content, verifiedIdentityBindings: identityBindings };
+  const approved = { ...content, verifiedIdentityBindings: identityBindings,
+    ...(completedVideoPart ? { completedVideoReviewed: true, narrationProductionVersion: 1 } : {}) };
+  if (scriptPath) await writeFile(scriptPath, JSON.stringify({ approved: true, content: approved }, null, 2));
+  return approved;
 }
 
 async function alignContentToVideoWithGemini(content, candidates, settings, verifiedEvidenceDuration, editableDuration) {
@@ -3247,6 +5136,7 @@ async function alignContentToVideoWithGemini(content, candidates, settings, veri
   const prompt = buildEvidenceAlignmentPrompt({
     durationMode: settings.durationMode,
     targetDuration: settings.targetDuration,
+    minimumDuration: minimumPlannedDuration(settings),
     intensity: settings.intensity,
     verifiedEvidenceDuration,
     editableEvidenceDuration: editableDuration,
@@ -3260,7 +5150,8 @@ async function alignContentToVideoWithGemini(content, candidates, settings, veri
       const candidate = candidateById.get(String(segment.candidateId));
       return candidate ? [{ ...candidate, selectedForFinalVideo: true, editOrder: index }] : [];
     });
-    return [...highlightSequenceProblems(scenes, { availableMoments: candidates, requireAvailableCompanionsOnly: isCompleteHighlights(settings) }),...incidentCoverage(candidates,scenes).missing.map(i=>`missing_required_incident:${i.id}`)];
+    return [...highlightSequenceProblems(scenes, { availableMoments: candidates, requireAvailableCompanionsOnly: isCompleteHighlights(settings) }),
+      ...incidentCoverage(candidates, scenes).missing.map(i=>`missing_required_incident:${i.id}`)];
   };
   const beatMap = new Map(content.contentBeats.map((beat) => [beat.beatId, beat]));
   const requestAlignment = async (correction = "") => {
@@ -3327,7 +5218,7 @@ async function alignContentToVideoWithGemini(content, candidates, settings, veri
     });
     return { rationale: String(parsed.rationale || "Content-led evidence alignment"), segments };
   };
-  const alignmentMinimum = isCompleteHighlights(settings) ? Number(settings.durationMin || 60) : minimumPlannedDuration(settings);
+    const alignmentMinimum = isCompleteHighlights(settings) ? Number(settings.durationMin ?? COMPLETE_RECAP_MINIMUM_SECONDS) : minimumPlannedDuration(settings);
   let alignment = await requestAlignment();
   if (settings.durationMode !== "auto") alignment = { ...alignment, segments: fitSegmentPlaybackToDuration(alignment.segments, settings.targetDuration) };
   let duration = plannedSegmentDuration(alignment.segments);
@@ -3339,7 +5230,7 @@ async function alignContentToVideoWithGemini(content, candidates, settings, veri
     || sequenceProblems.length) {
     alignment = await requestAlignment(
       "The previous alignment was incomplete. Cover every beat exactly once with narration, add supporting evidence clips when needed, and make the visual timeline at least "
-      + (settings.durationMode === "auto" ? "30 seconds, ending naturally after the complete story; do not pad to the estimated duration" : settings.targetDuration + " seconds without exceeding " + (settings.targetDuration + 3) + " seconds") + ". Correct these goal-sequence failures: "
+      + (settings.durationMode === "auto" ? alignmentMinimum + " seconds, ending naturally after the complete story; do not pad to the estimated duration" : settings.targetDuration + " seconds without exceeding " + (settings.targetDuration + 3) + " seconds") + ". Correct these goal-sequence failures: "
       + (sequenceProblems.length ? sequenceProblems.join(", ") : "none")
       + ". A live goal must be followed immediately by its same-story celebration and/or replay, and its reaction must appear before another incident.",
     );
@@ -3364,7 +5255,7 @@ async function alignContentReliably(content, candidates, settings, verifiedEvide
       rationale: "Deterministic chronological alignment of the approved Gemini recap script to unique, locally verified football evidence.",
     };
   }
-  if (!process.env.GEMINI_API_KEY) return buildDeterministicEditPlan(candidates, settings, content);
+  if (!geminiEnabled) return buildDeterministicEditPlan(candidates, settings, content);
   try {
     return await alignContentToVideoWithGemini(content, candidates, settings, verifiedEvidenceDuration, editableDuration);
   } catch (error) {
@@ -3504,7 +5395,25 @@ function mergeAnalyzedMoments(items) {
       && item.storyPhase === existing.storyPhase
     )))
     .sort((a, b) => a.startTime - b.startTime);
-  return unique.map((item, index) => ({ ...item, id: `gemini-${index + 1}` }));
+  const owners=new Map();
+  for(const item of [...unique].sort((a,b)=>Number(b.semanticVerified===true)-Number(a.semanticVerified===true))) {
+    if(item.id && !owners.has(String(item.id))) owners.set(String(item.id),item);
+  }
+  const usedIds=new Set(owners.keys());
+  return unique.map((item) => {
+    const extra=items.find(other=>other.sourceAdditionalAction===true
+      && other.eventType===item.eventType && other.storyPhase===item.storyPhase
+      && temporalOverlap(other,item)>=.82);
+    let id=String(item.id || 'scene');
+    if(owners.get(id)!==item) {
+      const base=`${id}-${Math.round(item.startTime*1000)}-${Math.round(item.endTime*1000)}-${item.eventType}`;
+      id=base;let suffix=2;
+      while(usedIds.has(id)) id=`${base}-${suffix++}`;
+      usedIds.add(id);
+    }
+    return {...item,...(extra ? {sourceAdditionalAction:true,
+      sourceActionInventoryVersion:extra.sourceActionInventoryVersion} : {}),id};
+  });
 }
 
 function mergeOverlayMasks(items) {
@@ -3539,9 +5448,90 @@ function buildFallbackMoments(duration, targetDuration) {
   });
 }
 
+async function createLocalYouTubeImport(request, response) {
+  const body = await readJsonBody(request, 32 * 1024);
+  if (body.rightsConfirmed !== true) return json(response, 400, { error: "Confirm that you own or are authorized to use this video." });
+  const normalized = normalizeAuthorizedYouTubeUrl(body.url);
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const job = {
+    id, stage: "importing", progress: 1, progressDetail: "YouTube import queued in the local background worker.",
+    sourceKind: "youtube", sourceName: `YouTube ${normalized.videoId}.mp4`, sourceVideoId: normalized.videoId,
+    sourcePageUrl: normalized.url, importUrl: normalized.url, readyToAnalyze: false,
+    settings: parseSettings(String(body.editSettings || "")), moments: [], warnings: [], createdAt: now, updatedAt: now,
+  };
+  await saveJob(job);
+  await jobQueue.submit(id, () => true, () => importLocalYouTubeSource(id));
+  return json(response, 202, publicJob(job));
+}
+
+async function retryLocalYouTubeImport(response, id) {
+  let job;
+  try { job = await readJob(id); } catch { return json(response, 404, { error: "Import job not found." }); }
+  if (job.sourceKind !== "youtube" || !job.importUrl || job.importedAt || job.stage !== "failed") return json(response, 409, { error: "This YouTube import cannot be retried." });
+  if (jobQueue.has(id)) return json(response, 409, { error: "This import is already running." });
+  const restarted = { ...job, stage: "importing", progress: 1, readyToAnalyze: false, progressDetail: "Retrying the saved video import." };
+  delete restarted.error;
+  await saveJob(restarted);
+  await jobQueue.submit(id, () => true, () => importLocalYouTubeSource(id));
+  return json(response, 202, publicJob(restarted));
+}
+
+async function importLocalYouTubeSource(id) {
+  let job = await readJob(id);
+  const directory = join(uploadRoot, id);
+  await rm(directory, { recursive: true, force: true });
+  await mkdir(directory, { recursive: true });
+  let progressWrite = Promise.resolve();
+  let lastProgress = -10;
+  try {
+    const onProgress = percent => {
+      const rounded = Math.floor(percent / 5) * 5;
+      if (rounded <= lastProgress) return;
+      lastProgress = rounded;
+      progressWrite = progressWrite.then(async () => {
+        const current = await readJob(id);
+        await saveJob({ ...current, stage: "importing", progress: Math.max(1, Math.min(99, rounded)), progressDetail: `Downloading the authorized video source: ${Math.round(percent)}%.` });
+      });
+    };
+    const imported = await downloadAuthorizedYouTubeSource({
+      url: job.importUrl,
+      destinationDirectory: directory,
+      ytDlpPath: resolveExecutable(process.env.YTDLP_PATH || "yt-dlp"),
+      ffmpegPath,
+      onProgress,
+    });
+    await progressWrite;
+    const media = await probe(imported.sourcePath);
+    assertSourceDuration(media.duration);
+    job = await readJob(id);
+    const { sourcePath, ...sourceMetadata } = imported;
+    await saveJob({ ...job, ...sourceMetadata, media, sourceKey: sourcePath, stage: "uploaded", progress: 5, readyToAnalyze: true, progressDetail: "Download complete and verified. Choose edit settings, then click Analyze & edit.", importedAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  } catch (error) {
+    await progressWrite.catch(() => {});
+    job = await readJob(id).catch(() => job);
+    await saveJob({ ...job, stage: "failed", readyToAnalyze: false, error: { code: "SOURCE_IMPORT_FAILED", message: error instanceof Error ? error.message : String(error), retryable: true }, updatedAt: new Date().toISOString() });
+  }
+}
+
+async function startLocalImportedJob(request, response, id) {
+  if (jobQueue.has(id)) return json(response, 409, { error: "This source is already queued or processing." });
+  let job;
+  try { job = await readJob(id); } catch { return json(response, 404, { error: "Source not found." }); }
+  if (job.stage !== "uploaded" || !job.readyToAnalyze || !job.sourceKey) return json(response, 409, { error: "Finish downloading and verifying the source before analysis." });
+  try {assertSourceDuration(job.media?.duration);}
+  catch(error){return json(response,422,{error:error.message,code:'SOURCE_VALIDATION'});}
+  const body = await readJsonBody(request, 64 * 1024).catch(() => ({}));
+  const next = { ...job, settings: body.editSettings ? parseSettings(String(body.editSettings)) : job.settings, readyToAnalyze: false, progressDetail: "Source selected. Waiting for the editing worker.", updatedAt: new Date().toISOString() };
+  await saveJob(next);
+  await jobQueue.submit(id, () => true, () => processJob(id));
+  return json(response, 202, publicJob(next));
+}
+
 function buildLockedVisualOutline(candidates, settings, matchContext) {
+  const fixedSelection=candidates.some(moment=>moment.selectionLocked && moment.fixedSceneQueueVersion===1);
   const ordered = analysisFirstIncidentOrder((Array.isArray(candidates) ? candidates : [])
-    .filter((moment) => moment.selectionLocked === true && narratableEvidence(moment)));
+    .filter((moment) => moment.selectionLocked === true && (fixedSelection || narratableEvidence(moment))));
   const identityBindings = bindVerifiedIdentitiesToIncidents(matchContext, ordered);
   const identityByStory = new Map(identityBindings.map((binding) => [String(binding.storyId), binding]));
   const beats = ordered.map((moment, index) => {
@@ -3653,7 +5643,8 @@ function applyNarrationToLockedVisualTimeline(moments, contentPlan) {
 }
 function buildDeterministicEditPlan(candidates, settings, contentPlan) {
   const complete = isCompleteHighlights(settings);
-  const ranked = limitIncidentActionViews(candidates)
+  const fixedSelection = complete && candidates.some(moment=>moment.selectionLocked && moment.fixedSceneQueueVersion===1);
+  const ranked = (fixedSelection ? candidates : limitIncidentActionViews(candidates))
     .filter((moment) => complete
       ? moment.selectionLocked === true
       : moment.keepDecision !== "reject" && moment.confidence >= 0.4 && framingEligible(moment))
@@ -3671,11 +5662,11 @@ function buildDeterministicEditPlan(candidates, settings, contentPlan) {
     const effect = deterministicEffect(moment, settings.intensity);
     const sourceLength = moment.endTime - moment.startTime;
     const requestedPlaybackRate = effect === "slow_motion" ? 0.84 : effect === "speed_up" ? 1.12 : 1;
-    const playbackRate = clamp(Math.max(requestedPlaybackRate, sourceLength / MAX_SCENE_SECONDS), 0.72, 1.18);
+    const playbackRate = fixedSelection ? 1 : clamp(Math.max(requestedPlaybackRate, sourceLength / MAX_SCENE_SECONDS), 0.72, 1.18);
     const minimumOutputLength = minimumSceneSeconds(moment);
     const desiredOutput = sourceLength / playbackRate;
-    if (desiredOutput < minimumOutputLength) continue;
-    if (total + desiredOutput > (complete ? planningCeiling(settings) : settings.targetDuration + 3)) continue;
+    if (!fixedSelection && desiredOutput < minimumOutputLength) continue;
+    if (!fixedSelection && total + desiredOutput > (complete ? planningCeiling(settings) : settings.targetDuration + 3)) continue;
     const reaction = moment.eventType === "celebration" || moment.storyPhase === "reaction";
     const beat = beatAssignments.get(String(moment.id)) || null;
     selected.push({
@@ -3753,17 +5744,29 @@ function deterministicEffect(moment, intensity) {
   return intensity === "high_energy" ? "speed_up" : "none";
 }
 
-function chooseInitialScenesForLock(candidates, settings) {
+function sourceSelectionCapacity(candidates) {
+  return renderableEvidenceCapacity(uniqueEvidenceCandidates((Array.isArray(candidates)?candidates:[])
+    .filter(moment=>hasInitialSceneEvidence(moment,{requireSemanticVerification:true,minimumSeconds:MIN_SCENE_SECONDS}))
+    .map(trimToVerifiedActionOrigin)), .08, { maximumReactionSeconds: 7 });
+}
+
+function chooseInitialScenesForLock(candidates, settings, {requireSemanticVerification=true,sourceDuration=0,sectionPlan,allowCoverageShortfall=false}={}) {
   const verifiedReplayEvents = new Set(["goal", "disallowed_goal", "save", "shot_on_target", "shot_off_target", "big_chance"]);
   const source = uniqueEvidenceCandidates((Array.isArray(candidates) ? candidates : [])
-    .filter(moment => moment.keepDecision !== "reject" && moment.semanticVerified !== false)
+    .filter(moment => !moment.sourceAngleDeferred && !moment.sourceSupportDeferred)
+    .filter(moment => hasInitialSceneEvidence(moment,{requireSemanticVerification,minimumSeconds:MIN_SCENE_SECONDS}))
     .filter(moment => !(moment.isReplay || moment.storyPhase === "replay") || verifiedReplayEvents.has(moment.eventType)));
   const minimum = minimumPlannedDuration(settings);
   const compressedCapacity = moment => {
     const sourceLength = Math.max(0, Number(moment.endTime) - Number(moment.startTime));
     const reaction = moment.eventType === "celebration" || moment.storyPhase === "reaction";
-    if (reaction) return Math.min(1.6, sourceLength);
-    return sourceLength / completeActionPlaybackRate(sourceLength, 0);
+    // Step 1 is the source split/lock stage. A reviewed celebration is real
+    // source evidence and may run longer than the three-second presentation
+    // cap used by the final renderer. Capping it here made otherwise valid
+    // 60-second scene pools report 53–59 seconds and triggered needless
+    // Gemini recovery before tracking even started.
+    if (reaction) return Math.min(7, sourceLength);
+    return Math.min(MAX_SCENE_SECONDS,sourceLength) / completeActionPlaybackRate(sourceLength, 0);
   };
   const desired = Math.max(minimum, Math.min(Number(settings?.targetDuration || minimum), planningCeiling(settings)));
   const reserveSeconds = Math.max(30, desired * 0.50);
@@ -3772,8 +5775,9 @@ function chooseInitialScenesForLock(candidates, settings) {
     desired + reserveSeconds,
   );
   const decisiveEvents = new Set(["goal", "disallowed_goal", "offside", "var"]);
-  const requiredStories = new Set(source.filter(moment => decisiveEvents.has(moment.eventType))
-    .map(moment => String(moment.storyId || moment.id)));
+  const scoredStories = [...new Set(source.filter(moment => decisiveEvents.has(moment.eventType))
+    .map(moment => String(moment.storyId || moment.id)))];
+  const requiredStories = new Set(scoredStories);
   const selected = new Set();
   const capacitySelected = new Set();
   for (const storyId of requiredStories) {
@@ -3781,10 +5785,15 @@ function chooseInitialScenesForLock(candidates, settings) {
     const actionAngles = story.filter(moment => ["goal", "disallowed_goal"].includes(moment.eventType))
       .sort((a, b) => incidentViewQualityScore(b) - incidentViewQualityScore(a)
         || Number(a.startTime) - Number(b.startTime));
-    // Track at most two complete alternatives. Their durations do not both
-    // count toward Step 1 capacity because only one will enter the final edit.
-    for (const moment of actionAngles.slice(0, 2)) selected.add(moment.id);
-    if (actionAngles[0]) capacitySelected.add(actionAngles[0].id);
+    // Lock the preverified primary plus its same-incident reserve. Portrait
+    // tracking may prefer either, but only one can count toward duration.
+    const anchoredAngles=actionAngles.filter(moment=>moment.sourceAngleSelected||moment.sourceAngleReserved);
+    const sourceChosen = anchoredAngles.filter(moment=>moment.sourceAngleSelected);
+    const firstLive = actionAngles.filter(moment=>!moment.isReplay && moment.storyPhase!=='replay')
+      .sort((a,b)=>Number(a.startTime)-Number(b.startTime));
+    const probeAngles=(sourceChosen.length?sourceChosen:firstLive.length?firstLive:actionAngles).slice(0,1);
+    for (const moment of probeAngles) selected.add(moment.id);
+    if (probeAngles[0]) capacitySelected.add(probeAngles[0].id);
     const support = story.filter(moment => !["goal", "disallowed_goal"].includes(moment.eventType))
       .sort((a, b) => Number(b.importanceScore || 0) - Number(a.importanceScore || 0))[0];
     if (support) {
@@ -3797,8 +5806,10 @@ function chooseInitialScenesForLock(candidates, settings) {
     selected.add(moment.id);
     capacitySelected.add(moment.id);
   }
-  const seconds = () => source.filter(moment => capacitySelected.has(moment.id))
-    .reduce((total, moment) => total + compressedCapacity(moment), 0);
+  const seconds = () => {
+    const chosen=uniqueEvidenceCandidates(source.filter(moment=>capacitySelected.has(moment.id)));
+    return Math.max(0,chosen.reduce((total,moment)=>total+compressedCapacity(moment),0)-Math.max(0,chosen.length-1)*.08);
+  };
   const ranked = source.filter(moment => !selected.has(moment.id))
     .sort((a, b) => {
       const priority = moment => ({ save: 5, shot_on_target: 5, big_chance: 4, shot_off_target: 2 }[moment.eventType] || 1);
@@ -3808,14 +5819,19 @@ function chooseInitialScenesForLock(candidates, settings) {
         || (Number(a.endTime) - Number(a.startTime)) - (Number(b.endTime) - Number(b.startTime))
         || Number(a.startTime) - Number(b.startTime);
     });
+  if(sourceDuration>0) {
+    const balanced=selectSectionSceneIds([...source.filter(scene=>selected.has(scene.id)),...ranked],selected,
+      sectionPlan||step1DiscoveryPlan(sourceDuration,desired),compressedCapacity);
+    for(const id of balanced) {selected.add(id);capacitySelected.add(id);}
+  }
   for (const moment of ranked) {
-    if (seconds() >= target) break;
+    if (seconds() >= target) continue;
     selected.add(moment.id);
     capacitySelected.add(moment.id);
   }
   const selectedSeconds = seconds();
-  if (selectedSeconds < minimum) {
-    throw new Error(`Step 1 selected only ${selectedSeconds.toFixed(1)} naturally paced seconds; it must discover and validate at least ${minimum} seconds of complete actions before keyframe tracking begins.`);
+  if (selectedSeconds < minimum && !allowCoverageShortfall) {
+    throw new Step1CoverageError(selectedSeconds, minimum);
   }
   return (Array.isArray(candidates) ? candidates : []).map(moment => {
     const sameStoryAngles = source.filter(candidate =>
@@ -3835,13 +5851,8 @@ function chooseInitialScenesForLock(candidates, settings) {
 
 function promoteRemainingScenesForLock(candidates) {
   return (Array.isArray(candidates) ? candidates : []).map((moment) => {
-    const duration = Number(moment.endTime) - Number(moment.startTime);
     const promotable = moment.selectionLocked !== true
-      && moment.keepDecision !== "reject"
-      && moment.semanticVerified === true
-      && Number(moment.confidence || 0) >= 0.4
-      && Number.isFinite(duration)
-      && duration >= MIN_SCENE_SECONDS;
+      && hasInitialSceneEvidence(moment,{requireSemanticVerification:true,minimumSeconds:MIN_SCENE_SECONDS});
     if (!promotable) return moment;
     return {
       ...moment,
@@ -3854,19 +5865,16 @@ function promoteRemainingScenesForLock(candidates) {
     };
   });
 }
-function lockInitialSceneSelection(candidates, { requireSemanticVerification = false } = {}) {
+function lockInitialSceneSelection(candidates, { requireSemanticVerification = false, fixedSelection = false } = {}) {
   return (Array.isArray(candidates) ? candidates : []).map((moment) => {
-    const duration = Number(moment.endTime) - Number(moment.startTime);
     const approved = moment.sceneSelectionApproved === true
-      && moment.keepDecision !== "reject"
-      && (!requireSemanticVerification || moment.semanticVerified === true)
-      && Number.isFinite(duration)
-      && duration >= MIN_SCENE_SECONDS
-      && Number(moment.confidence || 0) >= 0.4;
+      && hasInitialSceneEvidence(moment,{requireSemanticVerification,minimumSeconds:MIN_SCENE_SECONDS});
     if (!approved) return { ...moment, selectionLocked: false, selectionDecision: "removed_during_scene_selection" };
     const selectionKeepDecision = moment.isReplay || moment.storyPhase === "replay" ? "replay" : "keep";
     return {
       ...moment,
+      ...(fixedSelection ? { fixedSceneQueueVersion: 1, sourceAngleSelectionPolicy: LIVE_FIRST_SELECTION_POLICY,
+        sourceAngleReserved: false, chosenIncidentAngle: ['goal','disallowed_goal'].includes(moment.eventType) } : {}),
       selectionLocked: true,
       selectionDecision: "approved",
       selectionKeepDecision,
@@ -3928,8 +5936,7 @@ function narratableEvidence(moment) {
 function verifiedLiveGoalActions(moments) {
   return (Array.isArray(moments) ? moments : []).filter((moment) => moment.eventType === "goal"
     && moment.semanticVerified === true
-    && moment.storyPhase !== "replay"
-    && !moment.isReplay
+    && ((!moment.isReplay && moment.storyPhase !== "replay") || verifiedPrimaryReplayGoal(moment))
     && moment.actionComplete !== false
     && moment.keepDecision !== "reject"
     && !["analysis_rejected", "not_tracked", "rejected_after_plan"].includes(moment.trackingDecision));
@@ -3940,6 +5947,8 @@ function minimumSceneSeconds() {
 }
 
 function framingEligible(moment) {
+  if (isDecisionScene(moment)) return moment.semanticVerified === true
+    && moment.trackingPassed === true && moment.keepDecision !== "reject";
   if (playerOnlyAllowed(moment)) return true;
   if (moment?.trackingPassed === false) return false;
   if (moment?.selectionLocked === true && moment.semanticVerified === true && moment.keepDecision !== 'reject') {
@@ -3965,23 +5974,23 @@ function cleanOverlayText(value, maximumWords = 6) {
 
 function eventHeadline(moment) {
   const headlines = {
-    goal: "WHAT A FINISH",
-    penalty: "THE DECISIVE MOMENT",
-    assist: "PERFECTLY WEIGHTED PASS",
-    big_chance: "SO CLOSE",
-    shot_off_target: "JUST WIDE",
-    shot_on_target: "WHAT A SHOT",
-    save: "GREAT SAVE",
-    foul: "CLEAR FOUL",
-    yellow_card: "YELLOW CARD",
-    red_card: "RED CARD",
-    free_kick: "SET PIECE DANGER",
-    var: "DECISION UNDER REVIEW",
-    skill: "AMAZING CONTROL",
-    dribble: "DEFENDER BEATEN",
-    tackle: "PERFECTLY TIMED",
-    celebration: "PURE EMOTION",
-    normal_play: "WATCH THE MOVEMENT",
+    goal: "⚽ WHAT A FINISH",
+    penalty: "🎯 THE DECISIVE MOMENT",
+    assist: "🟢 PERFECTLY WEIGHTED PASS",
+    big_chance: "🔥 SO CLOSE",
+    shot_off_target: "↗ JUST WIDE",
+    shot_on_target: "🎯 WHAT A SHOT",
+    save: "🧤 GREAT SAVE",
+    foul: "⚠ CLEAR FOUL",
+    yellow_card: "🟨 YELLOW CARD",
+    red_card: "🟥 RED CARD",
+    free_kick: "🎯 SET PIECE DANGER",
+    var: "🔎 DECISION UNDER REVIEW",
+    skill: "✨ AMAZING CONTROL",
+    dribble: "💨 DEFENDER BEATEN",
+    tackle: "🛡 PERFECTLY TIMED",
+    celebration: "🙌 PURE EMOTION",
+    normal_play: "👀 WATCH THE MOVEMENT",
   };
   return headlines[moment.eventType] || "KEY MOMENT";
 }
@@ -4019,6 +6028,8 @@ function gradeForScene(moment) {
 }
 
 function applyEditPlan(candidates, plan, targetDuration, settings = {}) {
+  const fixedSelection = isCompleteHighlights(settings)
+    && candidates.some(moment=>moment.selectionLocked && moment.fixedSceneQueueVersion===1);
   const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   const used = new Set();
   const planned = [...(Array.isArray(plan?.segments) ? plan.segments : [])]
@@ -4033,16 +6044,16 @@ function applyEditPlan(candidates, plan, targetDuration, settings = {}) {
     if (!renderable || used.has(candidate.id)) continue;
 
     const reaction = candidate.eventType === "celebration" || candidate.storyPhase === "reaction";
-    const candidateSourceLength = reaction ? Math.min(3, candidate.endTime - candidate.startTime) : candidate.endTime - candidate.startTime;
-    const playbackRate = reaction ? 1 : clamp(
+    const candidateSourceLength = reaction && !fixedSelection ? Math.min(3, candidate.endTime - candidate.startTime) : candidate.endTime - candidate.startTime;
+    const playbackRate = reaction || fixedSelection ? 1 : clamp(
       Math.max(Number(directive.playbackRate || 1), candidateSourceLength / MAX_SCENE_SECONDS),
       0.72,
       1.18,
     );
     const minimumOutputLength = minimumSceneSeconds(candidate);
-    if (candidateSourceLength / playbackRate < minimumOutputLength) continue;
+    if (!fixedSelection && candidateSourceLength / playbackRate < minimumOutputLength) continue;
     const startTime = candidate.startTime;
-    const endTime = reaction ? Math.min(candidate.endTime, startTime + 3) : candidate.endTime;
+    const endTime = reaction && !fixedSelection ? Math.min(candidate.endTime, startTime + 3) : candidate.endTime;
     const goalAction = candidate.eventType === "goal" && candidate.storyPhase !== "replay" && !candidate.isReplay;
     const replay = candidate.isReplay || candidate.storyPhase === "replay";
     const shot = ["shot_on_target", "shot_off_target", "big_chance"].includes(candidate.eventType);
@@ -4056,8 +6067,8 @@ function applyEditPlan(candidates, plan, targetDuration, settings = {}) {
     const freezeDuration = effect === "freeze_analysis" ? clamp(Number(directive.freezeDuration || 0.65), 0.4, 1) : 0;
     const effectiveLength = candidateSourceLength / playbackRate + freezeDuration;
     const maximumAllowed = targetDuration + 3 - outputDuration;
-    if (effectiveLength > maximumAllowed) continue;
-    if (effectiveLength + 0.001 < minimumOutputLength) continue;
+    if (!fixedSelection && effectiveLength > maximumAllowed) continue;
+    if (!fixedSelection && effectiveLength + 0.001 < minimumOutputLength) continue;
     const transitionIn = ["cut", "crossfade", "crosszoom", "whip", "flash"].includes(directive.transitionIn) ? directive.transitionIn : "cut";
     const requestedCallout = normalizeChoice(directive.eventCallout, ["none", "amazing", "goal", "shot", "save", "foul", "card", "close", "pass", "celebration"], "none");
     const eventCallout = reaction ? "none" : requestedCallout;
@@ -4099,7 +6110,7 @@ function applyEditPlan(candidates, plan, targetDuration, settings = {}) {
     });
     used.add(candidate.id);
     outputDuration += effectiveLength;
-    if (outputDuration >= targetDuration - 0.5) break;
+    if (!fixedSelection && outputDuration >= targetDuration - 0.5) break;
   }
   if (edits.length === 0) throw new Error("The edit plan did not contain any usable football segments from one coherent story.");
   const selectedById = new Map(edits.map((edit) => [edit.id, edit]));
@@ -4349,6 +6360,38 @@ function fitSelectedMoments(moments, targetDuration) {
 }
 
 async function trackFootball(sourcePath, moments, media, id, options = {}) {
+  if (geminiKeyframing) {
+    if (!geminiEnabled) throw new Error("Gemini vision is required for keyframe tracking.");
+    // The same cloud source gets a new mtime after download/restore. Key
+    // verified scene caches by actual bytes, not ephemeral filesystem time.
+    const sourceFingerprint = await sourceContentFingerprint(sourcePath);
+    const job = await readJob(id);
+    const dimensions = outputDimensions(job.settings);
+    const ai = createGeminiClient();
+    const evidence = {};
+    for (const scene of moments.filter(moment => moment.selectedForFinalVideo !== false)) {
+      const split=splitSceneInput(scene,join(outputRoot,id,'source-scenes'));
+      const inputScene=split?sceneWithLocalClock(scene):scene;
+      const observed = await trackSceneWithGemini({ sourcePath:split?.path||sourcePath,
+        sourceFingerprint:split?await sourceContentFingerprint(split.path):sourceFingerprint,scene:inputScene, media,
+        repairRound:Number(options.repairRound||0),
+        ratio: dimensions.width / dimensions.height, directory: join(outputRoot, id, "tracking", "gemini"),
+        ffmpeg: ffmpegPath, run, model: process.env.GEMINI_KEYFRAME_MODEL || process.env.GEMINI_MODEL,
+        generate: async (request, label) => (await generateGeminiJson(ai, request, label)).parsed,
+        report: async progressDetail => {
+          const current = await readJob(id);
+          const progress=current.trackingProgress;
+          await updateJob(current, "tracking", Math.max(34, current.progress), { progressDetail:
+            progress?.pass==='gemini'?`${progress.approved}/${progress.total} crops verified. ${progressDetail}`:progressDetail });
+        } });
+      evidence[scene.id]=split?{...observed,sourceStartTime:scene.startTime,sourceEndTime:scene.endTime,
+        splitSceneAssetVersion:1,splitSceneFileName:scene.sourceSceneAsset.fileName}:observed;
+      if(split) evidence[scene.id].portraitSceneAsset=await savePortraitSceneAsset({scene,
+        sourceDirectory:join(outputRoot,id,'source-scenes'),directory:join(outputRoot,id,'portrait-scenes'),
+        evidence:evidence[scene.id],dimensions,ffmpeg:ffmpegPath,run,probe});
+    }
+    return { version: 92, provider: "gemini-vision", moments: evidence, markerPaths: {}, summary: summarizeTracking(evidence) };
+  }
   for (const [label, path] of [["Python tracking runtime", trackingPythonPath], ["football tracking script", trackingScriptPath], ["YOLO player model", trackingModelPath], ["football-specific ball model", trackingBallModelPath]]) {
     try { await stat(path); }
     catch { throw new Error(`${label} is missing at ${path}. Run npm run setup:tracking once, then retry.`); }
@@ -4362,21 +6405,32 @@ async function trackFootball(sourcePath, moments, media, id, options = {}) {
   const inputPath = join(directory, `moments-${requestId}.json`);
   const outputPath = join(directory, `tracking-partial-${requestId}.json`);
   let progressWrites = Promise.resolve();
+  let progressError;
   const reportProgress = (line) => {
     const detail = parseTrackingProgress(line);
     if (!detail) return;
     progressWrites = progressWrites.then(async () => {
       const current = await readJob(id);
       const frameDetail = detail.sceneSeconds !== undefined ? `, ${detail.sceneSeconds}/${detail.sceneDuration}s` : "";
-      const activity = detail.pass === "detect" ? "Finding ball and players" : detail.pass === "camera" ? "Planning smooth camera movement" : "Verified";
+      const activity = detail.pass === "detect" ? "Finding ball and players" : detail.pass === "camera" ? "Planning smooth camera movement" : "Detector observations saved";
       await updateJob(current, "tracking", Math.max(34, current.progress), {
-        trackingProgress: detail,
+        trackingProgress: {...detail,checkpointPath:undefined},
         progressDetail: `${activity}: ${detail.completed}/${detail.total} scenes${frameDetail}. ${detail.cacheHits || 0} saved frames reused; ${detail.newFrames || 0} new frames checked.`,
       });
-    });
+      if(detail.checkpointPath&&detail.sceneId&&options.onSceneReady) {
+        const cacheRoot=process.env.TRACKING_CACHE_DIR?join(resolveSetting(process.env.TRACKING_CACHE_DIR),id)
+          :join(dataRoot,'tracking-cache',id);
+        if(dirname(resolve(detail.checkpointPath))!==resolve(cacheRoot,'scenes')
+          ||!detail.checkpointPath.endsWith('.json')) throw new Error('Unexpected native scene checkpoint path.');
+        const evidence=JSON.parse(await readFile(detail.checkpointPath,'utf8'));
+        options.onSceneReady(detail.sceneId,evidence);
+      }
+    }).catch(error=>{progressError ||= error;});
   };
   await writeFile(inputPath, JSON.stringify({
-    moments: selected.map((moment) => ({
+    moments: selected.map((selectedMoment) => {
+      const moment = hybridKeyframing ? hybridDetectorScene(selectedMoment) : selectedMoment;
+      return ({
       id: moment.id,
       startTime: moment.startTime,
       endTime: moment.endTime,
@@ -4391,7 +6445,7 @@ async function trackFootball(sourcePath, moments, media, id, options = {}) {
       freezeAtPhase: moment.freezeAtPhase,
       eventCallout: moment.eventCallout,
       colorGrade: moment.colorGrade,
-    })),
+    }); }),
     media,
   }));
   try {
@@ -4405,6 +6459,7 @@ async function trackFootball(sourcePath, moments, media, id, options = {}) {
       "--sample-fps", String(options.sampleFps || trackingSampleFps),
       "--coarse-sample-fps", String(Math.min(options.sampleFps || trackingSampleFps, options.coarseSampleFps || trackingCoarseSampleFps)),
       "--device", trackingDevice,
+      "--cpu-workers", String(hybridKeyframing && fastTracking.enabled ? 1 : trackingSceneConcurrency),
       "--image-size", String(options.imageSize || trackingImageSize),
       "--ball-image-size", String(options.ballImageSize || trackingBallImageSize),
       "--confidence", String(trackingConfidence),
@@ -4414,12 +6469,13 @@ async function trackFootball(sourcePath, moments, media, id, options = {}) {
       "--window-height", String(trackingOutputHeight),
       "--window-top", "0",
       "--zoom", "1",
-      "--tracker", "tracktrack",
+      "--tracker", fastTracking.enabled ? "botsort" : "tracktrack",
       "--camera-motion", "sparseOptFlow",
-      "--cache-dir", process.env.TRACKING_CACHE_DIR ? resolveSetting(process.env.TRACKING_CACHE_DIR) : join(dataRoot, "tracking-cache"),
+      "--cache-dir", process.env.TRACKING_CACHE_DIR ? join(resolveSetting(process.env.TRACKING_CACHE_DIR), id) : join(dataRoot, "tracking-cache", id),
       "--shots", join(outputRoot, id, "shots.json"),
     ], reportProgress);
     await progressWrites;
+    if(progressError)throw progressError;
   } catch (error) {
     await progressWrites;
     await rm(inputPath, { force: true }).catch(() => undefined);
@@ -4430,7 +6486,226 @@ async function trackFootball(sourcePath, moments, media, id, options = {}) {
   await rm(inputPath, { force: true }).catch(() => undefined);
   await rm(outputPath, { force: true }).catch(() => undefined);
   if (!tracking?.moments || !tracking?.summary || !tracking?.markerPaths) throw new Error("The local tracker returned incomplete keyframe data.");
+  if (hybridKeyframing && !options.nativeOnly) {
+    if (!geminiEnabled) throw new Error("Hybrid tracking requires Gemini for independent rendered-crop review.");
+    const sourceFingerprint = await sourceContentFingerprint(sourcePath);
+    const ai = createGeminiClient();
+    for (const scene of selected) {
+      const current = await readJob(id);
+      await updateJob(current, "tracking", Math.max(34, current.progress), {
+        progressDetail: `Checking actual ball/player crop: ${scene.id}. Scene selection remains locked.`,
+      });
+      tracking.moments[scene.id] = await reviewHybridCrop({ sourcePath, sourceFingerprint,
+        scene, evidence: tracking.moments[scene.id], media,
+        ratio: trackingOutputWidth / trackingOutputHeight,
+        directory: join(directory, "hybrid-review"), ffmpeg: ffmpegPath, run,probeVideo:probe,
+        model: fastTracking.enabled ? fastTracking.reviewModel : process.env.GEMINI_KEYFRAME_MODEL || process.env.GEMINI_MODEL,
+        videoOnly:fastTracking.enabled,
+        generate: async (request, label) => (await generateGeminiJson(ai, request, label)).parsed });
+    }
+    tracking.version = 93;
+    tracking.provider = "hybrid-football";
+    tracking.summary = summarizeTracking(tracking.moments);
+  }
   return tracking;
+}
+
+async function reselectBlockedSourceActions(sourcePath,candidates,media,id) {
+  const directory=join(outputRoot,id,'source-reselection');
+  await mkdir(directory,{recursive:true});
+  const trackingPath=join(outputRoot,id,'tracking','tracking.json');
+  const tracking=JSON.parse(await readFile(trackingPath,'utf8'));
+  const pending=blockedSelectionScenes(candidates,tracking);
+  if(!pending.length) return candidates;
+  const shots=JSON.parse(await readFile(join(outputRoot,id,'shots.json'),'utf8')).shots;
+  const fingerprint=await sourceContentFingerprint(sourcePath);
+  const replacements=await mapWithConcurrency(pending,fastTracking.reviewConcurrency,async(scene,index)=>{
+    const window=blockedSelectionWindow(scene,shots,media.duration);
+    const model=fastTracking.reviewModel;
+    const key=stableSignature({version:BLOCKED_SELECTION_VERSION,fingerprint,model,scene:scene.id,
+      originalStart:scene.startTime,originalEnd:scene.endTime,window});
+    const responsePath=join(directory,`${key}.response.json`);
+    let parsed;
+    try {parsed=JSON.parse(await readFile(responsePath,'utf8'));} catch { /* New authorized selection. */ }
+    if(!parsed) {
+      // A previous paid source observation with sufficient complete phases
+      // remains usable after a prompt-only upgrade. Invalid earlier answers
+      // are retained, but cannot satisfy the new selection contract.
+      const oldKey=stableSignature({version:1,fingerprint,model,scene:scene.id,
+        originalStart:scene.startTime,originalEnd:scene.endTime,window});
+      try {
+        const previous=JSON.parse(await readFile(join(directory,`${oldKey}.response.json`),'utf8'));
+        applyBlockedSelection(scene,window,previous,{
+          model:previous.generationProvenance?.actualModel||model,sourceFingerprint:fingerprint});
+        parsed=previous;
+        await writeFile(responsePath,JSON.stringify(parsed,null,2));
+      } catch { /* Insufficient old evidence needs the changed source selector. */ }
+    }
+    if(!parsed) {
+      await updateJob(await readJob(id),'detecting_moments',33,{
+        progressDetail:`Choosing clearer source action ${index+1}/${pending.length}; approved crops stay saved.`});
+      const input=join(directory,`${key}.mp4`);
+      await run(ffmpegPath,['-hide_banner','-loglevel','error','-y','-ss',String(window.startTime),
+        '-i',sourcePath,'-t',String(window.endTime-window.startTime),'-an',
+        '-vf',`fps=${SOURCE_RESELECTION_FPS},setpts=PTS-STARTPTS,${framingVideoClockFilter()}`,
+        '-c:v','libx264','-preset','veryfast','-crf','18',input]);
+      const generated=await generateGeminiJson(createGeminiClient(),
+        blockedSelectionRequest(model,(await readFile(input)).toString('base64'),scene,window),
+        `Source angle reselection ${scene.id}`);
+      parsed=generated.parsed;
+      // Save paid observations before validating. A retry must not regenerate
+      // the same answer, and a false crop approval is never synthesized here.
+      await writeFile(responsePath,JSON.stringify(parsed,null,2));
+    }
+    try {return applyBlockedSelection(scene,window,parsed,{
+      model:parsed.generationProvenance?.actualModel||model,sourceFingerprint:fingerprint});}
+    catch(error) {
+      error.code='SOURCE_SELECTION_CONFLICT';
+      error.message=`Source reselection for ${scene.id}: ${error.message} Saved observations will not be repeated automatically.`;
+      throw error;
+    }
+  });
+  const selected=mergeBlockedSelections(candidates,replacements);
+  const audit={version:BLOCKED_SELECTION_VERSION,savedAt:new Date().toISOString(),
+    authorization:'explicit_blocked_source_reselection',sourceFingerprint:fingerprint,
+    approvedSceneIds:candidates.filter(scene=>scene.selectionLocked&&!pending.some(p=>p.id===scene.id)).map(scene=>scene.id),
+    previousCandidates:candidates,replacements,combined:false};
+  await writeFile(join(directory,`selection-${Date.now()}.json`),JSON.stringify(audit,null,2));
+  // Commit the replacement source list only after every selected incident has
+  // complete evidence. Old source/crop files remain available in the audit.
+  await writeFile(join(outputRoot,id,'step1-scene-manifest.json'),JSON.stringify({version:1,
+    candidates:selected,savedAt:audit.savedAt,sourceReselectionVersion:BLOCKED_SELECTION_VERSION},null,2));
+  for(const scene of replacements) delete tracking.moments[scene.id];
+  await writeFile(trackingPath,JSON.stringify(tracking));
+  await writeFile(join(outputRoot,id,'step1-recap-plan.json'),JSON.stringify({version:2,
+    stage:'source_split',combined:false,order:'chronological_source_incidents',playbackRate:1,
+    verifiedSourceSeconds:renderableEvidenceCapacity(selected.filter(scene=>scene.selectionLocked),.08,{maximumReactionSeconds:7}),
+    scenes:selected.filter(scene=>scene.selectionLocked).map(scene=>({id:scene.id,storyId:scene.storyId,
+      eventType:scene.eventType,startTime:scene.startTime,endTime:scene.endTime})),
+    sourceReselectionVersion:BLOCKED_SELECTION_VERSION},null,2));
+  return selected;
+}
+
+async function prepareGuidedSourceSelection(sourcePath,candidates,media,id) {
+  const fingerprint=await sourceContentFingerprint(sourcePath);
+  const initialScoring=candidates.filter(scene=>['goal','disallowed_goal'].includes(scene.eventType))
+    .map(scene=>({...scene,contactTime:scene.trackingBrief?.contactTime}));
+  const pool=candidates.filter(scene=>scene.semanticVerified===true&&scene.keepDecision!=='reject'
+    && scene.eventType!=='celebration'&&scene.storyPhase!=='reaction'
+    && !['foul','yellow_card','red_card','offside','var','penalty'].includes(scene.eventType));
+  const decisions=await mapWithConcurrency(pool,fastTracking.reviewConcurrency,async(scene,index)=>{
+    const scoring=['goal','disallowed_goal'].includes(scene.eventType);
+    const model=scoring?fastTracking.reviewModel:process.env.GEMINI_DISCOVERY_MODEL||fastTracking.reviewModel;
+    const observed=await prepareHybridActionGuide(sourcePath,sourceActionGuideWindow(scene,media.duration),id,
+      {sourceSelection:true,index:index+1,total:pool.length,model});
+    const selected=selectGuidedSourceAction(scene,observed,{model,sourceFingerprint:fingerprint,
+      authoritativeOutcome:scoring});
+    return {id:scene.id,...selected};
+  });
+  await writeFile(join(outputRoot,id,'source-action-selection.json'),JSON.stringify({version:1,
+    phase:'before_scene_lock',broadDiscoveryRepeated:false,decisions},null,2));
+  const byId=new Map(decisions.map(value=>[value.id,value]));
+  const selected=candidates.map(scene=>{
+    const decision=byId.get(scene.id);
+    if(!decision) return scene;
+    return decision.scene || {...scene,semanticVerified:false,actionComplete:false,
+      sceneSelectionApproved:false,selectionLocked:false,keepDecision:'reject',
+      rejectReason:decision.reason};
+  });
+  const coverage=initialScoringCoverage(initialScoring,
+    selectInitialActionViews(selected).filter(scene=>scene.sourceAngleSelected),{resolvedCandidates:selected});
+  if(!coverage.complete) throw Object.assign(new Error('Complete source action selection still has an unresolved observed goal. No scene has been locked or silently omitted.'),{code:'SOURCE_SELECTION_CONFLICT'});
+  return selected;
+}
+
+async function prepareHybridActionGuide(sourcePath,scene,id,options={}) {
+  const directory=join(outputRoot,id,'tracking','action-guidance');
+  await mkdir(directory,{recursive:true});
+  const model=options.model||scene.actionGuidance?.model||process.env.GEMINI_DISCOVERY_MODEL||fastTracking.reviewModel;
+  // A new source-selection guide belongs to the immutable uploaded bytes,
+  // not the re-encoded split clip. Reuse it for Step 2 without another call.
+  if(scene.actionGuidance && matchingActionGuidance(scene,scene.actionGuidance,
+    await sourceContentFingerprint(sourcePath),model)) return applySavedActionGuidance(scene);
+  const split=splitSceneInput(scene,join(outputRoot,id,'source-scenes'));
+  const fingerprint=await sourceContentFingerprint(split?.path||sourcePath);
+  const key=actionGuidanceKey(scene,fingerprint,model),path=join(directory,`${key}.json`);
+  let saved;
+  try {saved=JSON.parse(await readFile(path,'utf8'));} catch { /* New scene guide. */ }
+  if(!matchingActionGuidance(scene,saved,fingerprint,model)) {
+    const current=await readJob(id);
+    await updateJob(current,options.sourceSelection?'detecting_moments':'tracking',
+      options.sourceSelection?30:Math.max(34,current.progress),{
+      progressDetail:options.sourceSelection
+        ? `Choosing complete source action ${options.index}/${options.total}; verifying the touch and finish before locking.`
+        : `Understanding the ball route in ${scene.id}; selected action boundaries remain unchanged.`,
+      ...(options.sourceSelection?{}:{activeTrackingScene:{id:scene.id,status:'observing_action'}}),
+    });
+    const observationKey=actionGuideObservationKey(scene,fingerprint,model);
+    const observationPath=join(directory,`observation-${observationKey}.json`);
+    const guide=await sharedActionGuideObservation(observationPath,{
+      pending:pendingActionGuideObservations,
+      load:async()=>{
+        try {return matchingActionGuideObservation(scene,JSON.parse(await readFile(observationPath,'utf8')),fingerprint,model);}
+        catch {return null;}
+      },
+      observe:async()=>{
+        let input=split?.path;
+        if(!input) {
+          input=join(directory,`${key}.source.mp4`);
+          await run(ffmpegPath,['-hide_banner','-loglevel','error','-y','-ss',String(scene.startTime),
+            '-i',sourcePath,'-t',String(scene.endTime-scene.startTime),'-an','-vf','fps=8,setpts=PTS-STARTPTS',
+            '-c:v','libx264','-preset','veryfast','-crf','18',input]);
+        }
+        const label=`Semantic ball route ${scene.id}`;
+        return observeValidatedActionGuidance({
+          request:actionGuidanceRequest(model,(await readFile(input)).toString('base64'),scene.endTime-scene.startTime),
+          duration:scene.endTime-scene.startTime,label,
+          generate:async(request,attempt)=>(await generateGeminiJson(createGeminiClient(),request,
+            `${label}${attempt>1?` coordinate correction ${attempt-1}`:''}`,2)).parsed,
+          loadResponse:async attempt=>{
+            try {const archived=JSON.parse(await readFile(`${observationPath}.response-${attempt}.json`,'utf8'));
+              return archived.key===observationKey?archived.raw:null;} catch {return null;}
+          },
+          saveResponse:async(attempt,raw)=>writeFile(`${observationPath}.response-${attempt}.json`,
+            JSON.stringify({key:observationKey,attempt,sceneId:scene.id,model,
+              sourceStartTime:scene.startTime,sourceEndTime:scene.endTime,raw,savedAt:new Date().toISOString()})),
+          report:async progressDetail=>{
+            const current=await readJob(id);
+            await updateJob(current,options.sourceSelection?'detecting_moments':'tracking',current.progress,{progressDetail});
+          },
+        });
+      },
+      save:async guide=>writeFile(observationPath,JSON.stringify({version:ACTION_GUIDANCE_VERSION,
+        key:observationKey,model,sourceFingerprint:fingerprint,sourceStartTime:scene.startTime,
+        sourceEndTime:scene.endTime,guide})),
+    });
+    saved={version:ACTION_GUIDANCE_VERSION,key,model,sourceFingerprint:fingerprint,
+      sourceStartTime:scene.startTime,sourceEndTime:scene.endTime,guide};
+    await writeFile(path,JSON.stringify(saved));
+  }
+  return applySavedActionGuidance({...scene,actionGuidance:saved});
+}
+
+async function verifyHybridScene(sourcePath,scene,media,id,evidence) {
+  if (!evidence) throw new Error(`No detector evidence saved for selected scene ${scene.id}`);
+  const current=await readJob(id), dimensions=outputDimensions(current.settings);
+  await updateJob(current,'tracking',Math.max(34,current.progress),{
+    progressDetail:`Reviewing the actual portrait video for ${scene.id}; detector positions are saved.`,
+    activeTrackingScene:{id:scene.id,status:'reviewing'},
+  });
+  const ai=createGeminiClient();
+  const observed=await reviewHybridCrop({sourcePath,sourceFingerprint:await sourceContentFingerprint(sourcePath),
+    scene,evidence,media,ratio:dimensions.width/dimensions.height,
+    directory:join(outputRoot,id,'tracking','hybrid-review'),ffmpeg:ffmpegPath,run,probeVideo:probe,
+    model:fastTracking.reviewModel,videoOnly:true,
+    generate:async(request,label)=>(await generateGeminiJson(ai,request,label)).parsed});
+  if(observed.finalCropVerified && scene.sourceSceneAsset) {
+    observed.portraitSceneAsset=await savePortraitSceneAsset({scene,
+      sourceDirectory:join(outputRoot,id,'source-scenes'),directory:join(outputRoot,id,'portrait-scenes'),
+      evidence:observed,dimensions,ffmpeg:ffmpegPath,run,probe});
+    observed.splitSceneFileName=scene.sourceSceneAsset.fileName;
+  }
+  return observed;
 }
 
 async function loadOrTrackFootball(sourcePath, moments, media, id) {
@@ -4443,12 +6718,33 @@ async function loadOrTrackFootball(sourcePath, moments, media, id) {
     const parsed = JSON.parse(await readFile(savedTrackingPath, "utf8"));
     if (Number(parsed?.version || 0) >= 91 && parsed?.moments) saved = parsed;
   } catch { /* A genuinely new job has no scene-level tracking repairs yet. */ }
-  const fresh = await trackFootball(sourcePath, moments, media, id);
-  const mergedMoments = { ...(fresh.moments || {}) };
+  // Render-only retries own the same immutable job source/settings. Do not
+  // retrack every scene before comparing its saved, independently approved
+  // crop: reviewed phase metadata may have improved since the old cache key
+  // was formed. Exact source intervals, provider and current quality contract
+  // still have to pass. Only missing/unapproved scenes enter the tracker.
+  const nativeLandscape=(await readJob(id)).settings?.aspectRatio === "16:9";
+  const approved={};
+  const pending=moments.map(moment=>{
+    if(moment.selectedForFinalVideo!==true) return {...moment,selectedForFinalVideo:false};
+    const evidence=trackingEvidenceFor(saved,moment);
+    const assessment=nativeLandscape ? assessNativeFrameAction(moment,evidence) : assessPlannedSceneTracking(moment,evidence);
+    if(providerEvidenceMatches(activeKeyframeProvider,evidence) && assessment?.usable===true) {
+      approved[String(moment.id)]=evidence;
+      return {...moment,selectedForFinalVideo:false};
+    }
+    return moment;
+  });
+  const fresh=pending.some(moment=>moment.selectedForFinalVideo===true)
+    ? await trackFootball(sourcePath,pending,media,id)
+    : {version:saved.version,moments:{},markerPaths:{}};
+  const mergedMoments = { ...approved, ...(fresh.moments || {}) };
   for (const moment of moments.filter((item) => item.selectedForFinalVideo)) {
+    if(approved[String(moment.id)]) continue;
     const savedEvidence = trackingEvidenceFor(saved, moment);
     const freshEvidence = trackingEvidenceFor(fresh, moment);
-    if (trackingEvidenceQuality(moment, savedEvidence) > trackingEvidenceQuality(moment, freshEvidence)) {
+    if (providerEvidenceMatches(activeKeyframeProvider, savedEvidence)
+      && trackingEvidenceQuality(moment, savedEvidence) > trackingEvidenceQuality(moment, freshEvidence)) {
       mergedMoments[String(moment.id)] = savedEvidence;
     }
   }
@@ -4510,9 +6806,39 @@ async function makeContinuousSpeech(text, id) {
   let reusable = false;
   try {
     const previous = JSON.parse(await readFile(manifestPath, "utf8"));
-    reusable = previous.narration === narration && previous.voiceSignature === voiceSignature && (await stat(output)).size > 0;
+    reusable = previous.narration === narration && previous.voiceSignature === voiceSignature
+      && (await stat(output)).size > 0 && await probeAudioDuration(output) > 0;
   } catch { /* Generate or refresh the continuous master recording. */ }
-  if (!reusable) await synthesizeGoogleCloudSpeech(narration, output);
+  if (!reusable) {
+    const maximumBytes = /^gemini-/i.test(process.env.TTS_MODEL || '') ? 3500 : 4500;
+    const chunks = splitNarrationForTts(narration, maximumBytes);
+    const takesDirectory = join(speechDir, 'takes');
+    await mkdir(takesDirectory, { recursive: true });
+    const takes = [];
+    for (const [index, chunk] of chunks.entries()) {
+      const key = stableSignature({ version: 1, narration: chunk, voiceSignature });
+      const takePath = join(takesDirectory, `${key}.wav`);
+      let valid = false;
+      try { valid = await probeAudioDuration(takePath) > 0; } catch { /* Record only the missing or corrupt take. */ }
+      if (!valid) await synthesizeGoogleCloudSpeech(chunk, takePath, { onRetry: async detail => {
+        const current = await readJob(id);
+        await updateJob(current, 'generating_commentary', Math.max(64, Number(current.progress || 0)), {
+          voiceCapacityWait: { active: true, attempt: detail.attempt,
+            retryAt: new Date(Date.now() + detail.delayMs).toISOString() },
+          progressDetail: `Google voice synthesis is temporarily busy. Automatically retrying recording ${index + 1}/${chunks.length}; the approved video and script are saved.`,
+        });
+      } });
+      const takeDuration = await probeAudioDuration(takePath);
+      await writeFile(join(takesDirectory, `${key}.json`), JSON.stringify({ narration: chunk, voiceSignature, duration: takeDuration }));
+      takes.push(takePath);
+    }
+    if (takes.length === 1) await copyFile(takes[0], output);
+    else await run(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y',
+      ...takes.flatMap(path => ['-i', path]), '-filter_complex',
+      `${takes.map((_,index)=>`[${index}:a]`).join('')}concat=n=${takes.length}:v=0:a=1[voice]`,
+      '-map', '[voice]', '-c:a', 'pcm_s16le', '-ar', '24000', '-ac', '1', output]);
+    await updateJob(await readJob(id), 'generating_commentary', 64, { voiceCapacityWait: { active: false } });
+  }
   const duration = await probeAudioDuration(output);
   await writeFile(manifestPath, JSON.stringify({ narration, filename: "narration-master.wav", duration, voiceSignature }, null, 2));
   const files = new Map([["__narration__", output]]);
@@ -4703,7 +7029,7 @@ async function renderVideo(sourcePath, outputPath, moments, settings, media, tts
   }
   const filterScriptPath = join(dirname(outputPath), "filtergraph.txt");
   await writeFile(filterScriptPath, filters.join(";\n"));
-  args.push("-/filter_complex", filterScriptPath, "-map", "[outv]", "-map", "[outa]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart", outputPath);
+  args.push(...await filterGraphFileArgs(ffmpegPath, filterScriptPath), "-map", "[outv]", "-map", "[outa]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000", "-b:a", "192k", "-movflags", "+faststart", outputPath);
   await run(ffmpegPath, args);
 
 function retimeKeyframes(keyframes, playbackRate) {
@@ -4922,8 +7248,10 @@ async function reviewRenderedVideoWithGemini(outputPath, media, id, settings, pl
   const model = process.env.GEMINI_MODEL;
   const ai = createGeminiClient();
   const proxyPath = join(outputRoot, id, "quality-review.mp4");
-  const videoKbps = Math.round(clamp(13 * 1024 * 1024 * 8 / Math.max(1, media.duration) / 1000 - 32, 180, 700));
-  const args = ["-hide_banner", "-y", "-i", outputPath, "-vf", "fps=4,scale=-2:360", "-c:v", "libx264", "-preset", "veryfast", "-b:v", `${videoKbps}k`, "-maxrate", `${videoKbps}k`, "-bufsize", `${videoKbps * 2}k`, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "24k", "-ac", "1", "-ar", "16000", "-movflags", "+faststart", proxyPath];
+  const videoKbps = Math.round(clamp(13 * 1024 * 1024 * 8 / Math.max(1, media.duration) / 1000 - 64, 180, 1200));
+  // A 360p/default-resolution review can hide the ball and caption defects.
+  // Keep the finished edit's spatial detail; this changes review media only.
+  const args = ["-hide_banner", "-y", "-i", outputPath, "-vf", "fps=4,scale=-2:720", "-c:v", "libx264", "-preset", "veryfast", "-b:v", `${videoKbps}k`, "-maxrate", `${videoKbps}k`, "-bufsize", `${videoKbps * 2}k`, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "48k", "-ac", "1", "-ar", "24000", "-movflags", "+faststart", proxyPath];
   await run(ffmpegPath, args);
   const proxy = await readFile(proxyPath);
   const selectedMoments = plannedMoments.filter(moment => moment.selectedForFinalVideo);
@@ -4936,7 +7264,7 @@ async function reviewRenderedVideoWithGemini(outputPath, media, id, settings, pl
     : "No player/team identity is independently verified: ANY authored player name, team name, nickname, or scoreline is a rejection.";  const prompt = [
     viral ? "Act as a strict social-football Viral Reel quality controller. Watch the complete rendered video from beginning to end before scoring it." : "Act as a strict football-analysis Shorts quality controller. Watch the complete rendered video from beginning to end before scoring it.",
     "Return JSON only with approved boolean, score 0-100, issues array, observations array, storyCoherence 0-100, voiceStyle 0-100, fullBleed 0-100, ballTracking 0-100, playerHighlight 0-100, framing 0-100, pacing 0-100, transitions 0-100, captions 0-100, watermarkMasking 0-100, and audio 0-100. For EVERY scene, observations must include startTime, endTime, visibleAction, spokenClaim, identityClaims array, narrationMismatch boolean, captionOverload boolean. Give specific visible evidence, not scores alone.",
-    viral ? "This must be a coherent 30ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“45 second sequence of verified incidents. Every incident must keep its complete live action and same-incident reaction or replay proof together before moving to the next incident. Reject unrelated filler, duplicate padding, or unresolved action." : `This is a chronological match highlight containing ${expectedGoalClusters} distinct verified live goal cluster(s). Multiple goals are required when present. Judge coherence by whether each goal has its own setup, decisive action, result and same-goal reaction before the next incident; do not require the whole export to answer only one tactical question.`,
+    viral ? "This must be a coherent 30–45 second sequence of verified incidents. Every incident must keep its complete live action and same-incident reaction or replay proof together before moving to the next incident. Reject unrelated filler, duplicate padding, or unresolved action." : `This is a chronological match highlight containing ${expectedGoalClusters} distinct verified live goal cluster(s). Multiple goals are required when present. Judge coherence by whether each goal has its own setup, decisive action, result and same-goal reaction before the next incident; do not require the whole export to answer only one tactical question.`,
     "Treat local keyframe tracking as the primary visual truth; semantic labels never override failed keyframes. Judge goals, shots on target, shots, and saves as the product's primary content. If a confirmed goal is present, require a continuous readable sequence: scorer and ball before decisive contact, contact, ball flight, goalkeeper or goalmouth result, a brief result hold, then that exact goal's immediate celebration and/or replay proof. Reject a cut to another incident before the same-goal emotional payoff.",
     complete ? "When stable player identity is locally verified, a highlight must be one large, thick, red-only ring attached to that player during the decisive action. It is correct to omit a ring when scorer or player identity is unsafe; never penalize a truthful omission. Reject a small, thin, multicolor, white-outlined, floating, or wrong-player ring. It must disappear immediately when tracking confidence is lost and must not appear on celebrations." : "The highlighted player in a goal must be the scorer at the decisive touch, not the earlier passer, a defender, official, spectator, or substitute. The simple arrow or ring must stay attached to that tracked player and disappear when confidence is lost.",
     "For a shot on target or save, require the shooter and ball at contact, visible ball travel, and the goalkeeper or goalmouth result. Reject clips that start after contact or end before the outcome.",
@@ -4946,18 +7274,19 @@ async function reviewRenderedVideoWithGemini(outputPath, media, id, settings, pl
     "Scene duration must follow and finish the visible action with no fixed per-scene duration; never cut during an unresolved pass, shot, save, duel, or run. Prefer fewer complete scenes and hard cuts. Use slow motion, freezes, zooms, transitions, color changes, emojis, callouts, and sound accents only when they explain a visible point.",
     "The base color grade must stay consistent and natural. Replay or decisive-proof treatment may differ, and a confirmed goal or shot payoff should have a clearly timed color accent, but random alternating color grades are a defect.",
     "Captions are sparse 2-to-4-word complete headlines, NOT continuous subtitles. Require white text, one yellow emphasis word, a dark outline and restrained motion. Most frames and celebrations should have NO added text. Reject dangling fragments and any headline that contradicts the visible action.",
-    "The spoken track must sound like a continuous match recap. Reject narration that says replay, clip, footage, camera, freeze, slow motion, editing, or otherwise describes how the video was produced. Visuals may support a recap beat without matching every word literally, but they must belong to the same incident.",
+    "The spoken track must sound like continuous football commentary or criticism. Reject narration that says replay, clip, footage, camera, freeze, slow motion, editing, or otherwise describes how the video was produced. Visuals may support a narration beat without matching every word literally, but they must belong to the same incident.",
     viral ? "Use one short analytical voice-over for each verified decisive incident, aligned to its freeze, mixed above quieter original match and crowd audio. Reject competing broadcast speech, mistimed analysis, or continuous play-by-play. Added narration and captions must contain no player name, team name, nickname, or scoreline because identity was not independently verified. Never treat names already visible in the broadcast scoreboard or shirts as authored overlays." : `Narration uses a clear, compelling adult male football analyst voice continuously from the opening hook through the final conclusion, with only brief punctuation pauses. For complete highlights, require a chronological recap that connects every goal, major visible turning point, momentum change, and a concise explanation of why the result happened. Reject disconnected generic tactical lines and continuous play-by-play. ${identityQaInstruction} Extract identityClaims only from authored narration or added captions; never infer them from the broadcast scoreboard, crowd signage, or shirts.`,
     `The exact authored narration and captions are supplied here for identity auditing: ${JSON.stringify(authoredText)}.`,
     footballQualityContract(),
     viral ? "The verified Viral Reel must run 30ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“45 seconds using complete incidents, with no repetitive padding." : settings.durationMode === "auto" ? "AI selected the length. Require at least " + outputDurationBounds(settings).minimum + " seconds and a naturally completed story, with no repetitive or static filler. Do not reject a complete story for missing an estimated target." : "The selected output duration range is " + outputDurationBounds(settings).minimum + "-" + outputDurationBounds(settings).maximum + " seconds. Reject any result outside it.",
-    "Narration requested: " + settings.commentary + ". Player highlighting requested: " + settings.playerHighlight + ". Logo masking requested: " + settings.logoMasking + ". If logo masking is requested, reject any clearly visible persistent creator logo, channel badge, or attribution watermark; do not penalize the match scoreboard, game clock, or stadium advertising.",
+    "Narration requested: " + settings.commentary + ". Player highlighting requested: " + settings.playerHighlight + ". Logo/scorebug masking requested: " + settings.logoMasking + ". If masking is requested, reject clearly visible persistent creator logos, channel badges, attribution watermarks, scorebugs, game clocks, or network headers; do not penalize a mask that leaves players, ball, goalmouth action, and pitch readable.",
     "Do not invent problems that cannot be observed. Approve only at score 80 or higher with no severe story, full-screen framing, missing-action, narration, or caption issue.",
   ].join(" ");
   const generated = await generateGeminiJson(ai, {
     model,
-    contents: [{ inlineData: { data: proxy.toString("base64"), mimeType: "video/mp4" }, videoMetadata: { fps: 4 } }, { text: prompt }],
-    config: { responseMimeType: "application/json", temperature: 0.05 },
+    contents: [footballVideoPart(proxy.toString("base64"), 4), { text: prompt }],
+    config: { responseMimeType: "application/json", temperature: 0.05,
+      httpOptions: {timeout:geminiVideoDeadline(geminiRequestTimeoutMs, media.duration)} },
   }, "final quality review", 3);
   const parsed = generated.parsed;
   let issues = Array.isArray(parsed.issues) ? parsed.issues.map((issue) => String(issue).slice(0, 240)).slice(0, 8) : [];
@@ -5009,6 +7338,7 @@ async function probe(sourcePath) {
 }
 
 function run(command, args, onLine) {
+  if (resolve(command) === resolve(ffmpegPath)) args = boundedFfmpegArgs(args);
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, { cwd: projectRoot, windowsHide: true, shell: false });
     let stdout = ""; let stderr = "";
@@ -5044,6 +7374,15 @@ async function getJob(response, id) {
   catch { return json(response, 404, { error: "Job not found" }); }
 }
 
+async function listLocalJobs(response) {
+  const files = (await readdir(jobRoot)).filter(name => /^[a-f0-9-]+\.json$/i.test(name));
+  const jobs = (await Promise.all(files.map(async name => {
+    try { return publicJob(JSON.parse(await readFile(join(jobRoot, name), "utf8"))); } catch { return null; }
+  }))).filter(Boolean).sort((left, right) => String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || "")));
+  const storageBytes = jobs.reduce((sum, job) => sum + Number(job.sourceSize || 0), 0);
+  return json(response, 200, { jobs, storageBytes, jobCount: jobs.length });
+}
+
 async function streamOutput(request, response, id) {
   const path = join(outputRoot, id, "final.mp4");
   try {
@@ -5064,16 +7403,61 @@ async function streamOutput(request, response, id) {
   } catch { return json(response, 404, { error: "Output not found" }); }
 }
 
+async function streamLocalSource(request, response, id) {
+  let job;
+  try { job = await readJob(id); } catch { return json(response, 404, { error: "Ready source not found" }); }
+  // The original-video library is independent of edit progress. Starting
+  // analysis must not revoke preview/download access to the secured source.
+  if (!job.sourceKey || job.stage === 'uploading' || job.stage === 'importing')
+    return json(response, 404, { error: "Ready source not found" });
+  try {
+    const info = await stat(job.sourceKey);
+    const { createReadStream } = await import("node:fs");
+    const range = String(request.headers.range || "").match(/^bytes=(\d*)-(\d*)$/);
+    if (range) {
+      const start = range[1] ? Number(range[1]) : 0;
+      const end = range[2] ? Math.min(Number(range[2]), info.size - 1) : info.size - 1;
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start > end || start >= info.size) {
+        response.writeHead(416, { "Content-Range": `bytes */${info.size}` }); return response.end();
+      }
+      response.writeHead(206, { "Content-Type": job.sourceContentType || mimeFor(job.sourceKey), "Content-Length": end - start + 1, "Content-Range": `bytes ${start}-${end}/${info.size}`, "Accept-Ranges": "bytes", "Cache-Control": "no-store" });
+      return createReadStream(job.sourceKey, { start, end }).pipe(response);
+    }
+    response.writeHead(200, { "Content-Type": job.sourceContentType || mimeFor(job.sourceKey), "Content-Length": info.size, "Accept-Ranges": "bytes", "Cache-Control": "no-store" });
+    return createReadStream(job.sourceKey).pipe(response);
+  } catch { return json(response, 404, { error: "Stored source not found" }); }
+}
+
 async function updateJob(job, stage, progress, extra = {}) {
+  const latest=await readJob(job.id).catch(()=>job);
+  // Concurrent scene requests can cool down different models. Retain all of
+  // them durably, rather than restoring only the most recent UI wait on reboot.
+  const cooldowns=mergeGeminiModelCooldowns(job.aiModelCooldowns,latest.aiModelCooldowns,
+    geminiModelCooldownStates.get(job.id),extra.aiModelCooldowns);
+  geminiModelCooldownStates.set(job.id,cooldowns);
+  if (Object.hasOwn(extra, "aiCapacityWait")) geminiCapacityStates.set(job.id, extra.aiCapacityWait);
   const next = { ...job, progressDetail: stage === job.stage ? job.progressDetail : undefined,
     ...extra, stage, progress: Math.max(Number(job.progress || 0), progress), updatedAt: new Date().toISOString() };
+  next.sceneTrackingStates={...job.sceneTrackingStates,...latest.sceneTrackingStates,...extra.sceneTrackingStates};
+  next.aiModelCooldowns=cooldowns;
+  for(const flag of ['sceneSelectionComplete','visualEditLocked','narrationScriptApproved','narrationRecorded','renderCompleted'])
+    if(latest[flag]===true && !Object.hasOwn(extra,flag)) next[flag]=true;
+  // A pipeline function may still hold the pre-request job object. Do not
+  // resurrect its old busy flag after the scheduler received a response.
+  if (geminiCapacityStates.has(job.id)) next.aiCapacityWait = geminiCapacityStates.get(job.id);
+  next.workflowPhase=workflowPhase(next);
+  next.performance=workflowPerformance.observe(next,latest.performance);
+  if(stage==='generating_commentary') next.narrationScriptApproved=true;
+  if(stage==='editing'&&next.settings?.commentary&&!Object.hasOwn(extra,'narrationRecorded')) next.narrationRecorded=true;
+  if(stage==='validating'||stage==='completed') next.renderCompleted=true;
   await saveJob(next); return next;
 }
 async function saveJob(job) { await saveJobJson(job.id, job); }
 async function readJob(id) { return JSON.parse(await readFile(join(jobRoot, `${id}.json`), "utf8")); }
 function publicJob(job) {
-  const safe = { ...job };
+  const safe = { ...job,workflow:buildWorkflowProgress(job) };
   delete safe.sourceKey; delete safe.outputKey;
+  delete safe.importUrl;
   delete safe.observedMoments;
   return safe;
 }
@@ -5087,7 +7471,7 @@ function requestedRecapSeconds(brief) {
 }
 
 function parseSettings(header) {
-  const defaults = { editStyle: "complete_highlights", durationMode: "auto", targetDuration: COMPLETE_RECAP_MINIMUM_SECONDS, durationMin: COMPLETE_RECAP_MINIMUM_SECONDS, durationMax: COMPLETE_RECAP_MAXIMUM_SECONDS, aspectRatio: "16:9", commentary: true, playerHighlight: true, captions: true, logoMasking: true, originalAudio: "muted", intensity: "dynamic", recapBrief: "" };
+  const defaults = { editStyle: "complete_highlights", durationMode: "auto", targetDuration: 60, durationMin: COMPLETE_RECAP_MINIMUM_SECONDS, durationMax: COMPLETE_RECAP_MAXIMUM_SECONDS, aspectRatio: "9:16", commentary: true, playerHighlight: true, captions: true, logoMasking: true, originalAudio: "muted", intensity: "dynamic", recapBrief: "" };
   if (!header) return defaults;
   try {
     const raw = JSON.parse(Buffer.from(header, "base64url").toString("utf8"));
@@ -5097,13 +7481,17 @@ function parseSettings(header) {
     const automatic = automaticDurationSettings();
     const recapBrief = Array.from(String(raw.recapBrief || ""), (character) => character.charCodeAt(0) < 32 ? " " : character).join("").replace(/\s+/g, " ").trim().slice(0, 320);
     const requestedSeconds = complete ? requestedRecapSeconds(recapBrief) : null;
-    const requestedTarget = clamp(Number(requestedSeconds), 30, 300);
+    const requestedTarget = clamp(Number(requestedSeconds), COMPLETE_RECAP_MINIMUM_SECONDS, 300);
     const duration = requestedSeconds
       ? { durationMode: "requested", targetDuration: requestedTarget, durationMin: COMPLETE_RECAP_MINIMUM_SECONDS, durationMax: COMPLETE_RECAP_MAXIMUM_SECONDS }
       : viral ? { durationMode: "auto", targetDuration: 36, durationMin: 30 }
-        : complete ? { durationMode: "auto", targetDuration: COMPLETE_RECAP_MINIMUM_SECONDS, durationMin: COMPLETE_RECAP_MINIMUM_SECONDS, durationMax: COMPLETE_RECAP_MAXIMUM_SECONDS }
+        : complete ? { durationMode: "auto", targetDuration: 60, durationMin: COMPLETE_RECAP_MINIMUM_SECONDS, durationMax: COMPLETE_RECAP_MAXIMUM_SECONDS }
           : automatic;
-    const settings = { ...defaults, ...raw, ...duration, recapBrief, editStyle, aspectRatio: viral ? "4:5" : complete ? "16:9" : "9:16", commentary: complete ? true : raw.commentary !== false, originalAudio: complete ? "muted" : raw.originalAudio || (viral ? "reduced" : "muted") };
+    const requestedRatio = String(raw.aspectRatio || "");
+    const aspectRatio = viral ? "4:5" : ["1:1", "4:3", "9:16", "16:9"].includes(requestedRatio)
+      ? requestedRatio
+      : "9:16";
+    const settings = { ...defaults, ...raw, ...duration, recapBrief, editStyle, aspectRatio, commentary: complete ? true : raw.commentary !== false, originalAudio: complete ? "muted" : raw.originalAudio || (viral ? "reduced" : "muted") };
     return settings;
   }
   catch { throw new Error("Invalid edit settings."); }
@@ -5163,22 +7551,31 @@ function sanitizeSavedEditPlan(editPlan, matchContext, settings) {
 function applyCompleteDurationBounds(settings, sourceDuration) {
   const bounds = completeRecapDurationBounds(sourceDuration);
   const targetDuration = clamp(Number(settings?.targetDuration || bounds.minimum), bounds.minimum, bounds.maximum);
-  return { ...settings, aspectRatio: "16:9", originalAudio: "muted", targetDuration, durationMin: bounds.minimum, durationMax: bounds.maximum };
+  const aspectRatio = ["1:1", "4:3", "9:16", "16:9"].includes(String(settings?.aspectRatio)) ? settings.aspectRatio : "9:16";
+  return { ...settings, aspectRatio, originalAudio: "muted", targetDuration, durationMin: bounds.minimum, durationMax: bounds.maximum };
 }
 function outputDurationBounds(settings) {
   if (isViralReel(settings)) return viralReelDurationBounds();
-  if (settings?.durationMode === "auto") return { minimum: Number(settings.durationMin || 30), maximum: Number.isFinite(Number(settings.durationMax)) ? Number(settings.durationMax) : Infinity };
+  if (isCompleteHighlights(settings)) return { minimum: COMPLETE_RECAP_MINIMUM_SECONDS,
+    maximum: Number.isFinite(Number(settings.durationMax)) ? Number(settings.durationMax) : Infinity };
+  // Automatic non-viral jobs may have been saved by an older worker with a
+  // 30-second durationMin. Do not let that stale setting reject a naturally
+  // complete short story; only the dedicated Viral Reel keeps a hard floor.
+  if (settings?.durationMode === "auto") return { minimum: 0, maximum: Number.isFinite(Number(settings.durationMax)) ? Number(settings.durationMax) : Infinity };
   const target = Number(settings?.targetDuration || 65);
   const minimum = Number.isFinite(Number(settings?.durationMin)) ? Number(settings.durationMin) : target * 0.96;
   const maximum = Number.isFinite(Number(settings?.durationMax)) ? Number(settings.durationMax) : target + 3;
   return { minimum, maximum };
 }
-function minimumPlannedDuration(settings) { return isViralReel(settings) ? viralReelDurationBounds().minimum : isCompleteHighlights(settings) ? Number(settings.durationMin || 60) : settings.durationMode === "auto" ? 30 : Math.max(MIN_SCENE_SECONDS * 2, settings.targetDuration - 1); }
+function minimumPlannedDuration(settings) { return isViralReel(settings) ? viralReelDurationBounds().minimum : isCompleteHighlights(settings) ? Number(settings.durationMin ?? COMPLETE_RECAP_MINIMUM_SECONDS) : settings.durationMode === "auto" ? 0 : Math.max(MIN_SCENE_SECONDS * 2, settings.targetDuration - 1); }
 function planningCeiling(settings) { return isCompleteHighlights(settings) ? (Number.isFinite(Number(settings.durationMax)) ? Number(settings.durationMax) : Infinity) : settings.durationMode === "auto" ? (Number.isFinite(Number(settings.durationMax)) ? Number(settings.durationMax) : Infinity) : settings.targetDuration; }
 function planningEvidenceCapacity(candidates, settings) {
   const eligible = selectDirectorCandidates(candidates).filter((moment) => framingEligible(moment)
     || (settings?.aspectRatio === "16:9" && canRenderLockedNativeAction(moment)));
-  if (isCompleteHighlights(settings)) return renderableEvidenceCapacity(eligible);
+  // Complete recaps later retain up to seven seconds of independently
+  // verified reaction source. Count that same real footage here, rather than
+  // rejecting the plan under a different three-second pre-render cap.
+  if (isCompleteHighlights(settings)) return renderableEvidenceCapacity(eligible,.08,{maximumReactionSeconds:7});
   return settings.durationMode === "auto" ? naturalStoryCapacity(eligible) : editableEvidenceDuration(candidates);
 }
 function safeFileName(name) { return basename(name).replace(/[^a-zA-Z0-9._ -]/g, "_").slice(0, 180) || "source.mp4"; }
@@ -5187,10 +7584,10 @@ function resolveExecutable(value) { return /[\\/]/.test(value) ? resolveSetting(
 function mimeFor(path) { return extname(path).toLowerCase() === ".mov" ? "video/quicktime" : extname(path).toLowerCase() === ".webm" ? "video/webm" : "video/mp4"; }
 function publicOutputUrl(id) { return `${publicBaseUrl}/outputs/${encodeURIComponent(id)}/final.mp4`; }
 function clamp(value, min, max) { return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min)); }
-function setCors(request, response) { const origin = String(request.headers.origin || ""); if (allowedOrigins.has(origin)) response.setHeader("Access-Control-Allow-Origin", origin); response.setHeader("Access-Control-Allow-Headers", "content-type,x-file-name,x-edit-settings"); response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS"); }
-function json(response, status, value) { response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }); response.end(JSON.stringify(value)); }
+function setCors(request, response) { const origin = String(request.headers.origin || ""); if (allowedOrigins.has(origin)) response.setHeader("Access-Control-Allow-Origin", origin); response.setHeader("Access-Control-Allow-Headers", "content-type,x-file-name,x-edit-settings,x-job-id"); response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS"); }
+function json(response, status, value) { if(!response)return value; response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }); response.end(JSON.stringify(value)); }
 function send(response, status) { response.writeHead(status); response.end(); }
-function youtubeCallbackHtml(response, { channel, returnOrigin = "http://localhost:3001", error }) {
+function youtubeCallbackHtml(response, { channel, returnOrigin = localStudioReturnOrigin(), error }) {
   const payload = JSON.stringify({ type: "touchline-youtube-connected", channel: channel || null, error: error || null }).replace(/</g, "\\u003c");
   const targetOrigin = JSON.stringify(returnOrigin).replace(/</g, "\\u003c");
   const title = error ? "YouTube connection failed" : "YouTube connected";

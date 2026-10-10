@@ -12,7 +12,9 @@ import numpy as np
 
 
 TACTICAL_YELLOW = (36, 220, 255, 245)
-PASS_WHITE = (255, 255, 255, 250)
+# A single red analytical language is easier to follow than the previous
+# white/yellow network.  It is reserved for evidence-linked pass/shot moments.
+PASS_RED = (45, 55, 245, 250)
 SHADOW = (0, 0, 0, 125)
 
 
@@ -270,7 +272,7 @@ def render_pass_stages(output, output_width, output_height, direct, nodes):
             draw_tactical_line(canvas, start, end, stroke)
     arrow_stroke = stroke + 2
     cv2.arrowedLine(canvases[2], direct[0], direct[1], SHADOW, arrow_stroke+5, cv2.LINE_AA, tipLength=.14)
-    cv2.arrowedLine(canvases[2], direct[0], direct[1], PASS_WHITE, arrow_stroke, cv2.LINE_AA, tipLength=.14)
+    cv2.arrowedLine(canvases[2], direct[0], direct[1], PASS_RED, arrow_stroke, cv2.LINE_AA, tipLength=.14)
     destination = Path(output)
     stages = [destination.with_name(destination.stem + f"-stage-{index+1}" + destination.suffix) for index in range(3)]
     for path, canvas in zip(stages, canvases):

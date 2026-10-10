@@ -7,6 +7,9 @@ export function incidentCoverage(candidates, selected = candidates.filter(m => m
     "native_semantic_complete_action",
     "full_bleed_repaired",
     "verified_minimum_motion",
+    "verified_decision_framing",
+    "gemini_crop_verified",
+    "hybrid_crop_verified",
   ]);
   const required = new Map();
   for (const m of candidates) {
@@ -37,7 +40,8 @@ export function incidentCoverage(candidates, selected = candidates.filter(m => m
         && verifiedTrackingDecisions.has(String(m.trackingDecision)));
     } else {
       incident.covered = selectedIncident.some(m => ["offside", "var"].includes(m.eventType)
-        && m.actionComplete !== false);
+        && m.actionComplete !== false && m.trackingPassed !== false
+        && verifiedTrackingDecisions.has(String(m.trackingDecision)));
     }
   }
   const incidents = [...required.values()];
