@@ -51,7 +51,7 @@ import {BLOCKED_SELECTION_VERSION,SOURCE_RESELECTION_FPS,blockedSelectionScenes,
 import {framingVideoClockFilter} from './gemini-video-framing.mjs';
 import {outcomeNarrationProblems} from './narration-outcome-policy.mjs';
 import { lockedNarrationContract, lockedNarrationResponseSchema, projectLockedNarration } from './locked-narration.mjs';
-import { fixedSceneQueue, assertFixedSceneQueue, LIVE_FIRST_SELECTION_POLICY } from './fixed-scene-queue.mjs';
+import { fixedSceneQueue, assertFixedSceneQueue, LIVE_FIRST_SELECTION_POLICY, sourceTimelineStart } from './fixed-scene-queue.mjs';
 import {prepareSplitSceneAssets,splitSceneInput,sceneWithLocalClock,savePortraitSceneAsset} from './split-scene-assets.mjs';
 import {buildWorkflowProgress,workflowPhase} from './workflow-progress.mjs';
 import { splitNarrationForTts } from './tts-policy.mjs';
@@ -6169,7 +6169,7 @@ function restoreOriginalPlannedScenes(moments, contentBeats) {
     : moment);
   const chronologicalOrder = new Map(restored
     .filter((moment) => moment.selectedForFinalVideo)
-    .sort((left, right) => Number(left.startTime) - Number(right.startTime))
+    .sort((left, right) => sourceTimelineStart(left) - sourceTimelineStart(right))
     .map((moment, index) => [String(moment.id), index]));
   return restored.map((moment) => chronologicalOrder.has(String(moment.id))
     ? { ...moment, editOrder: chronologicalOrder.get(String(moment.id)) }
@@ -6515,13 +6515,15 @@ async function trackFootball(sourcePath, moments, media, id, options = {}) {
 async function reselectBlockedSourceActions(sourcePath,candidates,media,id) {
   const directory=join(outputRoot,id,'source-reselection');
   await mkdir(directory,{recursive:true});
+  await ensureShotBoundaries(sourcePath,id);
   const trackingPath=join(outputRoot,id,'tracking','tracking.json');
   const tracking=JSON.parse(await readFile(trackingPath,'utf8'));
   const pending=blockedSelectionScenes(candidates,tracking);
   if(!pending.length) return candidates;
   const shots=JSON.parse(await readFile(join(outputRoot,id,'shots.json'),'utf8')).shots;
   const fingerprint=await sourceContentFingerprint(sourcePath);
-  const replacements=await mapWithConcurrency(pending,fastTracking.reviewConcurrency,async(scene,index)=>{
+  const decisions=await mapWithConcurrency(pending,fastTracking.reviewConcurrency,async(scene,index)=>{
+    try {
     const window=blockedSelectionWindow(scene,shots,media.duration);
     const model=fastTracking.reviewModel;
     const key=stableSignature({version:BLOCKED_SELECTION_VERSION,fingerprint,model,scene:scene.id,
@@ -6559,19 +6561,25 @@ async function reselectBlockedSourceActions(sourcePath,candidates,media,id) {
       // the same answer, and a false crop approval is never synthesized here.
       await writeFile(responsePath,JSON.stringify(parsed,null,2));
     }
-    try {return applyBlockedSelection(scene,window,parsed,{
-      model:parsed.generationProvenance?.actualModel||model,sourceFingerprint:fingerprint});}
+    try {return {scene:applyBlockedSelection(scene,window,parsed,{
+      model:parsed.generationProvenance?.actualModel||model,sourceFingerprint:fingerprint})};}
     catch(error) {
-      error.code='SOURCE_SELECTION_CONFLICT';
-      error.message=`Source reselection for ${scene.id}: ${error.message} Saved observations will not be repeated automatically.`;
-      throw error;
+      return {id:scene.id,error:String(error?.message||error)};
     }
+    } catch(error) {return {id:scene.id,error:String(error?.message||error)};}
   });
+  const replacements=decisions.filter(decision=>decision.scene).map(decision=>decision.scene);
+  const unresolved=decisions.filter(decision=>decision.error);
+  if(!replacements.length) {
+    const error=new Error(`Source action repair found no complete replacement: ${unresolved.map(item=>`${item.id}: ${item.error}`).join('; ')}. Saved observations will not be repeated automatically.`);
+    error.code='SOURCE_SELECTION_CONFLICT';
+    throw error;
+  }
   const selected=mergeBlockedSelections(candidates,replacements);
   const audit={version:BLOCKED_SELECTION_VERSION,savedAt:new Date().toISOString(),
     authorization:'explicit_blocked_source_reselection',sourceFingerprint:fingerprint,
     approvedSceneIds:candidates.filter(scene=>scene.selectionLocked&&!pending.some(p=>p.id===scene.id)).map(scene=>scene.id),
-    previousCandidates:candidates,replacements,combined:false};
+    previousCandidates:candidates,replacements,unresolved,combined:false};
   await writeFile(join(directory,`selection-${Date.now()}.json`),JSON.stringify(audit,null,2));
   // Commit the replacement source list only after every selected incident has
   // complete evidence. Old source/crop files remain available in the audit.

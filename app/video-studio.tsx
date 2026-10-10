@@ -103,9 +103,9 @@ export function VideoStudio() {
       setProgress(job.progress);
       setProgressDetail(job.progressDetail || "");
       setStageIndex(stageIndexFor(job.stage));
-      if (job.stage === "failed") {
+      if (job.stage === "failed" || job.stage === "attention_required") {
         setFailureProgress(job.progress);
-        throw new Error(job.error?.message || "Video processing failed.");
+        throw new Error(job.error?.message || job.progressDetail || "Video processing needs attention.");
       }
       if (job.stage === "completed") {
         showCompletedJob(job);
@@ -162,8 +162,10 @@ export function VideoStudio() {
         showCompletedJob(job);
         return;
       }
-      if (job.stage === "failed") {
-        const retryKind = Number(job.progress || failureProgress) >= 84 ? "retry-render" : "retry-analysis";
+      if (job.stage === "failed" || job.stage === "attention_required") {
+        const retryKind = job.stage === "attention_required" && job.error?.code === "FIXED_SCENE_FRAMING_PENDING"
+          ? "reselect-blocked"
+          : Number(job.progress || failureProgress) >= 84 ? "retry-render" : "retry-analysis";
         const retryResponse = await fetch(`${processorUrl}/jobs/${currentJobId}/${retryKind}`, { method: "POST" });
         const retryJob = await retryResponse.json() as LocalJob & { error?: string };
         if (!retryResponse.ok && retryResponse.status !== 409) {

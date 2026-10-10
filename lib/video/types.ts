@@ -11,6 +11,7 @@ export type JobStage =
   | "rendering"
   | "validating"
   | "completed"
+  | "attention_required"
   | "failed";
 
 export type EventType =

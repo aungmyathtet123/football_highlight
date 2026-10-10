@@ -88,7 +88,9 @@ try {
   });
   await waitForHealth();
   if (restoredCheckpoint) {
-    const retryKind = Number(restoredCheckpoint.progress || savedProgress) >= 84 ? "retry-render" : "retry-analysis";
+    const retryKind = process.env.SOURCE_RESELECTION_REQUESTED === 'true'
+      && restoredCheckpoint.stage === 'attention_required' ? 'reselect-blocked'
+      : Number(restoredCheckpoint.progress || savedProgress) >= 84 ? "retry-render" : "retry-analysis";
     const retryResponse = await fetch(`http://127.0.0.1:${port}/jobs/${jobId}/${retryKind}`, { method: "POST" });
     if (!retryResponse.ok && retryResponse.status!==409) throw new Error(`The restored checkpoint could not resume (${retryResponse.status}): ${await retryResponse.text()}`);
   } else {

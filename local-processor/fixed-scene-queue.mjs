@@ -1,5 +1,6 @@
 export const FIXED_SCENE_QUEUE_VERSION = 1;
 export const LIVE_FIRST_SELECTION_POLICY = 'first_complete_live';
+export const sourceTimelineStart = scene => Number(scene.sourceReselection?.previousStart ?? scene.startTime);
 
 export function fixedRenderSceneQueue(candidates) {
   const locked=candidates.filter(scene=>scene.selectionLocked===true && scene.fixedSceneQueueVersion===1);
@@ -7,14 +8,14 @@ export function fixedRenderSceneQueue(candidates) {
   if(locked.some(scene=>scene.selectedForFinalVideo!==true))
     throw new Error('A selected split scene was disabled before rendering. Restore its verified queue entry.');
   return [...locked].sort((a,b)=>Number(a.editOrder??Number.MAX_SAFE_INTEGER)
-    -Number(b.editOrder??Number.MAX_SAFE_INTEGER)||a.startTime-b.startTime);
+    -Number(b.editOrder??Number.MAX_SAFE_INTEGER)||sourceTimelineStart(a)-sourceTimelineStart(b));
 }
 
 // Step 1 is the only owner of source selection. Tracking may change positions,
 // not scene IDs, source boundaries or the selected incident angle.
 export function fixedSceneQueue(candidates) {
   const scenes = candidates.filter(scene => scene.selectionLocked === true)
-    .sort((a, b) => Number(a.startTime) - Number(b.startTime))
+    .sort((a, b) => sourceTimelineStart(a) - sourceTimelineStart(b))
     .map((scene, index) => ({ id: String(scene.id), index,
       storyId: String(scene.storyId || scene.id), eventType: scene.eventType,
       startTime: Number(scene.startTime), endTime: Number(scene.endTime) }));
