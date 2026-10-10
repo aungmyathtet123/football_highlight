@@ -3999,30 +3999,12 @@ async function trackLockedSceneUntilVerified(sourcePath, scene, media, id, scene
     }
   }
   if (hybridKeyframing && !nativeLandscape) {
-    // A rejected actual crop is not repaired by asking the reviewer to approve
-    // the same path again. Reobserve this locked source scene with the visual
-    // camera planner and verify its NEW actual crop. Never rediscover footage,
-    // alter boundaries, or manufacture a detector observation.
-    const ai=createGeminiClient();
-    const dimensions=outputDimensions((await readJob(id)).settings);
-    const visual=await trackSceneWithGemini({sourcePath,sourceFingerprint:await sourceContentFingerprint(sourcePath),
-      scene,media,ratio:dimensions.width/dimensions.height,directory:join(outputRoot,id,'tracking','gemini'),
-      ffmpeg:ffmpegPath,run,model:process.env.GEMINI_KEYFRAME_MODEL||process.env.GEMINI_MODEL,
-      generate:async(request,label)=>(await generateGeminiJson(ai,request,label)).parsed,
-      report:async progressDetail=>updateJob(await readJob(id),'tracking',34,{progressDetail})});
-    const assessment=assessGeminiFraming(scene,visual);
-    if(assessment.usable) {
-      visual.hybridVisualRepairVersion=HYBRID_TRACKING_VERSION;
-      if(scene.sourceSceneAsset) {
-        visual.portraitSceneAsset=await savePortraitSceneAsset({scene,
-          sourceDirectory:join(outputRoot,id,'source-scenes'),directory:join(outputRoot,id,'portrait-scenes'),
-          evidence:visual,dimensions,ffmpeg:ffmpegPath,run,probe});
-        visual.splitSceneFileName=scene.sourceSceneAsset.fileName;
-      }
-      const repaired=mergeTrackingResults(merged,{moments:{[scene.id]:visual}});
-      return {tracking:repaired,assessment};
-    }
-    return {tracking:merged,assessment:lastAssessment};
+    // The hybrid provider cannot recover a rejected detector crop by accepting
+    // another model-generated coordinate path. Keep the locked scene and its
+    // native evidence for a targeted Step 2 repair or human review.
+    return {tracking:merged,assessment:{...lastAssessment,
+      mode:'hybrid_grounded_tracking_required',
+      issues:[...new Set([...(lastAssessment.issues||[]),'grounded_player_ball_crop_unverified'])]}};
   }
   if (nativeLandscape) return { tracking: merged, assessment: lastAssessment };
   const evidence = trackingEvidenceFor(merged, scene);
@@ -4091,8 +4073,10 @@ async function prepareIncidentEvidence(sourcePath, candidates, media, id, option
         approved:cachedApproved,needsRepair:0},
     });
     if (pending.length) {
-      const guided=await mapWithConcurrency(pending,fastTracking.reviewConcurrency,
-        scene=>prepareHybridActionGuide(sourcePath,scene,id));
+      // The fast detector was benchmarked without LLM rectangles. A semantic
+      // guide can steer candidate association toward an invented result or a
+      // spare ball, so leave pixel coordinates and ROI search to the tracker.
+      const guided=pending.map(hybridDetectorScene);
       const byId=new Map(guided.map(scene=>[scene.id,scene]));
       lockedScenes=lockedScenes.map(scene=>byId.get(scene.id)||scene);
       const streamed=new Map();

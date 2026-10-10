@@ -7,6 +7,7 @@ import { footballVideoPart } from './gemini-media-policy.mjs';
 import {cropMediaPreflight} from './crop-media-preflight.mjs';
 import { HYBRID_TRACKING_VERSION } from './hybrid-tracking-policy.mjs';
 import { isDisciplinaryAction, DISCIPLINARY_ACTION_CONTRACT } from './disciplinary-action.mjs';
+import { reviewedFramingEvent } from './gemini-framing.mjs';
 
 const supportOnly = scene => scene.eventType === 'celebration' || scene.storyPhase === 'reaction';
 export function hybridActionReviewContract(scene) {
@@ -222,6 +223,12 @@ export function assessHybridFraming(scene, evidence) {
   if (evidence?.provider !== 'hybrid-football') return null;
   if (evidence.hybridTrackingVersion !== HYBRID_TRACKING_VERSION)
     return { usable: false, mode: 'hybrid_cache_version_mismatch' };
+  if (evidence.reviewRepairError)
+    return { usable: false, mode: 'hybrid_review_unavailable', issues: [evidence.reviewRepairError] };
+  // Step 1 locks the source interval, not an infallible event label. Use an
+  // independently verified crop outcome for the event-specific checks below.
+  const correctedEvent=reviewedFramingEvent(scene,evidence);
+  if(correctedEvent && correctedEvent!==scene.eventType) scene={...scene,eventType:correctedEvent};
   const reviewedBrief=reviewedHybridPhaseBrief(scene,evidence);
   if (reviewedBrief) scene={...scene,trackingBrief:reviewedBrief};
   const geometry = hybridGeometry(scene, evidence);
@@ -369,7 +376,7 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
     // repeat scene selection, run another tracker or reuse the same verdict.
     // Inspect one higher-temporal-detail finish from this exact crop and source.
     // The wide reference establishes the goal plane, never crop visibility.
-    const detailPath=join(folder,phaseDetail?'phase-video-review-v1.json':'outcome-video-review-v2.json');
+    const detailPath=join(folder,phaseDetail?'phase-video-review-v2.json':'outcome-video-review-v3.json');
     const window=hybridOutcomeVideoWindow(scene,review);
     let detailed;
     try {detailed=mergeHybridOutcomeReview(review,JSON.parse(await readFile(detailPath,'utf8')),window);} catch { /* New finish evidence. */ }
@@ -383,19 +390,30 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
         : `crop=iw:iw/${ratio}:x=0:y='(ih-oh)/2'`;
       const height=2*Math.floor((media.width/media.height>=ratio?media.height:media.width/ratio)/2);
       const width=2*Math.round(height*ratio/2);
-      await writeFile(graph,`[0:v]setpts=PTS-STARTPTS,split=2[c][s];[c]${crop},trim=start=${start}:end=${end},setpts=PTS-STARTPTS,scale=${width}:${height},fps=16[cv];[s]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,fps=16[sv]`);
+      await writeFile(graph,`[0:v]setpts=PTS-STARTPTS,split=2[c][s];[c]${crop},trim=start=${start}:end=${end},setpts=PTS-STARTPTS,scale=${width}:${height},fps=12[cv];[s]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,fps=12[sv]`);
       await run(ffmpeg,['-hide_banner','-loglevel','error','-y','-ss',String(scene.startTime),'-i',sourcePath,
         '-t',String(scene.endTime-scene.startTime),...await filterGraphArgs(ffmpeg,graph),
         '-map','[cv]','-an','-c:v','libx264','-preset','veryfast','-crf','18',cropVideo,
         '-map','[sv]','-an','-c:v','libx264','-preset','veryfast','-crf','18',sourceVideo]);
-      const finish=await generate({model,contents:[
-        {text:`ACTUAL PORTRAIT FINISH, at 16fps. Excerpt 0 corresponds to scene-local ${start}s; it ends at ${end}s. Earlier action has already been independently reviewed and is not supplied here. Judge only this finish, not the unseen opening setup.`},
-        footballVideoPart((await readFile(cropVideo)).toString('base64'),16),
+      let finish;
+      try { finish=await generate({model,contents:[
+        {text:`ACTUAL PORTRAIT FINISH, at 12fps. Excerpt 0 corresponds to scene-local ${start}s; it ends at ${end}s. Earlier action has already been independently reviewed and is not supplied here. Judge only this finish, not the unseen opening setup.`},
+        footballVideoPart((await readFile(cropVideo)).toString('base64'),12),
         {text:`ORIGINAL WIDE SOURCE REFERENCE for the same ${start}-${end}s interval. This is NOT part of the edited crop. Use it only to locate the plane between both posts and below the crossbar and distinguish side/back net, misses, saves and rebounds. Source-only visibility MUST NOT approve any crop phase or ballFollowed/outcomeVisible flag.`},
-        footballVideoPart((await readFile(sourceVideo)).toString('base64'),16),
+        footballVideoPart((await readFile(sourceVideo)).toString('base64'),12),
         {text:`Independently observe the real moving match ball through final contact, flight and resolution. No prior outcome verdict or score is supplied. A ball hitting side/back net from OUTSIDE the goal, or passing above/beside the posts, is NOT a goal. Report an actual goal only if it crosses the FRONT goal plane between the posts and under the bar. Confirm that the PORTRAIT crop itself shows the result; a result visible only in the wide reference must fail outcomeVisible. ${FINISHING_ACTION_PAYOFF} ${NEUTRAL_CROP_VERDICT} correctSubject, stableCamera, ballFollowed and contactVisible judge only this supplied portrait interval. Return finish review JSON using scene-local timestamps, adding ${start}s to times read in the excerpts. Include only contact, flight and payoff phaseChecks and observations within ${start}-${end}s. Record a separate flight check AFTER the LAST receiving shot/header touch and BEFORE the resolved payoff, only if the actual match ball is identifiable. Initial-cross flight cannot stand in for final-shot flight. If that flight or touch is not visible, report false rather than inventing a timestamp. Do not report or infer earlier setup or passes. Reject uncertainty or missing crop action; do not assume an outcome to make this pass.`},
       ],config:{responseMimeType:'application/json',responseJsonSchema:HYBRID_FINISH_REVIEW_SCHEMA,temperature:0,
-        maxOutputTokens:16384,thinkingConfig:{thinkingLevel:'HIGH'}}},`hybrid crop outcome video ${scene.id}`);
+        maxOutputTokens:16384,thinkingConfig:{thinkingLevel:'MEDIUM'}}},`hybrid crop outcome video ${scene.id}`); }
+      catch(error) {
+        // A service timeout cannot convert a disputed goal/miss into crop
+        // approval. Save the native track and first review for a scene-only
+        // retry, while letting other locked scenes finish their own reviews.
+        const aborted=error?.name==='AbortError' || error?.cause?.name==='AbortError';
+        if(!aborted && ![408,429,500,502,503,504].includes(Number(error?.status||error?.code))) throw error;
+        result.reviewRepairError=`Finish review unavailable (${aborted?'timeout':error.status||error.code}); outcome unverified.`;
+        result.finalCropVerified=false;
+        return result;
+      }
       detailed=mergeHybridOutcomeReview(review,finish,window);
       await writeFile(detailPath,JSON.stringify(finish));
     }

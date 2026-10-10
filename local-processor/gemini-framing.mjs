@@ -956,7 +956,8 @@ export function reviewedFramingEvent(scene,evidence) {
     // outcome, correct the event instead of stopping Step 2 or narrating a
     // goal that the actual pixels do not show.
     return (scene.sourceSelectionEvidence || scene.selectionLocked === true)
-      ? ({woodwork:'big_chance',blocked:'big_chance',wide:'shot_off_target',over:'shot_off_target'}[outcome.type] || null)
+      ? ({keeper_save:review.keeperContactVisible===true?'save':null,
+        woodwork:'big_chance',blocked:'big_chance',wide:'shot_off_target',over:'shot_off_target'}[outcome.type] || null)
       : null;
   }
   // The source's INITIAL whole-video observation and the actual crop must
