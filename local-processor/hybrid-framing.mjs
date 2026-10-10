@@ -219,6 +219,16 @@ export function hybridGeometry(scene, evidence) {
     issues: [...violations, ...issues], violations, phases };
 }
 
+// A broadcast frame can show a ball and goal too far apart for a full-bleed
+// portrait window. Preserve the measured native observations while presenting
+// the complete source frame; this is a different, independently reviewed view.
+export function sourceContainEvidence(evidence) {
+  return {...evidence,layoutMode:'source_contain',finalCropVerified:false,
+    renderReview:undefined,initialRenderReview:undefined,reviewRepairError:undefined,
+    keyframes:(evidence?.keyframes||[]).map(frame=>({...frame,cameraX:.5,cameraY:.5,
+      cropBox:[0,0,1,1]}))};
+}
+
 export function assessHybridFraming(scene, evidence) {
   if (evidence?.provider !== 'hybrid-football') return null;
   if (evidence.hybridTrackingVersion !== HYBRID_TRACKING_VERSION)
@@ -286,7 +296,8 @@ export function assessHybridFraming(scene, evidence) {
   }
   if (missing.length || !Array.isArray(review?.observations) || review.observations.length < 2)
     return { usable: false, mode: 'hybrid_render_review_incomplete', issues: missing };
-  return { usable: true, mode: 'hybrid_crop_verified' };
+  return { usable: true, mode: evidence.layoutMode==='source_contain'
+    ? 'hybrid_source_contain_verified' : 'hybrid_crop_verified' };
 }
 
 // A positive crop verdict can omit a final-flight timestamp. Reusing that
@@ -305,20 +316,22 @@ export function needsHybridPhaseDetail(scene, evidence) {
 
 // Shared by production and the bounded, video-only quality canary. The canary
 // must inspect exactly the same pixels, contract and detail as production.
-export function hybridCropReviewRequest({model,scene,videoData,geometryIssues=[],detail=[],videoOnly=true}) {
+export function hybridCropReviewRequest({model,scene,videoData,geometryIssues=[],detail=[],videoOnly=true,presentationMode='portrait_crop'}) {
   return {model,contents:[footballVideoPart(videoData,videoOnly?12:8),...detail,
-    {text:`Independently inspect this ACTUAL rendered crop. No claimed score or player name is supplied. Use neutral roles only in observations and descriptions, never inferred player names, team names or scorelines; framing is not identity verification.
+    {text:`Independently inspect this ACTUAL rendered ${presentationMode==='source_contain'?'full-source frame contained inside a portrait canvas':'portrait crop'}. No claimed score or player name is supplied. Use neutral roles only in observations and descriptions, never inferred player names, team names or scorelines; framing is not identity verification.
 ${hybridReviewInstructions(scene)}
+${presentationMode==='source_contain'?'The full broadcast frame is the proposed final presentation. Judge whether the complete action and its real result remain identifiable at this displayed size. If this is actually a pass, challenge or clearance rather than a shot, evaluate its visible contact, flight and resolution as normal play and report observedOutcome.type=not_applicable. An incomplete source action must fail.':''}
 Do not infer a goal from celebration, a scoreboard, a spare ball or a shot wide/over. ballEnteredGoal is true only when the moving match ball visibly crosses the goal line inside the goal. Cite concrete scene-local timestamps.
 Native detector gaps need independent pixel evidence, not automatic approval: ${JSON.stringify(geometryIssues)}.
 The following are scene-local phase hints, NOT proof of the action or coordinates: ${JSON.stringify(Object.fromEntries(Object.entries(scene.trackingBrief || {}).filter(([key,value])=>/Time$/.test(key)&&finite(value)).map(([key,value])=>[key,value-scene.startTime])))}.
-${videoOnly?'The supplied native-detail video contains the complete actual crop at 12fps. Inspect ball movement, receiving touches and finish directly from this video.':'The labelled high-detail stills show the SAME actual crop before preview downsampling; use them to inspect the small ball and contact, and use the video to judge movement.'} No source outside the crop is supplied. Return ONE JSON object, not an array, with boolean passed, correctSubject, stableCamera, outcomeVisible, ballFollowed, setupVisible, contactVisible, ballEnteredGoal; issues:[string]; observations:[{time:number,description:string}]; phaseChecks:[{phase:string,time:number,ballVisible:boolean,playerVisible:boolean,description:string}].`}],
+${videoOnly?'The supplied native-detail video contains the complete actual presented frame at 12fps. Inspect ball movement, receiving touches and finish directly from this video.':'The labelled high-detail stills show the SAME actual presented frame before preview downsampling; use them to inspect the small ball and contact, and use the video to judge movement.'} No video outside this presentation is supplied. Return ONE JSON object, not an array, with boolean passed, correctSubject, stableCamera, outcomeVisible, ballFollowed, setupVisible, contactVisible, ballEnteredGoal; issues:[string]; observations:[{time:number,description:string}]; phaseChecks:[{phase:string,time:number,ballVisible:boolean,playerVisible:boolean,description:string}].`}],
     config:{responseMimeType:'application/json',responseJsonSchema:HYBRID_REVIEW_SCHEMA,temperature:0,
       maxOutputTokens:8192,thinkingConfig:{thinkingLevel:'MEDIUM'}}};
 }
 
 export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, evidence, media,
   ratio, directory, ffmpeg, run, model, generate, videoOnly = false,
+  presentationMode = 'portrait_crop',
   probeVideo,
   filterGraphArgs = filterGraphFileArgs }) {
   const geometry = hybridGeometry(scene, evidence);
@@ -326,7 +339,9 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
     geometryReview: geometry, geometryVerified:geometry.usable === true, finalCropVerified: false };
   if (!geometry.usable) return result; // Never pay for approval of known bad geometry.
   const key = createHash('sha256').update(JSON.stringify({ sourceFingerprint, model,
-    version: HYBRID_TRACKING_VERSION, videoOnly, reviewVersion:scene.eventType==='normal_play'?6:4, start: scene.startTime, end: scene.endTime,
+    version: HYBRID_TRACKING_VERSION, videoOnly,
+    ...(presentationMode==='source_contain'?{presentationMode}:{}),
+    reviewVersion:scene.eventType==='normal_play'?6:4, start: scene.startTime, end: scene.endTime,
     ratio, supportOnly: supportOnly(scene), trackingBrief: scene.trackingBrief,
     geometryIssues: geometry.issues, keyframes: evidence.keyframes })).digest('hex');
   const folder = join(directory, key);
@@ -342,9 +357,12 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
     const graph = join(folder, 'crop-filter.txt'), video = join(folder, 'crop.mp4');
     const stillHeight = 2*Math.floor((media.width/media.height>=ratio?media.height:media.width/ratio)/2);
     const stillWidth = 2*Math.round(stillHeight*ratio/2);
+    const presented = presentationMode==='source_contain'
+      ? `scale=${stillWidth}:${stillHeight}:force_original_aspect_ratio=decrease,pad=${stillWidth}:${stillHeight}:(ow-iw)/2:(oh-ih)/2:black`
+      : `${crop},scale=${stillWidth}:${stillHeight}`;
     await writeFile(graph, videoOnly
-      ? `[0:v]setpts=PTS-STARTPTS,${crop},scale=${stillWidth}:${stillHeight},fps=12[v]`
-      : `[0:v]setpts=PTS-STARTPTS,${crop},split=2[c][q];[c]scale=-2:720,fps=8[v];[q]fps=3,scale=${stillWidth}:${stillHeight}[qa]`);
+      ? `[0:v]setpts=PTS-STARTPTS,${presented},fps=12[v]`
+      : `[0:v]setpts=PTS-STARTPTS,${presented},split=2[c][q];[c]scale=-2:720,fps=8[v];[q]fps=3[qa]`);
     await run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y', '-ss', String(scene.startTime),
       '-i', sourcePath, '-t', String(scene.endTime - scene.startTime),
       ...await filterGraphArgs(ffmpeg, graph), '-map', '[v]', '-an',
@@ -365,7 +383,7 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
           mediaResolution:{level:'MEDIA_RESOLUTION_HIGH'}});
     }
     review = normalizeHybridReview(await generate(hybridCropReviewRequest({model,scene,
-      videoData:(await readFile(video)).toString('base64'),geometryIssues:geometry.issues,detail,videoOnly}),
+      videoData:(await readFile(video)).toString('base64'),geometryIssues:geometry.issues,detail,videoOnly,presentationMode}),
       `hybrid rendered crop ${scene.id}`));
     await writeFile(reviewPath, JSON.stringify(review));
   }
@@ -390,7 +408,10 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
         : `crop=iw:iw/${ratio}:x=0:y='(ih-oh)/2'`;
       const height=2*Math.floor((media.width/media.height>=ratio?media.height:media.width/ratio)/2);
       const width=2*Math.round(height*ratio/2);
-      await writeFile(graph,`[0:v]setpts=PTS-STARTPTS,split=2[c][s];[c]${crop},trim=start=${start}:end=${end},setpts=PTS-STARTPTS,scale=${width}:${height},fps=12[cv];[s]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,fps=12[sv]`);
+      const presented= presentationMode==='source_contain'
+        ? `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black`
+        : `${crop},scale=${width}:${height}`;
+      await writeFile(graph,`[0:v]setpts=PTS-STARTPTS,split=2[c][s];[c]${presented},trim=start=${start}:end=${end},setpts=PTS-STARTPTS,fps=12[cv];[s]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,fps=12[sv]`);
       await run(ffmpeg,['-hide_banner','-loglevel','error','-y','-ss',String(scene.startTime),'-i',sourcePath,
         '-t',String(scene.endTime-scene.startTime),...await filterGraphArgs(ffmpeg,graph),
         '-map','[cv]','-an','-c:v','libx264','-preset','veryfast','-crf','18',cropVideo,

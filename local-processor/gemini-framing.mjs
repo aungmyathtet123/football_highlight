@@ -948,6 +948,12 @@ export function reviewedFramingEvent(scene,evidence) {
     .some(key=>review[key]!==true) || review.issues?.length
     || !Number.isFinite(outcome.time) || outcome.time<0 || outcome.time>scene.endTime-scene.startTime
     || typeof outcome.description!=='string' || outcome.description.trim().length<12) return null;
+  if (outcome.type==='not_applicable' && review.ballEnteredGoal===false
+    && ['save','shot_on_target','shot_off_target','big_chance'].includes(scene.eventType)
+    && ['contact','payoff'].every(phase=>(review.phaseChecks||[]).some(check=>check.phase===phase
+      && check.ballVisible===true && check.playerVisible===true
+      && Number.isFinite(check.time) && check.time>=0 && check.time<=scene.endTime-scene.startTime)))
+    return 'normal_play';
   // Never convert an awarded goal into a different event to satisfy framing.
   if(['goal','disallowed_goal'].includes(scene.eventType)) {
     if (outcome.type === 'goal' && review.ballEnteredGoal === true) return scene.eventType;
@@ -1062,6 +1068,7 @@ export function reviewedFramingNarration(scene,evidence) {
     keeper_save:'The goalkeeper visibly stops or deflects the shot.',
     woodwork:'The ball strikes the goal frame and stays out.',
     blocked:'The attempt is blocked and the ball stays out.',
+    not_applicable:'The visible open-play move resolves without a shot.',
     wide:'The shot passes outside the goalpost.',over:'The shot goes over the crossbar.'}[evidence.renderReview.observedOutcome.type];
   if(!description) return null;
   const setupFacts=(scene.semanticNarrationFacts||[]).filter(fact=>

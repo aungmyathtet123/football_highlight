@@ -42,7 +42,7 @@ import { incidentCoverage, assertIncidentCoverage } from "./incident-coverage.mj
 import { isDecisionScene, normalizeDecisionOnlyScene, repairDecisionFraming } from "./decision-framing.mjs";
 import { trackSceneWithGemini, assessGeminiFraming, reviewedFramingEvent, reviewedFramingNarration, reviewedLeadInScene, FramingVerificationError } from "./gemini-framing.mjs";
 import { keyframeProvider, hybridDetectorScene, providerEvidenceMatches, HYBRID_TRACKING_VERSION } from "./hybrid-tracking-policy.mjs";
-import { reviewHybridCrop, reviewedHybridPhaseBrief, hybridEvidenceWindowMatches } from "./hybrid-framing.mjs";
+import { reviewHybridCrop, reviewedHybridPhaseBrief, hybridEvidenceWindowMatches, sourceContainEvidence } from "./hybrid-framing.mjs";
 import { fastTrackingPolicy } from './fast-tracking-policy.mjs';
 import { createWorkflowPerformance } from './workflow-performance.mjs';
 import {ACTION_GUIDANCE_VERSION,actionGuidanceKey,matchingActionGuidance,actionGuidanceRequest,observeValidatedActionGuidance,applySavedActionGuidance,actionGuideObservationKey,matchingActionGuideObservation,sharedActionGuideObservation} from './action-guidance.mjs';
@@ -1466,8 +1466,10 @@ async function processJob(id) {
       // an incomplete recap. Preserve its scene lock for framing repair.
       job=await updateJob(await readJob(id),"tracking",38,{moments:candidates,observedMoments:candidates,
         resumeTrackingOnly:true,progressDetail:"Repairing the selected goal crops before script writing."});
-      throw new Error(`Locked goal framing still needs repair: ${unverifiedLockedGoals.map(moment=>
+      const pendingError=new Error(`Locked goal framing still needs repair: ${unverifiedLockedGoals.map(moment=>
         `${moment.id} (${assessPlannedSceneTracking(moment,matchingTrackingEvidence(tracking,moment)).issues?.join(", ")||moment.trackingDecision||"unverified crop"})`).join("; ")}. Selected incidents remain saved; narration has not started.`);
+      pendingError.code='FIXED_SCENE_FRAMING_PENDING';
+      throw pendingError;
     }
     if (sceneQueue) {
       const queueReview = assertFixedSceneQueue(sceneQueue, candidates);
@@ -4062,6 +4064,17 @@ async function prepareIncidentEvidence(sourcePath, candidates, media, id, option
       return !providerEvidenceMatches(activeKeyframeProvider, evidence)
         || !assessPlannedSceneTracking(scene, evidence)?.usable || evidence.finalCropVerified!==true;
     });
+    const nativePending=pending.filter(scene=>{
+      const evidence=trackingEvidenceFor(tracking,scene);
+      return !providerEvidenceMatches(activeKeyframeProvider,evidence)
+        || !hybridEvidenceWindowMatches(scene,evidence)
+        || !Array.isArray(evidence.sourceRecords) || !evidence.sourceRecords.length
+        || !Array.isArray(evidence.keyframes) || evidence.keyframes.length!==evidence.sourceRecords.length;
+    });
+    // Use the same detector-neutral scene during saved-evidence reviews as
+    // during the first pass, so its crop-review cache key remains identical.
+    const guidedPending=new Map(pending.map(scene=>[scene.id,hybridDetectorScene(scene)]));
+    lockedScenes=lockedScenes.map(scene=>guidedPending.get(scene.id)||scene);
     const pendingIds=new Set(pending.map(scene=>scene.id));
     const current=await readJob(id);
     const cachedApproved=lockedScenes.length-pending.length;
@@ -4072,11 +4085,11 @@ async function prepareIncidentEvidence(sourcePath, candidates, media, id, option
       trackingProgress:{pass:'crop_review',completed:cachedApproved,total:lockedScenes.length,
         approved:cachedApproved,needsRepair:0},
     });
-    if (pending.length) {
+    if (nativePending.length) {
       // The fast detector was benchmarked without LLM rectangles. A semantic
       // guide can steer candidate association toward an invented result or a
       // spare ball, so leave pixel coordinates and ROI search to the tracker.
-      const guided=pending.map(hybridDetectorScene);
+      const guided=nativePending.map(scene=>guidedPending.get(scene.id));
       const byId=new Map(guided.map(scene=>[scene.id,scene]));
       lockedScenes=lockedScenes.map(scene=>byId.get(scene.id)||scene);
       const streamed=new Map();
@@ -4171,7 +4184,8 @@ async function prepareIncidentEvidence(sourcePath, candidates, media, id, option
       };
       const splitCacheMatches=!scene.sourceSceneAsset || !geminiKeyframing
         || (savedEvidence?.splitSceneFileName===scene.sourceSceneAsset.fileName
-          && savedEvidence?.portraitSceneAsset?.verifiedCamera===true);
+          && (savedEvidence?.portraitSceneAsset?.verifiedCamera===true
+            || savedEvidence?.layoutMode==='source_contain'));
       if (cachedAssessment.usable && splitCacheMatches && providerEvidenceMatches(activeKeyframeProvider, savedEvidence)
         && (!hybridKeyframing || savedEvidence.finalCropVerified===true)) {
         return saveCompletedScene({ scene, sceneIndex, tracking: sceneTracking, assessment: cachedAssessment });
@@ -4236,7 +4250,11 @@ async function prepareIncidentEvidence(sourcePath, candidates, media, id, option
       trackingRepairError: completed.assessment.usable ? undefined : scene.trackingRepairError,
       ...(isDecisionScene(scene) ? { playerHighlight: false, tacticalDrawing: "none" } : {}),
       portraitRepairReason: undefined,
-      fallbackPresentation: undefined,
+      fallbackPresentation: completed.assessment.usable && trackingEvidenceFor(tracking,scene)?.layoutMode==='source_contain'
+        ? {mode:'source_contain',reason:'verified_full_source_action',markerSuppressed:true,dynamicCameraSuppressed:true}
+        : undefined,
+      ...(completed.assessment.usable && trackingEvidenceFor(tracking,scene)?.layoutMode==='source_contain'
+        ? {playerHighlight:false,tacticalDrawing:'none'} : {}),
     };
     result = result.map(moment => moment.id === scene.id ? approved : moment);
     tracking.summary = summarizeTracking(tracking.moments);
@@ -6678,15 +6696,31 @@ async function verifyHybridScene(sourcePath,scene,media,id,evidence) {
     activeTrackingScene:{id:scene.id,status:'reviewing'},
   });
   const ai=createGeminiClient();
-  const observed=await reviewHybridCrop({sourcePath,sourceFingerprint:await sourceContentFingerprint(sourcePath),
+  const fingerprint=await sourceContentFingerprint(sourcePath);
+  let observed=await reviewHybridCrop({sourcePath,sourceFingerprint:fingerprint,
     scene,evidence,media,ratio:dimensions.width/dimensions.height,
     directory:join(outputRoot,id,'tracking','hybrid-review'),ffmpeg:ffmpegPath,run,probeVideo:probe,
     model:fastTracking.reviewModel,videoOnly:true,
     generate:async(request,label)=>(await generateGeminiJson(ai,request,label)).parsed});
-  if(observed.finalCropVerified && scene.sourceSceneAsset) {
+  if(!observed.finalCropVerified && evidence.layoutMode!=='source_contain') {
+    // When the complete action cannot fit inside one full-bleed crop, inspect
+    // the actual full-source presentation before declaring the locked scene
+    // unrepairable. A source-only observation never approves the failed crop.
+    const contained=await reviewHybridCrop({sourcePath,sourceFingerprint:fingerprint,
+      scene,evidence:sourceContainEvidence(evidence),media,ratio:dimensions.width/dimensions.height,
+      directory:join(outputRoot,id,'tracking','hybrid-review'),ffmpeg:ffmpegPath,run,probeVideo:probe,
+      model:fastTracking.reviewModel,videoOnly:true,presentationMode:'source_contain',
+      generate:async(request,label)=>(await generateGeminiJson(ai,request,label)).parsed});
+    if(contained.finalCropVerified) observed=contained;
+    else observed.sourceContainReview={review:contained.renderReview,issues:assessPlannedSceneTracking(scene,contained).issues,
+      repairError:contained.reviewRepairError};
+  }
+  if(observed.finalCropVerified && scene.sourceSceneAsset && observed.layoutMode!=='source_contain') {
     observed.portraitSceneAsset=await savePortraitSceneAsset({scene,
       sourceDirectory:join(outputRoot,id,'source-scenes'),directory:join(outputRoot,id,'portrait-scenes'),
       evidence:observed,dimensions,ffmpeg:ffmpegPath,run,probe});
+    observed.splitSceneFileName=scene.sourceSceneAsset.fileName;
+  } else if(observed.finalCropVerified && observed.layoutMode==='source_contain' && scene.sourceSceneAsset) {
     observed.splitSceneFileName=scene.sourceSceneAsset.fileName;
   }
   return observed;

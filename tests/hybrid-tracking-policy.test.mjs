@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { HYBRID_TRACKING_VERSION, hybridDetectorScene, providerEvidenceMatches } from '../local-processor/hybrid-tracking-policy.mjs';
 import { reviewedFramingEvent } from '../local-processor/gemini-framing.mjs';
-import { assessHybridFraming } from '../local-processor/hybrid-framing.mjs';
+import { assessHybridFraming, sourceContainEvidence, hybridCropReviewRequest } from '../local-processor/hybrid-framing.mjs';
 
 test('a hybrid run never reuses Gemini-generated camera coordinates', () => {
   const oldVisualRepair = {
@@ -76,4 +76,58 @@ test('a timed-out finish review cannot approve an earlier provisional verdict', 
     renderReview:{passed:true,observedOutcome:{type:'keeper_save',time:5}}});
   assert.equal(assessment.usable,false);
   assert.equal(assessment.mode,'hybrid_review_unavailable');
+});
+
+test('a source-contained fallback preserves observations and removes the failed portrait window', () => {
+  const native={provider:'hybrid-football',sourceRecords:[{time:0,direct_ball:true}],
+    keyframes:[{time:0,cameraX:.8,cropBox:[.6,0,.9,1]}],
+    renderReview:{passed:false},reviewRepairError:'old crop timeout',finalCropVerified:false};
+  const contained=sourceContainEvidence(native);
+  assert.equal(contained.layoutMode,'source_contain');
+  assert.deepEqual(contained.keyframes[0].cropBox,[0,0,1,1]);
+  assert.equal(contained.keyframes[0].cameraX,.5);
+  assert.equal(contained.sourceRecords,native.sourceRecords);
+  assert.equal(contained.renderReview,undefined);
+  assert.equal(contained.reviewRepairError,undefined);
+  assert.deepEqual(native.keyframes[0].cropBox,[.6,0,.9,1]);
+});
+
+test('a complete observed pass corrects a stale finishing label without inventing a goal', () => {
+  const scene={eventType:'save',startTime:0,endTime:5};
+  const review={passed:true,correctSubject:true,stableCamera:true,ballFollowed:true,
+    setupVisible:true,contactVisible:true,outcomeVisible:true,ballEnteredGoal:false,issues:[],
+    observedOutcome:{type:'not_applicable',time:3,description:'The pass reaches a teammate in open play.'},
+    phaseChecks:[{phase:'contact',time:1,ballVisible:true,playerVisible:true},
+      {phase:'payoff',time:3,ballVisible:true,playerVisible:true}]};
+  assert.equal(reviewedFramingEvent(scene,{renderReview:review}),'normal_play');
+  assert.equal(reviewedFramingEvent(scene,{renderReview:{...review,outcomeVisible:false}}),null);
+  const request=hybridCropReviewRequest({model:'test',scene,videoData:'AA==',presentationMode:'source_contain'});
+  assert.match(request.contents.at(-1).text,/full-source frame contained inside a portrait canvas/);
+  assert.match(request.contents.at(-1).text,/incomplete source action must fail/);
+});
+
+test('only the separately reviewed full-source presentation can recover an action outside the portrait crop', () => {
+  const scene={eventType:'goal',selectionLocked:true,startTime:0,endTime:4,
+    trackingBrief:{contactTime:1,flightStartTime:1,payoffStartTime:3,payoffEndTime:3.5}};
+  const times=[0,1,2,3];
+  const evidence={provider:'hybrid-football',hybridTrackingVersion:HYBRID_TRACKING_VERSION,
+    sourceStartTime:0,sourceEndTime:4,
+    sourceRecords:times.map((time,index)=>({time,action_phase:['setup','contact','flight','payoff'][index],
+      direct_ball:true,ball_x:.1,ball_y:.5,player_track_id:1,player_x1:.05,player_x2:.2,
+      player_top:.3,player_bottom:.8})),
+    keyframes:times.map(time=>({time,cameraX:.8,cropBox:[.6,0,.9,1]}))};
+  const review={passed:true,correctSubject:true,stableCamera:true,ballFollowed:true,
+    setupVisible:true,contactVisible:true,outcomeVisible:true,ballEnteredGoal:false,
+    keeperContactVisible:false,issues:[],observedOutcome:{type:'blocked',time:3,
+      description:'The defender blocks the moving ball and it stays out.'},
+    observations:[{time:0,description:'Attacker advances with the ball.'},
+      {time:3,description:'Defender blocks the shot and ball redirects.'}],
+    phaseChecks:times.map((time,index)=>({phase:['setup','contact','flight','payoff'][index],time,
+      ballVisible:true,playerVisible:true,description:'The moving ball and relevant player remain visible.'}))};
+  assert.equal(assessHybridFraming(scene,{...evidence,renderReview:review}).usable,false);
+  const contained={...sourceContainEvidence(evidence),renderReview:review};
+  const assessment=assessHybridFraming(scene,contained);
+  assert.equal(assessment.usable,true);
+  assert.equal(assessment.mode,'hybrid_source_contain_verified');
+  assert.equal(reviewedFramingEvent(scene,contained),'big_chance');
 });
