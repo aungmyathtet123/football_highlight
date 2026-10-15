@@ -252,6 +252,10 @@ async function handleProcessingInterruption(id,error) {
 }
 
 async function restoreProcessingRetries() {
+  // The cloud worker owns an explicitly requested source reselection after
+  // restoring its checkpoint. Do not race it with the ordinary interrupted
+  // tracking retry, which would consume the lock before the repair route runs.
+  if(process.env.SOURCE_RESELECTION_REQUESTED==='true') return;
   const interruptedStages=new Set(['queued','detecting_moments','tracking','writing_content',
     'aligning','aligning_content','generating_commentary','editing','rendering','validating']);
   for(const name of await readdir(jobRoot)) {
