@@ -3,8 +3,11 @@ import {footballVideoPart} from './gemini-media-policy.mjs';
 import {selectGuidedSourceAction} from './source-action-selection.mjs';
 import {semanticSignature} from './pipeline-state.mjs';
 
-export const BLOCKED_SELECTION_VERSION=7;
-export const SOURCE_RESELECTION_FPS=8;
+export const BLOCKED_SELECTION_VERSION=8;
+// Source reselection compares several broadcast views over a long window.
+// Keep this overview light; the chosen short scene is observed again at 8fps
+// and its rendered portrait crop receives an independent review.
+export const SOURCE_RESELECTION_FPS=4;
 
 export function blockedSelectionScenes(candidates,tracking) {
   return candidates.filter(scene=>scene.selectionLocked===true).filter(scene=>{
