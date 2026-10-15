@@ -3,7 +3,7 @@ import {footballVideoPart} from './gemini-media-policy.mjs';
 import {selectGuidedSourceAction} from './source-action-selection.mjs';
 import {semanticSignature} from './pipeline-state.mjs';
 
-export const BLOCKED_SELECTION_VERSION=4;
+export const BLOCKED_SELECTION_VERSION=5;
 export const SOURCE_RESELECTION_FPS=8;
 
 export function blockedSelectionScenes(candidates,tracking) {
@@ -22,7 +22,9 @@ export function blockedSelectionWindow(scene,shots,duration) {
   const startTime=Math.max(0,Math.min(incidentStart-2,touching[0].startTime));
   // A live goal can be crowded while its immediate broadcast replay shows the
   // decisive touch. Keep that adjacent replay available for the same incident.
-  const endTime=Math.min(duration,Math.max(incidentEnd+(scene.eventType==='goal'?25:2),touching.at(-1).endTime));
+  // Broadcasts often show two or three immediate angles before returning to
+  // live play. Keep the last full goal replay available to compare.
+  const endTime=Math.min(duration,Math.max(incidentEnd+(scene.eventType==='goal'?30:2),touching.at(-1).endTime));
   return {startTime,endTime,shots:shots.filter(shot=>shot.endTime>startTime&&shot.startTime<endTime)
     .map(shot=>({startTime:Math.max(startTime,shot.startTime)-startTime,
       endTime:Math.min(endTime,shot.endTime)-startTime}))};
@@ -69,7 +71,7 @@ export function applyBlockedSelection(scene,window,value,context) {
   const incidentStart=scene.sourceReselection?.previousStart??scene.startTime;
   const incidentEnd=scene.sourceReselection?.previousEnd??scene.endTime;
   if(replay && (scene.eventType!=='goal'||value.sameIncidentVerified!==true
-    ||absoluteStart<incidentEnd||absoluteStart>incidentEnd+25))
+    ||absoluteStart<incidentEnd||absoluteStart>incidentEnd+30))
     throw new Error('A replay must independently match the selected goal immediately after its live view.');
   // Live replacement must overlap the original incident, never a nearby play.
   if(!replay&&(absoluteEnd<=incidentStart

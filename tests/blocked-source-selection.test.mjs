@@ -19,7 +19,7 @@ const context={model:'vision',sourceFingerprint:{size:123,hash:'test'}};
 test('blocked goal search includes its immediate replay',()=>{
   const window=blockedSelectionWindow(scene,[{startTime:9,endTime:15},{startTime:20,endTime:24}],100);
   assert.equal(window.startTime,8);
-  assert.equal(window.endTime,40);
+  assert.equal(window.endTime,45);
 });
 
 test('a complete matched replay preserves the goal incident and its original edit order',()=>{
@@ -37,9 +37,9 @@ test('a complete matched replay preserves the goal incident and its original edi
 test('a replay cannot silently replace a different goal',()=>{
   assert.throws(()=>applyBlockedSelection(scene,{startTime:0,endTime:40},
     {...replay,sameIncidentVerified:false},context),/independently match/);
-  assert.throws(()=>applyBlockedSelection(scene,{startTime:0,endTime:50},
-    {...replay,selectionStart:43,selectionEnd:47,guide:{...replay.guide,
-      anchors:replay.guide.anchors.map(item=>({...item,time:item.time+23}))}},context),/immediately after/);
+  assert.throws(()=>applyBlockedSelection(scene,{startTime:0,endTime:55},
+    {...replay,selectionStart:48,selectionEnd:52,guide:{...replay.guide,
+      anchors:replay.guide.anchors.map(item=>({...item,time:item.time+28}))}},context),/immediately after/);
 });
 
 test('reselecting a failed replay searches from the original live incident and keeps edit order',()=>{
@@ -47,7 +47,7 @@ test('reselecting a failed replay searches from the original live incident and k
   const window=blockedSelectionWindow(first,[{startTime:9,endTime:15},
     {startTime:20,endTime:24},{startTime:25,endTime:28}],100);
   assert.equal(window.startTime,8);
-  assert.equal(window.endTime,40);
+  assert.equal(window.endTime,45);
   const identical={...replay,selectionStart:12,selectionEnd:16,
     guide:{...replay.guide,anchors:replay.guide.anchors.map(item=>({...item,time:item.time-8}))}};
   assert.throws(()=>applyBlockedSelection(first,window,identical,context),/repeats the independently rejected/);
