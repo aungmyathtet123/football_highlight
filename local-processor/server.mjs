@@ -445,7 +445,7 @@ async function retryAnalysisJob(response, id, automatic=false, reselectBlocked=f
     ? await loadStep1SceneManifest(id, job.settings, {sourceOnly:sourceSelectionUpgrade}) : [];
   const hasSavedSceneLock = savedLockedScenes.some(moment => moment.selectionLocked === true);
   const interruptedReselection=process.env.SOURCE_RESELECTION_REQUESTED==='true'
-    && ['tracking','detecting_moments'].includes(job.stage);
+    && ['tracking','detecting_moments','waiting_retry'].includes(job.stage);
   if(reselectBlocked && (!geminiEnabled||!hasSavedSceneLock
     ||(job.stage!=='attention_required'&&!interruptedReselection))) {
     json(response,409,{error:'Blocked source reselection requires a saved scene lock that needs attention.'});

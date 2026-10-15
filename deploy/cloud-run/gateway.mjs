@@ -320,9 +320,15 @@ async function startJob(request, response, id, retry, reselectBlocked=false) {
     return json(response, 409, { error: "The source upload has not finished. Select the same video file to continue." });
   }
   status = { ...status, sourceObject };
+  const currentRepairFeedback=Object.fromEntries(Object.entries(status.sceneTrackingStates||{})
+    .filter(([,state])=>state?.status==='needs_repair')
+    .map(([sceneId,state])=>[sceneId,String(state.detail||'independent crop review failed')]));
+  const repairFeedback=Object.keys(currentRepairFeedback).length
+    ? currentRepairFeedback : status.sourceRepairFeedback||{};
   const resumeProgress = Number(status.checkpointProgress || status.progress || 1);
   const queued = {
     ...status,
+    ...(reselectBlocked?{sourceRepairFeedback:repairFeedback}:{}),
     stage: "queued",
     progress: retry ? resumeProgress : 5,
     progressDetail: retry
@@ -343,9 +349,7 @@ async function startJob(request, response, id, retry, reselectBlocked=false) {
       ["SOURCE_NAME", status.sourceName], ["SOURCE_CONTENT_TYPE", status.sourceContentType || "video/mp4"],
       ["EDIT_SETTINGS", status.editSettings || ""], ["RESUME_MODE", retry ? "checkpoint" : "fresh"],
       ["SOURCE_RESELECTION_REQUESTED", reselectBlocked ? "true" : "false"],
-      ["SOURCE_RESELECTION_FEEDBACK", reselectBlocked ? JSON.stringify(Object.fromEntries(
-        Object.entries(status.sceneTrackingStates||{}).filter(([,state])=>state?.status==='needs_repair')
-          .map(([sceneId,state])=>[sceneId,String(state.detail||'independent crop review failed')]))):""],
+      ["SOURCE_RESELECTION_FEEDBACK", reselectBlocked ? JSON.stringify(repairFeedback):""],
     ]);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
