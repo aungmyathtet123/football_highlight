@@ -114,8 +114,8 @@ See [Google's Priority PayGo documentation](https://docs.cloud.google.com/gemini
 ## Project history and retention
 
 - `GET /jobs` is the durable dashboard source of truth. It lists working, failed, and completed projects from Cloud Storage so history survives browser refreshes and device changes.
-- Failed jobs remain retryable for three days when the dashboard is active. Manual deletion is available only after a job completes or fails.
-- Original source uploads have a three-day Cloud Storage lifecycle ceiling, which preserves failed-job retry time without keeping large broadcasts indefinitely. Unpublished finished MP4 files have a 14-day ceiling; the small job record remains available for history.
+- Failed jobs remain retryable for 14 days when the dashboard is active. Manual deletion is available only after a job completes or fails.
+- Original source uploads and processing checkpoints have a 14-day Cloud Storage lifecycle ceiling. Unpublished finished MP4 files have the same ceiling; the small job record remains available for history.
 - A verified YouTube upload calls `POST /jobs/:id/published`. The gateway marks both stored media objects with publication time, after which Cloud Storage deletes the source after one day and the finished output after seven days.
 - `deploy/cloud-run/storage-lifecycle.json` owns the provider-side deletion rules, so published-media cleanup does not depend on a browser remaining online.
 

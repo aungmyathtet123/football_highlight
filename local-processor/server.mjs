@@ -440,7 +440,10 @@ async function retryAnalysisJob(response, id, automatic=false, reselectBlocked=f
     && (Number(job.progress || 0) >= 34 || job.resumeTrackingOnly === true))
     ? await loadStep1SceneManifest(id, job.settings, {sourceOnly:sourceSelectionUpgrade}) : [];
   const hasSavedSceneLock = savedLockedScenes.some(moment => moment.selectionLocked === true);
-  if(reselectBlocked && (!geminiEnabled||!hasSavedSceneLock||job.stage!=='attention_required')) {
+  const interruptedReselection=process.env.SOURCE_RESELECTION_REQUESTED==='true'
+    && ['tracking','detecting_moments'].includes(job.stage);
+  if(reselectBlocked && (!geminiEnabled||!hasSavedSceneLock
+    ||(job.stage!=='attention_required'&&!interruptedReselection))) {
     json(response,409,{error:'Blocked source reselection requires a saved scene lock that needs attention.'});
     return false;
   }
@@ -6518,7 +6521,11 @@ async function reselectBlockedSourceActions(sourcePath,candidates,media,id) {
   await ensureShotBoundaries(sourcePath,id);
   const trackingPath=join(outputRoot,id,'tracking','tracking.json');
   const tracking=JSON.parse(await readFile(trackingPath,'utf8'));
-  const pending=blockedSelectionScenes(candidates,tracking);
+  let feedback={};
+  try { feedback=JSON.parse(process.env.SOURCE_RESELECTION_FEEDBACK||'{}'); } catch { /* Older workers have no review feedback. */ }
+  const allBlocked=blockedSelectionScenes(candidates,tracking);
+  const pending=Object.keys(feedback).length
+    ? allBlocked.filter(scene=>Object.hasOwn(feedback,scene.id)) : allBlocked;
   if(!pending.length) return candidates;
   const shots=JSON.parse(await readFile(join(outputRoot,id,'shots.json'),'utf8')).shots;
   const fingerprint=await sourceContentFingerprint(sourcePath);
@@ -6526,8 +6533,9 @@ async function reselectBlockedSourceActions(sourcePath,candidates,media,id) {
     try {
     const window=blockedSelectionWindow(scene,shots,media.duration);
     const model=fastTracking.reviewModel;
+    const previousFailure=String(feedback[scene.id]||'');
     const key=stableSignature({version:BLOCKED_SELECTION_VERSION,fingerprint,model,scene:scene.id,
-      originalStart:scene.startTime,originalEnd:scene.endTime,window});
+      originalStart:scene.startTime,originalEnd:scene.endTime,window,previousFailure});
     const responsePath=join(directory,`${key}.response.json`);
     let parsed;
     try {parsed=JSON.parse(await readFile(responsePath,'utf8'));} catch { /* New authorized selection. */ }
@@ -6553,12 +6561,23 @@ async function reselectBlockedSourceActions(sourcePath,candidates,media,id) {
         '-i',sourcePath,'-t',String(window.endTime-window.startTime),'-an',
         '-vf',`fps=${SOURCE_RESELECTION_FPS},setpts=PTS-STARTPTS,${framingVideoClockFilter()}`,
         '-c:v','libx264','-preset','veryfast','-crf','18',input]);
-      const generated=await generateGeminiJson(createGeminiClient(),
-        blockedSelectionRequest(model,(await readFile(input)).toString('base64'),scene,window),
-        `Source angle reselection ${scene.id}`);
-      parsed=generated.parsed;
-      // Save paid observations before validating. A retry must not regenerate
-      // the same answer, and a false crop approval is never synthesized here.
+      const request=blockedSelectionRequest(model,(await readFile(input)).toString('base64'),
+        scene,window,previousFailure);
+      for(let attempt=1;attempt<=2;attempt++) {
+        const generated=await generateGeminiJson(createGeminiClient(),request,
+          `Source angle reselection ${scene.id}${attempt===2?' coordinate correction':''}`);
+        parsed=generated.parsed;
+        // Save every paid answer, including malformed coordinates, for audit.
+        await writeFile(join(directory,`${key}.attempt-${attempt}.response.json`),JSON.stringify(parsed,null,2));
+        try {
+          applyBlockedSelection(scene,window,parsed,{
+            model:parsed.generationProvenance?.actualModel||model,sourceFingerprint:fingerprint});
+          break;
+        } catch(error) {
+          if(error?.code!=='ACTION_GUIDE_GEOMETRY'||attempt===2) break;
+          request.contents.push({text:`The previous answer's ${error.field} box at anchor ${error.anchorIndex+1} is invalid: ${JSON.stringify(error.box)}. Rewatch the SAME source video and return the entire selection again. Correct only directly observed coordinates; use null for an unseen ball or player. Preserve the observed sporting outcome, timestamps and incident identity. Previous answer: ${JSON.stringify(parsed)}`});
+        }
+      }
       await writeFile(responsePath,JSON.stringify(parsed,null,2));
     }
     try {return {scene:applyBlockedSelection(scene,window,parsed,{

@@ -2,7 +2,7 @@
   "rule": [
     {
       "action": { "type": "Delete" },
-      "condition": { "age": 3, "matchesPrefix": ["uploads/"] }
+      "condition": { "age": 14, "matchesPrefix": ["uploads/"] }
     },
     {
       "action": { "type": "Delete" },
@@ -10,7 +10,7 @@
     },
     {
       "action": { "type": "Delete" },
-      "condition": { "age": 3, "matchesPrefix": ["checkpoints/"] }
+      "condition": { "age": 14, "matchesPrefix": ["checkpoints/"] }
     },
     {
       "action": { "type": "Delete" },

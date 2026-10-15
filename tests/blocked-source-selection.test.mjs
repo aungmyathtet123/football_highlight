@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {applyBlockedSelection,blockedSelectionWindow} from '../local-processor/blocked-source-selection.mjs';
 import {fixedSceneQueue,sourceTimelineStart} from '../local-processor/fixed-scene-queue.mjs';
+import {selectGuidedSourceAction} from '../local-processor/source-action-selection.mjs';
 
 const box=[100,100,140,140];
 const anchor=(time,phase)=>({time,phase,ball:box,player:[200,200,500,400],
@@ -39,4 +40,37 @@ test('a replay cannot silently replace a different goal',()=>{
   assert.throws(()=>applyBlockedSelection(scene,{startTime:0,endTime:50},
     {...replay,selectionStart:43,selectionEnd:47,guide:{...replay.guide,
       anchors:replay.guide.anchors.map(item=>({...item,time:item.time+23}))}},context),/immediately after/);
+});
+
+test('reselecting a failed replay searches from the original live incident and keeps edit order',()=>{
+  const first=applyBlockedSelection(scene,{startTime:0,endTime:40},replay,context);
+  const window=blockedSelectionWindow(first,[{startTime:9,endTime:15},
+    {startTime:20,endTime:24},{startTime:25,endTime:28}],100);
+  assert.equal(window.startTime,8);
+  assert.equal(window.endTime,40);
+  const identical={...replay,selectionStart:12,selectionEnd:16,
+    guide:{...replay.guide,anchors:replay.guide.anchors.map(item=>({...item,time:item.time-8}))}};
+  assert.throws(()=>applyBlockedSelection(first,window,identical,context),/repeats the independently rejected/);
+  const next={...replay,selectionStart:17,selectionEnd:20,
+    guide:{...replay.guide,anchors:replay.guide.anchors.map(item=>({...item,time:item.time-3}))}};
+  const replacement=applyBlockedSelection(first,window,next,context);
+  assert.equal(replacement.sourceReselection.previousStart,10);
+  assert.equal(sourceTimelineStart(replacement),10);
+});
+
+test('verified through pass corrects a provisional save label and stale narration facts',()=>{
+  const old={id:'pass-1',storyId:'pass-story',startTime:10,endTime:15,eventType:'save',
+    semanticVerified:true,actionComplete:true,selectionLocked:false,
+    analysisPurpose:'Goalkeeper saves a shot',completionReason:'Saved shot',
+    sourceSelectionEvidence:{observation:{setup:'Attack starts',continuation:'Shot',result:'Save',outcome:'save'}},
+    trackingBrief:{originTime:10,payoffEvidence:{verified:true},goalFocusX:.1}};
+  const guide={sourceType:'broadcast',outcome:'pass',uncertainties:[],anchors:[
+    anchor(.5,'setup'),anchor(1,'contact'),anchor(2,'flight'),anchor(3,'payoff')]};
+  const result=selectGuidedSourceAction(old,{startTime:10,endTime:15,
+    actionGuidance:{guide}},context).scene;
+  assert.equal(result.eventType,'normal_play');
+  assert.equal(result.sourceSelectionEvidence.observation.outcome,'normal_play');
+  assert.equal(result.sourceSelectionEvidence.originalObservation.outcome,'save');
+  assert.equal(result.completionReason,guide.anchors[3].description);
+  assert.equal(result.trackingBrief.payoffEvidence,null);
 });

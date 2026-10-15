@@ -98,6 +98,18 @@ export function selectGuidedSourceAction(scene,observed,{model,sourceFingerprint
       observation:{...evidence.observation,setup:setup?.description||evidence.observation?.setup,
         continuation:contact.description,result:payoff.description,outcome:outcomeType}};
   }
+  // A non-scoring section can also confuse a through pass or keeper collection
+  // with a shot. The verified source action replaces stale prose and labels.
+  if(outcomeType!==scene.eventType&&!correctScoringLabel) {
+    selected.analysisPurpose=`Explain the observed ${guide.outcome} action and its resolved result.`;
+    selected.completionReason=payoff.description;
+    selected.onScreenText=undefined;
+    selected.trackingBrief={...selected.trackingBrief,payoffEvidence:null,goalFocusX:null};
+    const evidence=scene.sourceSelectionEvidence;
+    if(evidence) selected.sourceSelectionEvidence={...evidence,originalObservation:evidence.originalObservation||evidence.observation,
+      observation:{...evidence.observation,setup:setup?.description||evidence.observation?.setup,
+        continuation:contact.description,result:payoff.description,outcome:outcomeType}};
+  }
   selected.actionGuidance={version:ACTION_GUIDANCE_VERSION,model,sourceFingerprint,
     key:actionGuidanceKey(selected,sourceFingerprint,model),sourceStartTime:startTime,sourceEndTime:endTime,
     observationWindow:{startTime:window.startTime,endTime:window.endTime},guide:localGuide};

@@ -307,6 +307,8 @@ async function startJob(request, response, id, retry, reselectBlocked=false) {
   if (retry && !['failed','attention_required'].includes(status.stage)) return json(response, 409, { error: "This job is already running or waiting for its automatic retry." });
   if (reselectBlocked && (status.stage !== 'attention_required' || !status.checkpointObject))
     return json(response, 409, {error:'Source action repair requires a saved scene checkpoint needing attention.'});
+  if (reselectBlocked && !await objectExists(status.checkpointObject))
+    return json(response, 409, {error:'The saved processing checkpoint has expired. Restore the source and checkpoint before repairing this job.'});
   if (!retry) {
     const body = await readJson(request, 64 * 1024).catch(() => ({}));
     if (body.editSettings) status = { ...status, editSettings: String(body.editSettings) };
@@ -341,6 +343,9 @@ async function startJob(request, response, id, retry, reselectBlocked=false) {
       ["SOURCE_NAME", status.sourceName], ["SOURCE_CONTENT_TYPE", status.sourceContentType || "video/mp4"],
       ["EDIT_SETTINGS", status.editSettings || ""], ["RESUME_MODE", retry ? "checkpoint" : "fresh"],
       ["SOURCE_RESELECTION_REQUESTED", reselectBlocked ? "true" : "false"],
+      ["SOURCE_RESELECTION_FEEDBACK", reselectBlocked ? JSON.stringify(Object.fromEntries(
+        Object.entries(status.sceneTrackingStates||{}).filter(([,state])=>state?.status==='needs_repair')
+          .map(([sceneId,state])=>[sceneId,String(state.detail||'independent crop review failed')]))):""],
     ]);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -369,7 +374,7 @@ async function listJobs(response) {
   refreshed.sort((left, right) => String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || "")));
   const allObjects = await listObjects("");
   const storageBytes = allObjects.reduce((sum, object) => sum + Number(object.size || 0), 0);
-  return json(response, 200, { jobs: refreshed, storageBytes, jobCount: refreshed.length, retention: { failedDays: 3, unpublishedDays: 14, publishedSourceHours: 24, publishedOutputDays: 7 } });
+  return json(response, 200, { jobs: refreshed, storageBytes, jobCount: refreshed.length, retention: { failedDays: 14, unpublishedDays: 14, publishedSourceHours: 24, publishedOutputDays: 7 } });
 }
 
 async function deleteJob(response, id) {
@@ -440,7 +445,7 @@ function retentionDate(job, kind) {
   const updated = Date.parse(job.updatedAt || job.createdAt || new Date().toISOString());
   const completed = Date.parse(job.completedAt || job.updatedAt || job.createdAt || new Date().toISOString());
   const published = job.publishedAt ? Date.parse(job.publishedAt) : NaN;
-  if (kind === "failed-delete") return updated + 3 * 86400000;
+  if (kind === "failed-delete") return updated + 14 * 86400000;
   if (Number.isFinite(published)) return published + (kind === "source-delete" ? 86400000 : 7 * 86400000);
   return completed + 14 * 86400000;
 }
