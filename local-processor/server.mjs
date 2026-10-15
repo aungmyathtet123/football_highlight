@@ -6575,7 +6575,7 @@ async function reselectBlockedSourceActions(sourcePath,candidates,media,id) {
           break;
         } catch(error) {
           if(error?.code!=='ACTION_GUIDE_GEOMETRY'||attempt===2) break;
-          request.contents.push({text:`The previous answer's ${error.field} box at anchor ${error.anchorIndex+1} is invalid: ${JSON.stringify(error.box)}. Rewatch the SAME source video and return the entire selection again. Correct only directly observed coordinates; use null for an unseen ball or player. Preserve the observed sporting outcome, timestamps and incident identity. Previous answer: ${JSON.stringify(parsed)}`});
+          request.contents.push({text:`The previous answer's ${error.field} box at anchor ${error.anchorIndex+1} is invalid: ${JSON.stringify(error.box)}. Rewatch the SAME source video and return the entire selection again. Correct only directly observed coordinates; use null for an unseen ball or player. Re-evaluate the last attacking contact and sporting outcome from the moving ball: a through pass gathered by a keeper is not a shot save. The earlier label and answer may be wrong; preserve only what the pixels verify and keep the same incident identity. Previous answer: ${JSON.stringify(parsed)}`});
         }
       }
       await writeFile(responsePath,JSON.stringify(parsed,null,2));
