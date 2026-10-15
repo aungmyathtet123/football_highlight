@@ -7,11 +7,16 @@ export function actionGuideOutcomeContradiction(scene) {
   const guide=scene?.actionGuidance?.guide||scene?.trackingBrief?.actionGuide;
   if(scene?.eventType!=='save'||guide?.outcome!=='save') return null;
   const payoff=guide.anchors?.find(anchor=>anchor.phase==='payoff');
-  const contact=guide.anchors?.filter(anchor=>anchor.phase==='contact'
-    && (!payoff||anchor.time<payoff.time)).at(-1);
+  const contacts=guide.anchors?.filter(anchor=>anchor.phase==='contact'
+    && (!payoff||anchor.time<payoff.time))||[];
+  const contact=contacts.at(-1);
   if(contact&&/\b(?:pass(?:es|ed)?|cross(?:es|ed)?|through.ball)\b/i.test(contact.description)
     && !/\b(?:shoots?|shot|strik(?:e|es|ing)|header|heads?|volley)\b/i.test(contact.description))
     return 'source_pass_mislabeled_as_save';
+  if(payoff&&/\b(?:goalkeeper|keeper)\b/i.test(payoff.description)
+    && /\b(?:gather|collect|smother|secure|claim|hold|holds|intercept)/i.test(payoff.description)
+    && !contacts.some(anchor=>/\b(?:shoots?|shot|strik(?:e|es|ing)|header|heads?|volley)\b/i.test(anchor.description)))
+    return 'source_keeper_collection_without_shot';
   return null;
 }
 // The observation prompt contains video + duration, not a scene ID. Identical

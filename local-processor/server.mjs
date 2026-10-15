@@ -47,7 +47,7 @@ import { fastTrackingPolicy } from './fast-tracking-policy.mjs';
 import { createWorkflowPerformance } from './workflow-performance.mjs';
 import {ACTION_GUIDANCE_VERSION,actionGuidanceKey,matchingActionGuidance,actionGuidanceRequest,observeValidatedActionGuidance,applySavedActionGuidance,actionGuideObservationKey,matchingActionGuideObservation,sharedActionGuideObservation} from './action-guidance.mjs';
 import {sourceActionGuideWindow,selectGuidedSourceAction} from './source-action-selection.mjs';
-import {BLOCKED_SELECTION_VERSION,SOURCE_RESELECTION_FPS,SOURCE_CORRECTION_FPS,sourceCorrectionBounds,blockedSelectionScenes,blockedSelectionWindow,blockedSelectionRequest,applyBlockedSelection,mergeBlockedSelections} from './blocked-source-selection.mjs';
+import {BLOCKED_SELECTION_VERSION,SOURCE_RESELECTION_FPS,SOURCE_CORRECTION_FPS,sourceCorrectionBounds,sourceAlternateReplayBounds,blockedSelectionScenes,blockedSelectionWindow,blockedSelectionRequest,applyBlockedSelection,mergeBlockedSelections} from './blocked-source-selection.mjs';
 import {framingVideoClockFilter} from './gemini-video-framing.mjs';
 import {outcomeNarrationProblems} from './narration-outcome-policy.mjs';
 import { lockedNarrationContract, lockedNarrationResponseSchema, projectLockedNarration } from './locked-narration.mjs';
@@ -6570,6 +6570,7 @@ async function reselectBlockedSourceActions(sourcePath,candidates,media,id) {
       const overviewContents=request.contents.slice();
       let correctionContents=null;
       let correctionBounds=null;
+      let alternateContents=null;
       for(let attempt=1;attempt<=3;attempt++) {
         const generated=await generateGeminiJson(createGeminiClient(),request,
           `Source angle reselection ${scene.id}${attempt===2?' coordinate correction':''}`);
@@ -6586,7 +6587,19 @@ async function reselectBlockedSourceActions(sourcePath,candidates,media,id) {
           if(error.code==='SOURCE_ANGLE_UNCHANGED') {
             correctionContents=null;
             correctionBounds=null;
-            request.contents=[...overviewContents,{text:`The previous source choice failed verification: ${error.message}. Rewatch the full source video and choose a genuinely different immediate replay camera angle, or extend the same angle enough to reveal BOTH missing setup and payoff. Minor timestamp shifts cannot repair it. Return the entire selection again. Previous answer: ${JSON.stringify(parsed)}`}];
+            const alternateBounds=sourceAlternateReplayBounds(scene,window);
+            if(alternateBounds) {
+              if(!alternateContents) {
+                const alternateInput=join(directory,`${key}.later-replays.mp4`);
+                await run(ffmpegPath,['-hide_banner','-loglevel','error','-y',
+                  '-ss',String(window.startTime+alternateBounds.startTime),'-i',sourcePath,
+                  '-t',String(alternateBounds.endTime-alternateBounds.startTime),'-an',
+                  '-vf',`fps=${SOURCE_RESELECTION_FPS},setpts=PTS-STARTPTS,${framingVideoClockFilter()}`,
+                  '-c:v','libx264','-preset','veryfast','-crf','18',alternateInput]);
+                alternateContents=[footballVideoPart((await readFile(alternateInput)).toString('base64'),SOURCE_RESELECTION_FPS)];
+              }
+              request.contents=[...alternateContents,{text:`The previous goal replay at source ${scene.startTime.toFixed(3)}-${scene.endTime.toFixed(3)}s failed independent crop review and was selected again. It is excluded from this later-replays clip. Find a DIFFERENT immediate broadcast angle of the SAME goal only if one continuous view visibly shows the scorer and incoming ball before contact, contact, flight, and the ball inside the posts. The burned clip clock starts at zero; add ${alternateBounds.startTime.toFixed(3)} seconds to all returned selectionStart, selectionEnd and guide anchor times so they remain on the original source-selection-window clock. Do not combine camera angles, infer an unseen setup, or substitute another incident. If no full view exists, return null bounds. Return the complete schema. Previous rejected answer: ${JSON.stringify(parsed)}`}];
+            } else request.contents=[...overviewContents,{text:`The previous source choice failed verification: ${error.message}. Rewatch the full source video and choose a genuinely different immediate replay camera angle, or extend the same angle enough to reveal BOTH missing setup and payoff. Minor timestamp shifts cannot repair it. Return the entire selection again. Previous answer: ${JSON.stringify(parsed)}`}];
             continue;
           }
           const bounds=sourceCorrectionBounds(window,parsed);

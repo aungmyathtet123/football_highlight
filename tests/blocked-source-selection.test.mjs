@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {applyBlockedSelection,blockedSelectionScenes,blockedSelectionWindow,sourceCorrectionBounds} from '../local-processor/blocked-source-selection.mjs';
+import {applyBlockedSelection,blockedSelectionScenes,blockedSelectionWindow,sourceCorrectionBounds,sourceAlternateReplayBounds} from '../local-processor/blocked-source-selection.mjs';
 import {fixedSceneQueue,sourceTimelineStart} from '../local-processor/fixed-scene-queue.mjs';
 import {selectGuidedSourceAction} from '../local-processor/source-action-selection.mjs';
 import {assessPlannedSceneTracking} from '../local-processor/editorial-policy.mjs';
@@ -28,6 +28,14 @@ test('coordinate correction reviews only the proposed action with context',()=>{
   assert.deepEqual(sourceCorrectionBounds(window,{selectionStart:28.25,selectionEnd:31.75}),
     {startTime:27.75,endTime:32.25});
   assert.equal(sourceCorrectionBounds(window,{selectionStart:null,selectionEnd:31.75}),null);
+});
+
+test('a repeated goal replay is excluded from the next camera search',()=>{
+  const prior={...scene,startTime:358.25,endTime:361.75,
+    sourceReselection:{selectedReplay:true,previousStart:336.5,previousEnd:341.608}};
+  const bounds=sourceAlternateReplayBounds(prior,{startTime:334.5,endTime:371.608});
+  assert.equal(bounds.startTime,27.75);
+  assert.ok(Math.abs(bounds.endTime-37.108)<1e-6);
 });
 
 test('a complete matched replay preserves the goal incident and its original edit order',()=>{
@@ -77,7 +85,18 @@ test('a keeper collecting a pass cannot be certified as a shot save',()=>{
   assert.throws(()=>applyBlockedSelection(old,{startTime:10,endTime:20},{
     selectionStart:0,selectionEnd:5,selectionReason:'The original through pass is fully visible.',
     selectedReplay:false,sameIncidentVerified:false,guide},context),
-  /labels a pass or cross collected by the keeper as a shot save/);
+  /claims a shot save without observed shooting contact/);
+});
+
+test('a goalkeeper collection alone cannot establish a shot save',()=>{
+  const old={...scene,id:'keeper-collection',eventType:'save'};
+  const guide={sourceType:'broadcast',outcome:'save',uncertainties:[],anchors:[
+    anchor(.5,'setup'),{...anchor(1,'contact'),description:'Goalkeeper dives to collect the loose ball.'},
+    anchor(2,'flight'),{...anchor(3,'payoff'),description:'Goalkeeper smothers and holds the ball.'}]};
+  assert.throws(()=>applyBlockedSelection(old,{startTime:10,endTime:20},{
+    selectionStart:0,selectionEnd:5,selectionReason:'The keeper collection is fully visible.',
+    selectedReplay:false,sameIncidentVerified:false,guide},context),
+  /claims a shot save without observed shooting contact/);
 });
 
 test('a saved crop cannot approve a source guide that contradicts its save label',()=>{

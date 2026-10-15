@@ -3,7 +3,7 @@ import {footballVideoPart} from './gemini-media-policy.mjs';
 import {selectGuidedSourceAction} from './source-action-selection.mjs';
 import {semanticSignature} from './pipeline-state.mjs';
 
-export const BLOCKED_SELECTION_VERSION=9;
+export const BLOCKED_SELECTION_VERSION=10;
 // Source reselection compares several broadcast views over a long window.
 // Keep this overview light; the chosen short scene is observed again at 8fps
 // and its rendered portrait crop receives an independent review.
@@ -16,6 +16,13 @@ export function sourceCorrectionBounds(window,value) {
   if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end>duration+.001||end-start<.5)
     return null;
   return {startTime:Math.max(0,start-.5),endTime:Math.min(duration,end+.5)};
+}
+
+export function sourceAlternateReplayBounds(scene,window) {
+  if(scene.eventType!=='goal'||scene.sourceReselection?.selectedReplay!==true) return null;
+  const startTime=Math.max(0,scene.endTime-window.startTime+.5);
+  const endTime=window.endTime-window.startTime;
+  return endTime-startTime>=1.5?{startTime,endTime}:null;
 }
 
 export function blockedSelectionScenes(candidates,tracking) {
@@ -71,7 +78,7 @@ export function applyBlockedSelection(scene,window,value,context) {
   if(!setup||!contact||!payoff||guide.uncertainties.length)
     throw new Error('Replacement source selection lacks observed setup, contact or resolved payoff.');
   if(actionGuideOutcomeContradiction({eventType:'save',actionGuidance:{guide}})) {
-    const error=new Error('The guide labels a pass or cross collected by the keeper as a shot save without a visible shot contact.');
+    const error=new Error('The guide claims a shot save without observed shooting contact; a pass or cross collected by the keeper is not a save.');
     error.code='ACTION_GUIDE_OUTCOME';
     throw error;
   }
