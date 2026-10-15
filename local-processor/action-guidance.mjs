@@ -3,6 +3,17 @@
 import {footballVideoPart} from './gemini-media-policy.mjs';
 import {createHash} from 'node:crypto';
 export const ACTION_GUIDANCE_VERSION=1;
+export function actionGuideOutcomeContradiction(scene) {
+  const guide=scene?.actionGuidance?.guide||scene?.trackingBrief?.actionGuide;
+  if(scene?.eventType!=='save'||guide?.outcome!=='save') return null;
+  const payoff=guide.anchors?.find(anchor=>anchor.phase==='payoff');
+  const contact=guide.anchors?.filter(anchor=>anchor.phase==='contact'
+    && (!payoff||anchor.time<payoff.time)).at(-1);
+  if(contact&&/\b(?:pass(?:es|ed)?|cross(?:es|ed)?|through.ball)\b/i.test(contact.description)
+    && !/\b(?:shoots?|shot|strik(?:e|es|ing)|header|heads?|volley)\b/i.test(contact.description))
+    return 'source_pass_mislabeled_as_save';
+  return null;
+}
 // The observation prompt contains video + duration, not a scene ID. Identical
 // source bytes/interval/model can share that observation, but each selected
 // scene still receives its own exact-ID provenance and framing verification.

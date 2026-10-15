@@ -3,6 +3,7 @@ import { uniqueEvidenceCandidates } from "./automatic-duration.mjs";
 import { assessDecisionFraming } from "./decision-framing.mjs";
 import { assessGeminiFraming } from "./gemini-framing.mjs";
 import { assessHybridFraming } from "./hybrid-framing.mjs";
+import { actionGuideOutcomeContradiction } from "./action-guidance.mjs";
 
 export const MIN_SCENE_SECONDS = 0.5;
 export const MAX_SCENE_SECONDS = 30;
@@ -754,6 +755,8 @@ export function keyframePhaseProblems(moment, evidence) {
 }
 
 export function assessPlannedSceneTracking(moment, evidence) {
+  const sourceConflict=actionGuideOutcomeContradiction(moment);
+  if(sourceConflict) return { usable: false, mode: 'source_outcome_conflict', issues: [sourceConflict] };
   const hybrid = assessHybridFraming(moment, evidence);
   if (hybrid) return hybrid;
   const gemini = assessGeminiFraming(moment, evidence);

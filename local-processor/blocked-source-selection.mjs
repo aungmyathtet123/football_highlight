@@ -1,4 +1,4 @@
-import {ACTION_GUIDANCE_SCHEMA,validateActionGuidance} from './action-guidance.mjs';
+import {ACTION_GUIDANCE_SCHEMA,actionGuideOutcomeContradiction,validateActionGuidance} from './action-guidance.mjs';
 import {footballVideoPart} from './gemini-media-policy.mjs';
 import {selectGuidedSourceAction} from './source-action-selection.mjs';
 import {semanticSignature} from './pipeline-state.mjs';
@@ -9,7 +9,8 @@ export const SOURCE_RESELECTION_FPS=8;
 export function blockedSelectionScenes(candidates,tracking) {
   return candidates.filter(scene=>scene.selectionLocked===true).filter(scene=>{
     const evidence=tracking?.moments?.[scene.id];
-    return evidence?.finalCropVerified!==true || evidence.geometryVerified!==true
+    return actionGuideOutcomeContradiction(scene)!==null
+      || evidence?.finalCropVerified!==true || evidence.geometryVerified!==true
       || evidence.sourceStartTime!==scene.startTime || evidence.sourceEndTime!==scene.endTime;
   });
 }
@@ -57,8 +58,7 @@ export function applyBlockedSelection(scene,window,value,context) {
     &&a.ball&&a.player&&contact&&a.time<contact.time);
   if(!setup||!contact||!payoff||guide.uncertainties.length)
     throw new Error('Replacement source selection lacks observed setup, contact or resolved payoff.');
-  if(guide.outcome==='save'&&/\b(?:pass(?:es|ed)?|cross(?:es|ed)?|through.ball)\b/i.test(contact.description)
-    && !/\b(?:shoots?|shot|strik(?:e|es|ing)|header|heads?|volley)\b/i.test(contact.description)) {
+  if(actionGuideOutcomeContradiction({eventType:'save',actionGuidance:{guide}})) {
     const error=new Error('The guide labels a pass or cross collected by the keeper as a shot save without a visible shot contact.');
     error.code='ACTION_GUIDE_OUTCOME';
     throw error;
@@ -71,7 +71,10 @@ export function applyBlockedSelection(scene,window,value,context) {
   const selectedEnd=Math.min(end,payoff.time+(guide.outcome==='goal'?1.25:.75));
   const absoluteEnd=+(window.startTime+selectedEnd).toFixed(6);
   const replay=value.selectedReplay===true;
-  if(scene.sourceReselection) {
+  const correctedEvent={save:'save',wide:'shot_off_target',over:'shot_off_target',
+    blocked:'big_chance',woodwork:'big_chance',pass:'normal_play',
+    dribble:'dribble',tackle:'tackle'}[guide.outcome]||scene.eventType;
+  if(scene.sourceReselection&&correctedEvent===scene.eventType) {
     const leadGain=scene.startTime-absoluteStart;
     const payoffGain=absoluteEnd-scene.endTime;
     const overlap=Math.max(0,Math.min(absoluteEnd,scene.endTime)-Math.max(absoluteStart,scene.startTime));

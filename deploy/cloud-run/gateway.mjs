@@ -323,8 +323,7 @@ async function startJob(request, response, id, retry, reselectBlocked=false) {
   const currentRepairFeedback=Object.fromEntries(Object.entries(status.sceneTrackingStates||{})
     .filter(([,state])=>state?.status==='needs_repair')
     .map(([sceneId,state])=>[sceneId,String(state.detail||'independent crop review failed')]));
-  const repairFeedback=Object.keys(currentRepairFeedback).length
-    ? currentRepairFeedback : status.sourceRepairFeedback||{};
+  const repairFeedback={...(status.sourceRepairFeedback||{}),...currentRepairFeedback};
   const resumeProgress = Number(status.checkpointProgress || status.progress || 1);
   const queued = {
     ...status,

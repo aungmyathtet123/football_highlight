@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {applyBlockedSelection,blockedSelectionWindow} from '../local-processor/blocked-source-selection.mjs';
+import {applyBlockedSelection,blockedSelectionScenes,blockedSelectionWindow} from '../local-processor/blocked-source-selection.mjs';
 import {fixedSceneQueue,sourceTimelineStart} from '../local-processor/fixed-scene-queue.mjs';
 import {selectGuidedSourceAction} from '../local-processor/source-action-selection.mjs';
+import {assessPlannedSceneTracking} from '../local-processor/editorial-policy.mjs';
 
 const box=[100,100,140,140];
 const anchor=(time,phase)=>({time,phase,ball:box,player:[200,200,500,400],
@@ -70,6 +71,29 @@ test('a keeper collecting a pass cannot be certified as a shot save',()=>{
     selectionStart:0,selectionEnd:5,selectionReason:'The original through pass is fully visible.',
     selectedReplay:false,sameIncidentVerified:false,guide},context),
   /labels a pass or cross collected by the keeper as a shot save/);
+});
+
+test('a saved crop cannot approve a source guide that contradicts its save label',()=>{
+  const pass={...scene,id:'pass-locked',eventType:'save',actionGuidance:{guide:{
+    sourceType:'broadcast',outcome:'save',uncertainties:[],anchors:[
+      anchor(.5,'setup'),{...anchor(1,'contact'),description:'Player passes the ball into the box.'},
+      anchor(2,'flight'),{...anchor(3,'payoff'),description:'Goalkeeper gathers the ball before a shot.'}]}}};
+  const evidence={finalCropVerified:true,geometryVerified:true,sourceStartTime:10,sourceEndTime:15};
+  assert.equal(assessPlannedSceneTracking(pass,evidence).usable,false);
+  assert.deepEqual(blockedSelectionScenes([pass],{moments:{'pass-locked':evidence}}).map(item=>item.id),['pass-locked']);
+});
+
+test('a corrected pass may reuse the same verified source interval',()=>{
+  const old={...scene,id:'pass-locked',eventType:'save',
+    sourceReselection:{version:6,previousStart:10,previousEnd:15}};
+  const guide={sourceType:'broadcast',outcome:'pass',uncertainties:[],anchors:[
+    anchor(10.5,'setup'),{...anchor(11,'contact'),description:'Player passes into the box.'},
+    anchor(12,'flight'),{...anchor(13,'payoff'),description:'Goalkeeper gathers the through pass.'}]};
+  const result=applyBlockedSelection(old,{startTime:0,endTime:40},{
+    selectionStart:10,selectionEnd:15,selectionReason:'The complete pass is visible in the same camera view.',
+    selectedReplay:false,sameIncidentVerified:false,guide},context);
+  assert.equal(result.eventType,'normal_play');
+  assert.equal(result.sourceReselection.previousStart,10);
 });
 
 test('verified through pass corrects a provisional save label and stale narration facts',()=>{
