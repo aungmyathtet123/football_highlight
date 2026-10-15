@@ -6533,7 +6533,10 @@ async function reselectBlockedSourceActions(sourcePath,candidates,media,id) {
   if(!pending.length) return candidates;
   const shots=JSON.parse(await readFile(join(outputRoot,id,'shots.json'),'utf8')).shots;
   const fingerprint=await sourceContentFingerprint(sourcePath);
-  const decisions=await mapWithConcurrency(pending,fastTracking.reviewConcurrency,async(scene,index)=>{
+  // Each blocked-source request can span many seconds of original video.
+  // Run them one at a time so model failover and coordinate repair do not
+  // compete with another long video request for the same project quota.
+  const decisions=await mapWithConcurrency(pending,1,async(scene,index)=>{
     try {
     const window=blockedSelectionWindow(scene,shots,media.duration);
     const model=fastTracking.reviewModel;
