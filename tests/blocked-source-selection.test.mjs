@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {applyBlockedSelection,blockedSelectionScenes,blockedSelectionWindow} from '../local-processor/blocked-source-selection.mjs';
+import {applyBlockedSelection,blockedSelectionScenes,blockedSelectionWindow,sourceCorrectionBounds} from '../local-processor/blocked-source-selection.mjs';
 import {fixedSceneQueue,sourceTimelineStart} from '../local-processor/fixed-scene-queue.mjs';
 import {selectGuidedSourceAction} from '../local-processor/source-action-selection.mjs';
 import {assessPlannedSceneTracking} from '../local-processor/editorial-policy.mjs';
@@ -21,6 +21,13 @@ test('blocked goal search includes its immediate replay',()=>{
   const window=blockedSelectionWindow(scene,[{startTime:9,endTime:15},{startTime:20,endTime:24}],100);
   assert.equal(window.startTime,8);
   assert.equal(window.endTime,45);
+});
+
+test('coordinate correction reviews only the proposed action with context',()=>{
+  const window={startTime:330,endTime:372};
+  assert.deepEqual(sourceCorrectionBounds(window,{selectionStart:28.25,selectionEnd:31.75}),
+    {startTime:27.75,endTime:32.25});
+  assert.equal(sourceCorrectionBounds(window,{selectionStart:null,selectionEnd:31.75}),null);
 });
 
 test('a complete matched replay preserves the goal incident and its original edit order',()=>{

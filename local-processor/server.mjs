@@ -47,7 +47,7 @@ import { fastTrackingPolicy } from './fast-tracking-policy.mjs';
 import { createWorkflowPerformance } from './workflow-performance.mjs';
 import {ACTION_GUIDANCE_VERSION,actionGuidanceKey,matchingActionGuidance,actionGuidanceRequest,observeValidatedActionGuidance,applySavedActionGuidance,actionGuideObservationKey,matchingActionGuideObservation,sharedActionGuideObservation} from './action-guidance.mjs';
 import {sourceActionGuideWindow,selectGuidedSourceAction} from './source-action-selection.mjs';
-import {BLOCKED_SELECTION_VERSION,SOURCE_RESELECTION_FPS,blockedSelectionScenes,blockedSelectionWindow,blockedSelectionRequest,applyBlockedSelection,mergeBlockedSelections} from './blocked-source-selection.mjs';
+import {BLOCKED_SELECTION_VERSION,SOURCE_RESELECTION_FPS,SOURCE_CORRECTION_FPS,sourceCorrectionBounds,blockedSelectionScenes,blockedSelectionWindow,blockedSelectionRequest,applyBlockedSelection,mergeBlockedSelections} from './blocked-source-selection.mjs';
 import {framingVideoClockFilter} from './gemini-video-framing.mjs';
 import {outcomeNarrationProblems} from './narration-outcome-policy.mjs';
 import { lockedNarrationContract, lockedNarrationResponseSchema, projectLockedNarration } from './locked-narration.mjs';
@@ -6567,6 +6567,9 @@ async function reselectBlockedSourceActions(sourcePath,candidates,media,id) {
         '-c:v','libx264','-preset','veryfast','-crf','18',input]);
       const request=blockedSelectionRequest(model,(await readFile(input)).toString('base64'),
         scene,window,previousFailure);
+      const overviewContents=request.contents.slice();
+      let correctionContents=null;
+      let correctionBounds=null;
       for(let attempt=1;attempt<=3;attempt++) {
         const generated=await generateGeminiJson(createGeminiClient(),request,
           `Source angle reselection ${scene.id}${attempt===2?' coordinate correction':''}`);
@@ -6580,7 +6583,25 @@ async function reselectBlockedSourceActions(sourcePath,candidates,media,id) {
         } catch(error) {
           if(!['ACTION_GUIDE_GEOMETRY','ACTION_GUIDE_OUTCOME','SOURCE_ANGLE_UNCHANGED'].includes(error?.code)
             ||attempt===3) break;
-          request.contents.push({text:`The previous source choice failed verification: ${error.message}. Rewatch this SAME source video and return the entire selection again. ${error.code==='SOURCE_ANGLE_UNCHANGED'?'Choose a genuinely different immediate replay camera angle, or extend the same angle enough to reveal BOTH missing setup and payoff; minor timestamp shifts cannot repair it.':'Correct only directly observed coordinates and action phases; a through pass gathered by a keeper is not a shot save without a separate shooting contact.'} The earlier label and answer may be wrong; preserve only what the pixels verify and keep the same incident identity. Previous answer: ${JSON.stringify(parsed)}`});
+          if(error.code==='SOURCE_ANGLE_UNCHANGED') {
+            correctionContents=null;
+            correctionBounds=null;
+            request.contents=[...overviewContents,{text:`The previous source choice failed verification: ${error.message}. Rewatch the full source video and choose a genuinely different immediate replay camera angle, or extend the same angle enough to reveal BOTH missing setup and payoff. Minor timestamp shifts cannot repair it. Return the entire selection again. Previous answer: ${JSON.stringify(parsed)}`}];
+            continue;
+          }
+          const bounds=sourceCorrectionBounds(window,parsed);
+          if(!bounds) break;
+          if(!correctionContents) {
+            correctionBounds=bounds;
+            const correctionInput=join(directory,`${key}.correction.mp4`);
+            await run(ffmpegPath,['-hide_banner','-loglevel','error','-y',
+              '-ss',String(window.startTime+bounds.startTime),'-i',sourcePath,
+              '-t',String(bounds.endTime-bounds.startTime),'-an',
+              '-vf',`fps=${SOURCE_CORRECTION_FPS},setpts=PTS-STARTPTS,${framingVideoClockFilter()}`,
+              '-c:v','libx264','-preset','veryfast','-crf','18',correctionInput]);
+            correctionContents=[footballVideoPart((await readFile(correctionInput)).toString('base64'),SOURCE_CORRECTION_FPS)];
+          }
+          request.contents=[...correctionContents,{text:`Correct the previous source choice after this independent validation error: ${error.message}. This is the SAME short action from the original video, source-selection-window clock ${correctionBounds.startTime.toFixed(3)}-${correctionBounds.endTime.toFixed(3)} seconds. The burned clip clock starts at zero; add ${correctionBounds.startTime.toFixed(3)} seconds to every observed clip time before returning selectionStart, selectionEnd and guide anchor times. Return the ENTIRE original JSON schema. Preserve only visible setup, ball contact, flight and resolved payoff; set each box from pixels in this clip, null if hidden. A keeper gathering a through pass is not a shot save without separate visible shot contact. Keep the same selected incident; do not invent a goal or certify a crop. Previous answer: ${JSON.stringify(parsed)}`}];
         }
       }
       await writeFile(responsePath,JSON.stringify(parsed,null,2));
