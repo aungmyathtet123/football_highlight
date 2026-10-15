@@ -3,7 +3,7 @@ import {footballVideoPart} from './gemini-media-policy.mjs';
 import {selectGuidedSourceAction} from './source-action-selection.mjs';
 import {semanticSignature} from './pipeline-state.mjs';
 
-export const BLOCKED_SELECTION_VERSION=6;
+export const BLOCKED_SELECTION_VERSION=7;
 export const SOURCE_RESELECTION_FPS=8;
 
 export function blockedSelectionScenes(candidates,tracking) {
@@ -57,6 +57,12 @@ export function applyBlockedSelection(scene,window,value,context) {
     &&a.ball&&a.player&&contact&&a.time<contact.time);
   if(!setup||!contact||!payoff||guide.uncertainties.length)
     throw new Error('Replacement source selection lacks observed setup, contact or resolved payoff.');
+  if(guide.outcome==='save'&&/\b(?:pass(?:es|ed)?|cross(?:es|ed)?|through.ball)\b/i.test(contact.description)
+    && !/\b(?:shoots?|shot|strik(?:e|es|ing)|header|heads?|volley)\b/i.test(contact.description)) {
+    const error=new Error('The guide labels a pass or cross collected by the keeper as a shot save without a visible shot contact.');
+    error.code='ACTION_GUIDE_OUTCOME';
+    throw error;
+  }
   if(scene.eventType==='goal'&&guide.outcome!=='goal')
     throw new Error('An awarded goal cannot be replaced with a non-goal action.');
   const absoluteStart=+(window.startTime+start).toFixed(6);
@@ -65,9 +71,17 @@ export function applyBlockedSelection(scene,window,value,context) {
   const selectedEnd=Math.min(end,payoff.time+(guide.outcome==='goal'?1.25:.75));
   const absoluteEnd=+(window.startTime+selectedEnd).toFixed(6);
   const replay=value.selectedReplay===true;
-  if(scene.sourceReselection&&Math.abs(absoluteStart-scene.startTime)<.25
-    &&Math.abs(absoluteEnd-scene.endTime)<.25)
-    throw new Error('The replacement repeats the independently rejected source interval.');
+  if(scene.sourceReselection) {
+    const leadGain=scene.startTime-absoluteStart;
+    const payoffGain=absoluteEnd-scene.endTime;
+    const overlap=Math.max(0,Math.min(absoluteEnd,scene.endTime)-Math.max(absoluteStart,scene.startTime));
+    const overlapFraction=overlap/Math.min(absoluteEnd-absoluteStart,scene.endTime-scene.startTime);
+    if(overlapFraction>.65 && (Math.max(leadGain,payoffGain)<.75 || leadGain+payoffGain<1)) {
+      const error=new Error('The replacement repeats the independently rejected camera angle without enough new setup or payoff footage.');
+      error.code='SOURCE_ANGLE_UNCHANGED';
+      throw error;
+    }
+  }
   const incidentStart=scene.sourceReselection?.previousStart??scene.startTime;
   const incidentEnd=scene.sourceReselection?.previousEnd??scene.endTime;
   if(replay && (scene.eventType!=='goal'||value.sameIncidentVerified!==true

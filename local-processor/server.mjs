@@ -6567,7 +6567,7 @@ async function reselectBlockedSourceActions(sourcePath,candidates,media,id) {
         '-c:v','libx264','-preset','veryfast','-crf','18',input]);
       const request=blockedSelectionRequest(model,(await readFile(input)).toString('base64'),
         scene,window,previousFailure);
-      for(let attempt=1;attempt<=2;attempt++) {
+      for(let attempt=1;attempt<=3;attempt++) {
         const generated=await generateGeminiJson(createGeminiClient(),request,
           `Source angle reselection ${scene.id}${attempt===2?' coordinate correction':''}`);
         parsed=generated.parsed;
@@ -6578,8 +6578,9 @@ async function reselectBlockedSourceActions(sourcePath,candidates,media,id) {
             model:parsed.generationProvenance?.actualModel||model,sourceFingerprint:fingerprint});
           break;
         } catch(error) {
-          if(error?.code!=='ACTION_GUIDE_GEOMETRY'||attempt===2) break;
-          request.contents.push({text:`The previous answer's ${error.field} box at anchor ${error.anchorIndex+1} is invalid: ${JSON.stringify(error.box)}. Rewatch the SAME source video and return the entire selection again. Correct only directly observed coordinates; use null for an unseen ball or player. Re-evaluate the last attacking contact and sporting outcome from the moving ball: a through pass gathered by a keeper is not a shot save. The earlier label and answer may be wrong; preserve only what the pixels verify and keep the same incident identity. Previous answer: ${JSON.stringify(parsed)}`});
+          if(!['ACTION_GUIDE_GEOMETRY','ACTION_GUIDE_OUTCOME','SOURCE_ANGLE_UNCHANGED'].includes(error?.code)
+            ||attempt===3) break;
+          request.contents.push({text:`The previous source choice failed verification: ${error.message}. Rewatch this SAME source video and return the entire selection again. ${error.code==='SOURCE_ANGLE_UNCHANGED'?'Choose a genuinely different immediate replay camera angle, or extend the same angle enough to reveal BOTH missing setup and payoff; minor timestamp shifts cannot repair it.':'Correct only directly observed coordinates and action phases; a through pass gathered by a keeper is not a shot save without a separate shooting contact.'} The earlier label and answer may be wrong; preserve only what the pixels verify and keep the same incident identity. Previous answer: ${JSON.stringify(parsed)}`});
         }
       }
       await writeFile(responsePath,JSON.stringify(parsed,null,2));

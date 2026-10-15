@@ -51,11 +51,25 @@ test('reselecting a failed replay searches from the original live incident and k
   const identical={...replay,selectionStart:12,selectionEnd:16,
     guide:{...replay.guide,anchors:replay.guide.anchors.map(item=>({...item,time:item.time-8}))}};
   assert.throws(()=>applyBlockedSelection(first,window,identical,context),/repeats the independently rejected/);
+  const tinyShift={...replay,selectionStart:12.125,selectionEnd:16.25,
+    guide:{...replay.guide,anchors:replay.guide.anchors.map(item=>({...item,time:item.time-7.875}))}};
+  assert.throws(()=>applyBlockedSelection(first,window,tinyShift,context),/repeats the independently rejected/);
   const next={...replay,selectionStart:17,selectionEnd:20,
     guide:{...replay.guide,anchors:replay.guide.anchors.map(item=>({...item,time:item.time-3}))}};
   const replacement=applyBlockedSelection(first,window,next,context);
   assert.equal(replacement.sourceReselection.previousStart,10);
   assert.equal(sourceTimelineStart(replacement),10);
+});
+
+test('a keeper collecting a pass cannot be certified as a shot save',()=>{
+  const old={...scene,id:'pass-1',eventType:'save'};
+  const guide={sourceType:'broadcast',outcome:'save',uncertainties:[],anchors:[
+    anchor(.5,'setup'),{...anchor(1,'contact'),description:'Player crosses the ball into the area.'},
+    anchor(2,'flight'),{...anchor(3,'payoff'),description:'Goalkeeper gathers the through pass ahead of the striker.'}]};
+  assert.throws(()=>applyBlockedSelection(old,{startTime:10,endTime:20},{
+    selectionStart:0,selectionEnd:5,selectionReason:'The original through pass is fully visible.',
+    selectedReplay:false,sameIncidentVerified:false,guide},context),
+  /labels a pass or cross collected by the keeper as a shot save/);
 });
 
 test('verified through pass corrects a provisional save label and stale narration facts',()=>{
