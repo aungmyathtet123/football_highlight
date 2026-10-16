@@ -249,7 +249,7 @@ export function assessHybridFraming(scene, evidence) {
   if (evidence.layoutMode === 'source_contain')
     return { usable: false, mode: 'portrait_full_bleed_required', issues: ['portrait_full_bleed_required'] };
   if (evidence.hybridTrackingVersion !== HYBRID_TRACKING_VERSION
-    && !(evidence.hybridTrackingVersion === 6 && evidence.finalCropVerified === true
+    && !([6, 7].includes(evidence.hybridTrackingVersion) && evidence.finalCropVerified === true
       && evidence.renderReview?.passed === true))
     return { usable: false, mode: 'hybrid_cache_version_mismatch' };
   if (evidence.reviewRepairError)

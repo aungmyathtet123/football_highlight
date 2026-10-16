@@ -105,6 +105,10 @@ test('a hybrid run accepts only current native tracker evidence', () => {
     provider: 'hybrid-football', hybridTrackingVersion: HYBRID_TRACKING_VERSION - 1,
   }), false);
   assert.equal(providerEvidenceMatches('hybrid', {
+    provider: 'hybrid-football', hybridTrackingVersion: HYBRID_TRACKING_VERSION - 1,
+    finalCropVerified:true,layoutMode:'action',renderReview:{passed:true},
+  }), true);
+  assert.equal(providerEvidenceMatches('hybrid', {
     provider:'hybrid-football',hybridTrackingVersion:6,finalCropVerified:true,
     layoutMode:'action',renderReview:{passed:true},
   }),true);
@@ -141,6 +145,23 @@ test('a collapsed prior crop clock is discarded before new tracking', () => {
   assert.equal(prepared.trackingBrief.contactTime,undefined);
   assert.equal(prepared.trackingBrief.payoffStartTime,undefined);
   assert.equal(prepared.trackingBrief.attackDirection,'left');
+});
+
+test('a payoff instant after an observed finish keeps the shot clock', () => {
+  for (const [startTime,endTime,contactTime,payoffStartTime] of [
+    [83.5,91.024,88.17,89],
+    [179.98,190.855,189.063,190.063],
+    [259.488533,261.863533,260.156,260.822],
+  ]) {
+    const scene={startTime,endTime,eventType:'save',trackingBrief:{
+      contactTime,flightStartTime:contactTime,handoffTime:contactTime+.1,
+      payoffStartTime,payoffEndTime:payoffStartTime,
+      timingEvidence:'independent_actual_crop_phase_checks'}};
+    const prepared=hybridDetectorScene(scene);
+    assert.equal(prepared.trackingBrief.contactTime,contactTime);
+    assert.equal(prepared.trackingBrief.payoffStartTime,payoffStartTime);
+    assert.equal(prepared.trackingBrief.payoffEndTime,endTime);
+  }
 });
 
 test('a real crop review saves a payoff interval rather than one instant', () => {
