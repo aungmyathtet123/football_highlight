@@ -50,6 +50,13 @@ test("a complete native full-frame semantic action covers its incident without i
     keepDecision:"keep",trackingDecision:"native_semantic_complete_action",nativeFullFrameEvidence:true,playerHighlight:false};
   assert.equal(assertIncidentCoverage([goal],[goal]).covered,1);
 });
+test("an independently verified full-source portrait goal counts toward coverage", () => {
+  const goal={id:"contained-goal",storyId:"goal-contained",eventType:"goal",
+    semanticVerified:true,actionComplete:true,keepDecision:"keep",trackingPassed:true,
+    trackingDecision:"hybrid_source_contain_verified",chosenIncidentAngle:true};
+  assert.equal(assertIncidentCoverage([goal],[goal]).covered,1);
+  assert.throws(()=>assertIncidentCoverage([goal],[{...goal,trackingDecision:"hybrid_render_review_incomplete"}]),/missing 1/);
+});
 test("a complete locally tracked replay may be the chosen angle for its own incident", () => {
   const live={id:"live",storyId:"goal-1",eventType:"goal",semanticVerified:true,keepDecision:"keep",storyPhase:"action",
     actionComplete:true,trackingDecision:"verified_minimum_motion"};
