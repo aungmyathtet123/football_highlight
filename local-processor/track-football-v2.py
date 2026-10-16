@@ -11,7 +11,7 @@ from ultralytics import YOLO
 from football_detection import PersonTracker as MotionPersonTracker, SlicedBallDetector, closeup_people
 from detector_roles import football_classes, reacquisition_hint, touch_distance, broadcast_scale_transition
 from football_action_phase import action_phase, action_clock
-from football_source_geometry import goalkeeper_targets
+from football_source_geometry import goalkeeper_targets, on_target_keeper_handoff
 from tracking_motion import active_joint_fit_in_crop, camera_ownership_phase, constrained_camera, framing_bounds, vertical_framing_bounds, flight_target, visible_in_crop, observed_payoff_box, possession_handoff, goal_outcome_subject, goal_outcome_target, reconcile_goal_destination
 from tracking_cache import ObservationStore, fingerprint, content_fingerprint, scene_key, atomic_json, digest
 from tracking_decode import usable_tracking_checkpoint, normalize_tracking_source
@@ -1171,6 +1171,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
     identity_switches = 0
     previous_subject_id = None
     departed_samples = 0
+    keeper_handoff_time = None
     goal_mode = moment.get("eventType") in {"goal", "disallowed_goal"}
     allowed_ball_gap = GOAL_BALL_GAP_SECONDS if goal_mode else MAX_BALL_GAP_SECONDS
     last_sample_frame = max(0, int(start * source_fps)) - 1
@@ -1206,6 +1207,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
             origin_id = origin_candidate_id = None
             origin_candidate_hits = 0
             tracker.reset()
+            keeper_handoff_time = None
         observed=observed_by_frame.get(frame_number)
         current_goal_x = observed.get("goal_focus_x", goal_focus_x) if observed is not None else goal_focus_x
         observations = [observed['people'],observed['balls']] if observed is not None else args.observations.get(frame_number)
@@ -1467,6 +1469,22 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         elif verified_flight and last_ball is None:
             target_y = (planned_payoff[1] + planned_payoff[3]) / 2
             target_x = (planned_payoff[0] + planned_payoff[2]) / 2
+        keeper_handoff = on_target_keeper_handoff(moment.get("eventType"), phase, elapsed,
+            contact_time, current_goal_x, last_ball[0] if direct_ball and last_ball is not None else None,
+            view_width, recently_linked=bool(keeper_handoff_time is not None
+                and timestamp - keeper_handoff_time <= .85))
+        if keeper_handoff:
+            # Saves and on-target shots also resolve at the goalmouth. The
+            # previous camera followed an unrelated post-contact ball-like
+            # detection away from the visible keeper and lost the finish.
+            # Keep the real ball in the target while it is near the keeper;
+            # once the payoff starts, the observed keeper owns the hold.
+            if direct_ball:
+                keeper_handoff_time = timestamp
+            approaching_ball = last_ball if (direct_ball and last_ball is not None
+                and abs(last_ball[0] - current_goal_x) <= max(.10, view_width * .42)) else None
+            target_x, target_y = goal_outcome_target(
+                None, current_goal_x, None, approaching_ball, phase, target_x)
         possessing = bool(direct_ball and active is not None and proximity <= MAX_POSSESSION_DISTANCE)
         tracked_ball = last_ball is not None and ball_confidence >= 0.04
         active_ball_distance = (touch_distance(active, last_ball, 0.85)
@@ -1685,7 +1703,7 @@ def main():
         "imageSize": args.image_size, "ballImageSize": args.ball_image_size,
         "confidence": args.confidence, "ballConfidence": args.ball_confidence,
         "sampleFps": args.sample_fps, "coarseSampleFps": args.coarse_sample_fps, "device": args.device}
-    signature = {"detection": detection_signature, "version": 110, "associationVersion": 51, "tacticalSubjects": 4, "compositionVersion": 43, "tracker": args.tracker,
+    signature = {"detection": detection_signature, "version": 110, "associationVersion": 51, "tacticalSubjects": 4, "compositionVersion": 44, "tracker": args.tracker,
         "cameraMotion": args.camera_motion, "zoom": args.zoom,
         "output": [args.output_width, args.output_height, args.window_top, args.window_height],
         "shots": json.loads(Path(args.shots).read_text(encoding="utf-8"))["shots"] if args.shots else None}

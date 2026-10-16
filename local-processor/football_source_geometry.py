@@ -60,3 +60,20 @@ def goalkeeper_targets(frames, attack_direction, maximum_gap=1.8):
                     output[frame["frame"]] = value
         start = end
     return output
+
+
+def on_target_keeper_handoff(event_type, phase, elapsed, contact_time,
+                             keeper_x, ball_x, view_width, recently_linked=False):
+    """Use an observed keeper lane after an on-target shot reaches its result.
+
+    This only chooses camera context. The crop review must still observe the
+    actual ball and result; a keeper detection never proves a save or goal.
+    """
+    if event_type not in {"save", "shot_on_target"} or phase not in {"flight", "payoff"}:
+        return False
+    if not isinstance(keeper_x, (int, float)) or not math.isfinite(keeper_x):
+        return False
+    if elapsed < contact_time + .15:
+        return False
+    return recently_linked or (isinstance(ball_x, (int, float))
+        and math.isfinite(ball_x) and abs(ball_x - keeper_x) <= max(.10, view_width * .42))
