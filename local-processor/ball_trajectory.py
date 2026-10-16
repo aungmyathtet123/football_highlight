@@ -152,7 +152,7 @@ def choose_trajectory(frames, view_width, output_width=1080, beam_width=24,
                 # retain a measured candidate near its search region; it cannot
                 # provide a missing detection or approve the resulting crop.
                 guided_candidate=distance is not None and distance<=1
-                minimum_confidence = .03 if route_context or guided_candidate else .12
+                minimum_confidence = .03 if route_context or guided_candidate or frame.get('motion_ball_region') else .12
                 maximum=maximum_candidate_diameter(ball,frame['people'],view_width,output_width,source_aspect)
                 if not 4 <= diameter <= maximum or ball["confidence"] < minimum_confidence:
                     continue
@@ -205,6 +205,18 @@ def choose_trajectory(frames, view_width, output_width=1080, beam_width=24,
                 and b.get('pitchSupport',0)>=.1 for b,_ in candidates)
             role_context=has_role_ball or any(abs(frame['time']-t)<=.85 for t in role_times)
             def detector_cost(ball):
+                region = frame.get('motion_ball_region')
+                if region:
+                    distance = math.hypot(ball['cx']-region[0],(ball['cy']-region[1])*.6)
+                    return min(8.0,max(0,distance-region[2])*40)
+                motion = [candidate for candidate, _ in candidates if candidate.get('motionTrack') is True]
+                if motion:
+                    # Several native frames independently support this fast
+                    # isolated trajectory. A smooth high-score boot elsewhere
+                    # must not outweigh that observed movement.
+                    distance = min(math.hypot(ball['cx']-candidate['cx'],
+                        (ball['cy']-candidate['cy'])*.6) for candidate in motion)
+                    return min(8.0,max(0,distance-.02)*40)
                 # A role-labelled football proposal comes from the full native
                 # picture. Specialist-only proposals from an old small ROI are
                 # often white boots. Prefer the observed full-picture football
@@ -272,7 +284,7 @@ def choose_trajectory(frames, view_width, output_width=1080, beam_width=24,
                     if previous is not None:
                         distance = math.hypot(ball["cx"] - previous["cx"], (ball["cy"] - previous["cy"]) * .6)
                         # Supports real fast shots; penalizes unexplained teleports.
-                        allowance = .025 + .65 * max(.04, gap)
+                        allowance = .025 + (1.8 if frame.get('motion_ball_region') or ball.get('motionTrack') is True else .65) * max(.04, gap)
                         cost += 2 * (distance / allowance) ** 2
                         if route_context and frame["time"] <= float(contact_time) + .2:
                             progress = direction * (ball["cx"] - previous["cx"])

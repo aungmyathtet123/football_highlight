@@ -17,6 +17,7 @@ from tracking_cache import ObservationStore, fingerprint, content_fingerprint, s
 from tracking_decode import usable_tracking_checkpoint, normalize_tracking_source
 from tracking_cpu import detector_cpu_threads, bind_detector_cpu_threads
 from ball_trajectory import choose_trajectory, trajectory_camera_guidance, candidate_diameter, maximum_candidate_diameter
+from football_ball_motion import observe_ball_motion
 from phase_quality import phase_quality
 from semantic_ball_search import observed_search_region, needs_detail_search
 from scorer_tracking import player_ball_distance, select_scorer_track_id, select_stable_action_track_id
@@ -1078,6 +1079,24 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
                 "cacheHits": args.observations.hits, "newFrames": args.observations.misses}), flush=True)
 
     tracking_brief = moment.get("trackingBrief") or {}
+    if moment.get('eventType') in {'goal','disallowed_goal','save','shot_on_target','shot_off_target','big_chance'}:
+        motion_path = observe_ball_motion(capture, observed_frames, source_fps,
+            start+max(0,contact_time-.15), min(end,start+contact_time+4,
+                start+max(contact_time+1.5,payoff_time+.4)))
+        motion_points = sorted((number/source_fps,ball) for number,ball in motion_path.items())
+        for observation in observed_frames:
+            candidate = motion_path.get(observation['frame'])
+            if candidate is not None:
+                observation['balls'].append(candidate)
+            before = [value for value in motion_points if value[0]<=observation['time']]
+            after = [value for value in motion_points if value[0]>=observation['time']]
+            if before and after:
+                (ta,a),(tb,b) = before[-1],after[0]
+                if tb-ta <= .22:
+                    alpha = (observation['time']-ta)/max(.0001,tb-ta)
+                    # Association/search context only; gaps remain unobserved.
+                    observation['motion_ball_region'] = [a['cx']*(1-alpha)+b['cx']*alpha,
+                        a['cy']*(1-alpha)+b['cy']*alpha,.025]
     guide_focus=tracking_brief.get("initialBallFocusX")
     if isinstance(guide_focus,(int,float)) and math.isfinite(guide_focus) and 0<=guide_focus<=1:
         # Directly observed semantic opening region is only an association
@@ -1518,6 +1537,8 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
             "player_x1": camera_active["x1"] if camera_active is not None else None, "player_x2": camera_active["x2"] if camera_active is not None else None,
             "ball_x": last_ball[0] if last_ball is not None else None, "ball_y": last_ball[1] if last_ball is not None else None,
             "direct_ball": direct_ball, "ball_guidance": ball_guidance, "joint_visible": joint_visible, "joint_fit": joint_fit, "joint_span": joint_span,
+            "ball_observation_method": detected.get('observationMethod','learned_detector') if direct_ball and detected else None,
+            "motion_track_samples": detected.get('motionTrackSamples',0) if direct_ball and detected else 0,
             "possession": possessing, "ball_pixel_diameter": ball_pixel_diameter,
             "subject_confidence": subject_confidence, "scene_cut": scene_cut, "ball_confidence": ball_confidence,
             # Framing an actually observed foreground body does not assert
@@ -1703,7 +1724,7 @@ def main():
         "imageSize": args.image_size, "ballImageSize": args.ball_image_size,
         "confidence": args.confidence, "ballConfidence": args.ball_confidence,
         "sampleFps": args.sample_fps, "coarseSampleFps": args.coarse_sample_fps, "device": args.device}
-    signature = {"detection": detection_signature, "version": 110, "associationVersion": 51, "tacticalSubjects": 4, "compositionVersion": 44, "tracker": args.tracker,
+    signature = {"detection": detection_signature, "version": 111, "associationVersion": 52, "tacticalSubjects": 4, "compositionVersion": 44, "tracker": args.tracker,
         "cameraMotion": args.camera_motion, "zoom": args.zoom,
         "output": [args.output_width, args.output_height, args.window_top, args.window_height],
         "shots": json.loads(Path(args.shots).read_text(encoding="utf-8"))["shots"] if args.shots else None}

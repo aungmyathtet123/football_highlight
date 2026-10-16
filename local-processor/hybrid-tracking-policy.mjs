@@ -1,4 +1,4 @@
-export const HYBRID_TRACKING_VERSION = 8;
+export const HYBRID_TRACKING_VERSION = 9;
 
 export function keyframeProvider(value = 'gemini') {
   const provider = String(value).trim().toLowerCase();
@@ -44,7 +44,7 @@ export function providerEvidenceMatches(provider, evidence) {
   if (provider === 'gemini') return evidence.provider === 'gemini-vision';
   if (provider === 'hybrid') return evidence.provider === 'hybrid-football'
     && (evidence.hybridTrackingVersion === HYBRID_TRACKING_VERSION
-      || [6, 7].includes(evidence.hybridTrackingVersion) && evidence.finalCropVerified === true
+      || [6, 7, 8].includes(evidence.hybridTrackingVersion) && evidence.finalCropVerified === true
         && evidence.layoutMode !== 'source_contain' && evidence.renderReview?.passed === true);
   return evidence.provider !== 'gemini-vision' && evidence.provider !== 'hybrid-football';
 }
