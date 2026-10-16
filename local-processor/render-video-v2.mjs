@@ -411,7 +411,9 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
     const landscapeZoom = nativeLandscape ? safeLandscapeZoom(trackedMoment?.keyframes, outputWidth, outputHeight) : { zoom: 1, centerX: 0.5, centerY: 0.5, reason: "not_landscape" };
     framingReport.push({ momentId: moment.id, ...landscapeZoom });
     const sourceContain=moment.fallbackPresentation?.mode==='source_contain';
-    const cameraKeyframes = usesSafeStaticPresentation(moment) || sourceContain ? [] : trackedMoment?.keyframes || [];
+    if (sourceContain || trackedMoment?.layoutMode === 'source_contain')
+      throw new Error(`Scene ${moment.id} needs a verified full-screen 9:16 crop before rendering.`);
+    const cameraKeyframes = usesSafeStaticPresentation(moment) ? [] : trackedMoment?.keyframes || [];
     const keyframes = retimeKeyframes(cameraKeyframes, playbackRate, freeze);
     // Cropping happens before speed changes and freezes. Its clock must remain
     // source-local; only overlays/captions use the retimed output clock.
@@ -437,12 +439,7 @@ export async function renderVideoV2(sourcePath, outputPath, moments, settings, m
       ? `,loop=loop=${freeze.frames}:size=1:start=${freeze.frame},setpts=N/(30*TB)`
       : "";
     const entryTreatment = sceneEntryTransition(moment, index, outputLength, settings);
-    if(sourceContain) {
-      filters.push(`${sourcePrefix}split=2[sourceBackdrop${index}][sourceAction${index}]`);
-      filters.push(`[sourceBackdrop${index}]scale=${outputWidth}:${outputHeight}:force_original_aspect_ratio=increase,crop=${outputWidth}:${outputHeight},boxblur=24:2,eq=brightness=-0.16[blurredBackdrop${index}]`);
-      filters.push(`[sourceAction${index}]scale=${outputWidth}:${outputHeight}:force_original_aspect_ratio=decrease:flags=lanczos[visibleAction${index}]`);
-      filters.push(`[blurredBackdrop${index}][visibleAction${index}]overlay=(W-w)/2:(H-h)/2:shortest=1,setsar=1${visualEffectFilter(moment, settings.intensity, Boolean(annotationInput), sourcePayoff)},setpts=PTS/${playbackRate.toFixed(5)},fps=30${freezeFilter},settb=AVTB${entryTreatment.filter},format=yuv420p[baseclip${index}]`);
-    } else filters.push(`${sourcePrefix}${crop},scale=${outputWidth}:${outputHeight}:flags=lanczos,setsar=1${visualEffectFilter(moment, settings.intensity, Boolean(annotationInput), sourcePayoff)},setpts=PTS/${playbackRate.toFixed(5)},fps=30${freezeFilter},settb=AVTB${entryTreatment.filter},format=yuv420p[baseclip${index}]`);
+    filters.push(`${sourcePrefix}${crop},scale=${outputWidth}:${outputHeight}:flags=lanczos,setsar=1${visualEffectFilter(moment, settings.intensity, Boolean(annotationInput), sourcePayoff)},setpts=PTS/${playbackRate.toFixed(5)},fps=30${freezeFilter},settb=AVTB${entryTreatment.filter},format=yuv420p[baseclip${index}]`);
     if (index === 0 && teaserEnabled) {
       filters[filters.length - 1] = filters[filters.length - 1].replace("[baseclip0]", "[hookSource]");
       filters.push("[hookSource]split=2[baseclip0][hookCopy]");

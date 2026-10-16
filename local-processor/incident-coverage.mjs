@@ -10,7 +10,6 @@ export function incidentCoverage(candidates, selected = candidates.filter(m => m
     "verified_decision_framing",
     "gemini_crop_verified",
     "hybrid_crop_verified",
-    "hybrid_source_contain_verified",
   ]);
   const required = new Map();
   for (const m of candidates) {

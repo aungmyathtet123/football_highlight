@@ -190,7 +190,7 @@ test('a complete observed pass corrects a stale finishing label without inventin
   assert.match(request.contents.at(-1).text,/incomplete source action must fail/);
 });
 
-test('only the separately reviewed full-source presentation can recover an action outside the portrait crop', () => {
+test('a full-source inset cannot approve a 9:16 scene whose crop loses the action', () => {
   const scene={eventType:'goal',selectionLocked:true,startTime:0,endTime:4,
     trackingBrief:{contactTime:1,flightStartTime:1,payoffStartTime:3,payoffEndTime:3.5}};
   const times=[0,1,2,3];
@@ -211,7 +211,7 @@ test('only the separately reviewed full-source presentation can recover an actio
   assert.equal(assessHybridFraming(scene,{...evidence,renderReview:review}).usable,false);
   const contained={...sourceContainEvidence(evidence),renderReview:review};
   const assessment=assessHybridFraming(scene,contained);
-  assert.equal(assessment.usable,true);
-  assert.equal(assessment.mode,'hybrid_source_contain_verified');
+  assert.equal(assessment.usable,false);
+  assert.equal(assessment.mode,'portrait_full_bleed_required');
   assert.equal(reviewedFramingEvent(scene,contained),'big_chance');
 });

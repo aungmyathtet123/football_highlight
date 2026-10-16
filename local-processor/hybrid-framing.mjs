@@ -238,6 +238,10 @@ export function sourceContainEvidence(evidence) {
 
 export function assessHybridFraming(scene, evidence) {
   if (evidence?.provider !== 'hybrid-football') return null;
+  // The portrait delivery contract is edge-to-edge footage. A reviewed wide
+  // inset proves the source action, but cannot approve the delivered crop.
+  if (evidence.layoutMode === 'source_contain')
+    return { usable: false, mode: 'portrait_full_bleed_required', issues: ['portrait_full_bleed_required'] };
   if (evidence.hybridTrackingVersion !== HYBRID_TRACKING_VERSION)
     return { usable: false, mode: 'hybrid_cache_version_mismatch' };
   if (evidence.reviewRepairError)
@@ -308,8 +312,7 @@ export function assessHybridFraming(scene, evidence) {
   }
   if (missing.length || !Array.isArray(review?.observations) || review.observations.length < 2)
     return { usable: false, mode: 'hybrid_render_review_incomplete', issues: missing };
-  return { usable: true, mode: evidence.layoutMode==='source_contain'
-    ? 'hybrid_source_contain_verified' : 'hybrid_crop_verified' };
+  return { usable: true, mode: 'hybrid_crop_verified' };
 }
 
 // A positive crop verdict can omit a final-flight timestamp. Reusing that
