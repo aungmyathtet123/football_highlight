@@ -1,0 +1,6 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+WORKDIR /app
+COPY app ./app
+RUN npm run build
+CMD ["node", "deploy/cloud-run/gateway.mjs"]

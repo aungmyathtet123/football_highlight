@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { EditSettings, FootballMoment, JobStage } from "@/lib/video/types";
+import type { WorkflowProgress } from "../local-processor/workflow-progress.mjs";
 
 type View = "upload" | "processing" | "result";
 type AudioMode = EditSettings["originalAudio"];
@@ -34,6 +35,7 @@ type LocalJob = {
   error?: { code?: string; message: string; retryable?: boolean };
   sourceName?: string; sourceSize?: number; updatedAt?: string; settings?: EditSettings;
   trackingProgress?: { approved: number; total: number; needsRepair: number };
+  workflow?: WorkflowProgress;
 };
 
 type YouTubeChannel = {
@@ -74,6 +76,7 @@ export function VideoStudio() {
   const [savedJobs, setSavedJobs] = useState<LocalJob[]>([]);
   const [sourceName, setSourceName] = useState("");
   const monitorGeneration = useRef(0);
+  const [workflow, setWorkflow] = useState<WorkflowProgress | null>(null);
 
   const selected = useMemo(() => moments.filter((moment) => moment.selectedForFinalVideo).sort((a, b) => (a.editOrder ?? a.startTime) - (b.editOrder ?? b.startTime)), [moments]);
   const estimatedDuration = selected.reduce((sum, moment, index) => {
@@ -148,10 +151,12 @@ export function VideoStudio() {
       const job = await statusResponse.json() as LocalJob;
       if (generation !== monitorGeneration.current) return;
       if (job.sourceName) setSourceName(job.sourceName);
+      setWorkflow(job.workflow || null);
       setProgress(job.progress);
       setProgressDetail([job.progressDetail, job.trackingProgress ? `${job.trackingProgress.approved}/${job.trackingProgress.total} scenes approved; ${job.trackingProgress.needsRepair} need repair.` : ""].filter(Boolean).join(" "));
       setStageIndex(stageIndexFor(job.stage));
       if (job.stage === "uploading") throw new Error("Upload is incomplete. Choose Review settings and select the same source file to resume.");
+      if (job.stage === "uploaded") throw new Error("Your source is saved. Resume saved job to start processing.");
       if (job.stage === "failed" || job.stage === "attention_required") {
         setFailureProgress(job.progress);
         throw new Error(job.error?.message || job.progressDetail || "Video processing needs attention.");
@@ -172,6 +177,7 @@ export function VideoStudio() {
     setStageIndex(0);
     setProcessingError(null);
     setWarnings([]);
+    setWorkflow(null);
     setEditPlan(null);
     setOutputUrl(null);
     setCurrentJobId(null);
@@ -298,7 +304,7 @@ export function VideoStudio() {
           />
           </>
         )}
-        {view === "processing" && <ProcessingView fileName={file?.name || sourceName || "Match footage"} progress={progress} detail={progressDetail} stageIndex={stageIndex} error={processingError} canResume={Boolean(currentJobId)} retrying={retrying} onRetry={resumeProcessing} onBack={showUpload} />}
+        {view === "processing" && <ProcessingView fileName={file?.name || sourceName || "Match footage"} progress={progress} detail={progressDetail} stageIndex={stageIndex} error={processingError} canResume={Boolean(currentJobId)} retrying={retrying} onRetry={resumeProcessing} onBack={showUpload} workflow={workflow} />}
         {view === "result" && (
           <ResultView file={file} videoUrl={outputUrl || videoUrl} outputUrl={outputUrl} warnings={warnings} selected={selected} allMoments={moments} finalDuration={finalDuration}
             sourceDuration={sourceDuration} videoTitle={typeof editPlan?.title === "string" ? editPlan.title : "Your football story"} editStyle={editStyle} downloadPlan={downloadPlan} jobId={currentJobId} synchronization={Array.isArray(editPlan?.synchronization) ? editPlan.synchronization : []} />
@@ -364,13 +370,13 @@ function UploadView(props: UploadProps) {
   </>;
 }
 
-function ProcessingView({ fileName, progress, detail, stageIndex, error, canResume, retrying, onRetry, onBack }: { fileName: string; progress: number; detail: string; stageIndex: number; error: string | null; canResume: boolean; retrying: boolean; onRetry: () => void; onBack: () => void }) {
+function ProcessingView({ fileName, progress, detail, stageIndex, error, canResume, retrying, onRetry, onBack, workflow }: { fileName: string; progress: number; detail: string; stageIndex: number; error: string | null; canResume: boolean; retrying: boolean; onRetry: () => void; onBack: () => void; workflow: WorkflowProgress | null }) {
   return <div className="processing-page">
     <header className="topbar"><div><div className="eyebrow"><span className="pulse-dot" /> PROCESSING PROJECT</div><h1>Building your edit</h1></div><div className="step-indicator"><span>2</span> AI processing</div></header>
     <div className="processing-card">
       <div className="processing-visual"><div className="scan-field"><div className="scan-line" /><span className="tracked-player one" /><span className="tracked-player two" /><span className="tracked-ball" /></div><div className="percent">{progress}<small>%</small></div></div>
-      <div className="processing-copy"><span className="mini-label">{fileName}</span><h2>{error ? "Processing paused" : stages[stageIndex].label}</h2><p role="status" aria-live="polite">{error || detail || `${stages[stageIndex].detail}. Your progress is saved.`}</p>{error && <div className="retry-actions"><button className="primary-compact" disabled={retrying} onClick={onRetry}>{retrying ? "Resuming..." : canResume ? "Resume saved job" : "Retry upload"}</button><button className="secondary-button" disabled={retrying} onClick={onBack}>Review settings</button></div>}<div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
-        <ol className="stage-list">{stages.map((stage, index) => <li key={stage.key} className={index < stageIndex ? "done" : index === stageIndex ? "current" : ""}><i>{index < stageIndex ? "✓" : index + 1}</i><span><strong>{stage.label}</strong><small>{stage.detail}</small></span></li>)}</ol>
+      <div className="processing-copy"><span className="mini-label">{fileName}</span><h2>{error ? "Processing paused" : workflow?.steps.find(step => step.id === workflow.phase)?.title || stages[stageIndex].label}</h2><p role="status" aria-live="polite">{error || detail || `${stages[stageIndex].detail}. Your progress is saved.`}</p>{error && <div className="retry-actions"><button className="primary-compact" disabled={retrying} onClick={onRetry}>{retrying ? "Resuming..." : canResume ? "Resume saved job" : "Retry upload"}</button><button className="secondary-button" disabled={retrying} onClick={onBack}>Review settings</button></div>}<div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
+        <ol className="stage-list">{workflow ? workflow.steps.map(step => <li key={step.id} className={step.status === "complete" ? "done" : ["active", "waiting", "paused"].includes(step.status) ? "current" : ""}><i>{step.status === "complete" ? "✓" : step.number}</i><span><strong>{step.title}</strong><small>{step.detail}</small></span></li>) : stages.map((stage, index) => <li key={stage.key} className={index < stageIndex ? "done" : index === stageIndex ? "current" : ""}><i>{index < stageIndex ? "✓" : index + 1}</i><span><strong>{stage.label}</strong><small>{stage.detail}</small></span></li>)}</ol>
       </div>
     </div>
   </div>;
