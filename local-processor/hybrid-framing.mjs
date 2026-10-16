@@ -10,10 +10,16 @@ import { isDisciplinaryAction, DISCIPLINARY_ACTION_CONTRACT } from './disciplina
 import { reviewedFramingEvent } from './gemini-framing.mjs';
 
 const supportOnly = scene => scene.eventType === 'celebration' || scene.storyPhase === 'reaction';
+const decisionOnly = scene => ['offside','var'].includes(scene.eventType);
+const penaltyAward = (scene,evidence) => scene.eventType === 'penalty'
+  && evidence?.renderReview?.observedOutcome?.type === 'not_applicable';
+const nonFinishingPlay = scene => ['normal_play','assist','free_kick','skill','dribble','tackle'].includes(scene.eventType);
 export function hybridActionReviewContract(scene) {
   if (supportOnly(scene)) return 'This is a verified support reaction, NOT gameplay. Require the involved subject face and torso in view and stable camera movement. outcomeVisible means this visible reaction is shown clearly, not that a shot outcome is shown again. Do not demand ball, setup, contact or flight in a reaction. Irrelevant gameplay flags may be false without failing passed. Record reaction phaseChecks with truthful visibility. Never infer a goal or identity from this reaction alone.';
   if (isDisciplinaryAction(scene)) return DISCIPLINARY_ACTION_CONTRACT + ' Record setup and infringement contact with the carrier/ball, and payoff with the visible decision subject. Do not demand shot flight. Phase hints are not proof.';
-  if(scene.eventType==='normal_play') return 'This is a NON-FINISHING football action, not an assumed shot. Identify the actual action from the pixels: a pass, clearance, press, interception, recovery or dribble. Require the relevant player with the real match ball, visible decisive contact, followed continuation and a directly observed resolution. A completed pass resolves with receiver control; a recovery with regained control; a successful clearance with the ball visibly escaping the immediate challenge. A blocked pass or clearance is a different actual result: it resolves when the pressing player visibly blocks the match ball and its redirected path is visible. Judge ballFollowed through that actual resolution. Do not reject an already resolved block because later ball movement or a later possession leaves the view. Include the initial release and blocking touch as separate contact checks, followed by the redirected-flight and block-resolution payoff checks. Do not invent a shot, goal, keeper save or receiving player. Do not demand a shooting/header contact in a non-finishing action. Report observedOutcome.type=not_applicable and describe the actual visible non-shot resolution. Off-screen ball movement or an unrelated camera cut does not prove a completed action. Source cuts can reset position; within-shot movement must remain stable.';
+  if (decisionOnly(scene)) return 'This is a football decision, not a finishing shot. Verify the actual offside flag, referee signal, VAR announcement or other visible official decision and the involved subject. A player reaction, replay graphic or inferred score alone does not prove the ruling. If the relevant live action is shown, report its ball and player positions truthfully; a decision-only camera view need not contain the match ball or a shot contact. outcomeVisible means the decision itself is visibly resolved. Record only the phases supported by these pixels, with ballVisible false when the ball is absent. Do not invent a goal, scorer or unseen infringement.';
+  if (scene.eventType === 'penalty') return 'Determine from the pixels whether this is a penalty AWARD or a TAKEN penalty. For an award, require the relevant challenge and visible referee decision; do not demand a later kick. For a taken penalty, require the taker and moving match ball before contact, the kick, ball flight and directly observed result. A keeper dive, crowd reaction or scoreboard alone does not prove a goal. Report only the action actually shown and reject if its decision or kick outcome is unresolved.';
+  if (nonFinishingPlay(scene)) return 'This is a NON-FINISHING football action unless the pixels independently show a later shot. Identify the actual pass, assist, free-kick delivery, clearance, press, interception, recovery, skill, dribble or tackle. Require the relevant player with the real match ball before the decisive touch or challenge, the visible contact or controlled move, followed ball/player continuation, and its directly observed resolution. A pass resolves with receiver control or a visible block; a tackle with the challenge and changed ball path or possession; a dribble or skill with continued control or a clearly lost ball; a free kick with its actual delivery and result. An assist label alone does not prove a goal: report only the visible receiving or finishing action. Do not demand a shooting/header contact or goal for a non-finishing clip, and do not call a blocked pass a failed crop when the block and redirected ball are visible. Report observedOutcome.type=not_applicable unless a real finish is independently visible. Off-screen ball movement or an unrelated camera cut does not prove completion. Source cuts can reset position; within-shot movement must remain stable.';
   return 'Judge ONE decisive finishing action: the eventual shooter or header player with the incoming moving match ball BEFORE that decisive touch (setup), the actual shot or header contact, the same ball in flight, and its directly visible resolved outcome. For a header, volley, rebound or received pass, the earlier assister or cross taker may be off-screen; do not fail setup merely because that earlier release is absent. The eventual finisher AND incoming ball must be visibly identifiable together before contact. A clip beginning at or after decisive contact still fails setup. If an earlier pass or cross release is also visible, record its contact separately, but never substitute it for the decisive finishing touch. Reject unrelated player-only footage, off-screen football and shaky movement. Source cuts can reset position; within-shot movement must be stable. For each setup/contact/flight/payoff phase, record phaseChecks ONLY when the actual moving match ball and relevant subject are visibly identifiable in this crop. Do not call a boot, static spare ball or white logo the ball. If the ball cannot be visually followed through a gap, reject; never fill the report from phase hints. If the decisive touch is not visually identifiable, reject contactVisible even if an earlier pass is clear. Cite the actual resolved result time in a payoff phaseCheck; timestamps need not equal the estimated phase boundary.';
 }
 const finite = value => typeof value === 'number' && Number.isFinite(value);
@@ -28,7 +34,7 @@ export const NEUTRAL_CROP_VERDICT = 'passed judges visible, complete, correctly 
 export function hybridReviewInstructions(scene) {
   // Shot instructions contradicted the reaction contract and caused reviews
   // to demand an unseen shot in an otherwise correctly framed celebration.
-  return hybridActionReviewContract(scene) + (supportOnly(scene)||isDisciplinaryAction(scene)||scene.eventType==='normal_play' ? ''
+  return hybridActionReviewContract(scene) + (supportOnly(scene)||decisionOnly(scene)||isDisciplinaryAction(scene)||nonFinishingPlay(scene)||scene.eventType==='penalty' ? ''
     : `\n${FINISHING_ACTION_PAYOFF}\n${NEUTRAL_CROP_VERDICT}\nA ball hitting the SIDE or BACK of the net from outside the posts is a miss, not a goal. Identify the plane between the posts and follow the match ball relative to that plane; a diving keeper and moving net alone prove nothing.`);
 }
 export function hybridDetailIndexes(scene,count,fps=3,maximum=8) {
@@ -177,6 +183,7 @@ export function hybridGeometry(scene, evidence) {
   });
   const issues = [];
   const violations = [];
+  const award = penaltyAward(scene,evidence);
   const phases = {};
   const brief = scene.trackingBrief || evidence.trackingBrief || {};
   const localTime = key => finite(brief[key]) && finite(scene.startTime) ? brief[key] - scene.startTime : null;
@@ -195,14 +202,14 @@ export function hybridGeometry(scene, evidence) {
       ball: group.filter(sample => sample.ball).length / Math.max(1, group.length),
       joint: group.filter(sample => sample.ball && sample.player).length / Math.max(1, group.length) };
   }
-  if (!supportOnly(scene)) {
+  if (!supportOnly(scene) && !decisionOnly(scene)) {
     if (!samples.some(sample => sample.time <= .8 && sample.ball && sample.player)) issues.push('opening_carrier_and_ball_missing');
     if (!phases.contact.samples || phases.contact.joint < .5) issues.push('contact_carrier_and_ball_unverified');
     if (phases.setup.samples && phases.setup.joint < .5) issues.push('setup_carrier_and_ball_unverified');
-    if (!isDisciplinaryAction(scene) && phases.flight.samples && phases.flight.ball < .5) issues.push('ball_flight_unverified');
-    if (!phases.payoff.samples || phases.payoff.ball < .4) issues.push('resolved_action_ball_unverified');
+    if (!isDisciplinaryAction(scene) && !award && phases.flight.samples && phases.flight.ball < .5) issues.push('ball_flight_unverified');
+    if (!phases.payoff.samples || !award && phases.payoff.ball < .4) issues.push('resolved_action_ball_unverified');
   }
-  if (samples.some((sample,index) => records[index].direct_ball === true && !sample.ball))
+  if (!decisionOnly(scene) && samples.some((sample,index) => records[index].direct_ball === true && !sample.ball))
     violations.push('observed_ball_outside_safe_crop');
   for (let index = 1; index < samples.length; index++) {
     const current = samples[index], previous = samples[index - 1];
@@ -245,9 +252,14 @@ export function assessHybridFraming(scene, evidence) {
   if (!geometry.usable) return { usable: false, mode: geometry.issues[0], issues: geometry.issues };
   const review = evidence.renderReview;
   const checks = ['passed', 'correctSubject', 'stableCamera', 'outcomeVisible'];
-  if (!supportOnly(scene)) checks.push('ballFollowed', 'setupVisible', 'contactVisible');
+  if (!supportOnly(scene) && !decisionOnly(scene)) checks.push('ballFollowed', 'setupVisible', 'contactVisible');
   if (scene.eventType === 'goal') checks.push('ballEnteredGoal');
   const missing = checks.filter(key => review?.[key] !== true);
+  if ((decisionOnly(scene) || penaltyAward(scene,evidence)) && !(review?.phaseChecks || []).some(check => check.phase === 'payoff'
+    && finite(check.time) && check.time >= 0 && check.time <= scene.endTime - scene.startTime
+    && (!penaltyAward(scene,evidence) || check.playerVisible === true)
+    && typeof check.description === 'string' && check.description.trim().length >= 12))
+    missing.push('unobserved_decision_payoff');
   if (['save','shot_on_target','shot_off_target','big_chance'].includes(scene.eventType) && review?.ballEnteredGoal===true)
     missing.push('crop_outcome_contradicts_selected_non_goal');
   if (review?.observedOutcome && ['goal','save','shot_on_target','shot_off_target','big_chance'].includes(scene.eventType)) {
@@ -290,7 +302,7 @@ export function assessHybridFraming(scene, evidence) {
       && finite(check.time) && check.time >= 0 && check.time <= scene.endTime - scene.startTime
       && inPhase(phase,check.time)
       && typeof check.description === 'string' && check.description.trim().length >= 12
-      && (isDisciplinaryAction(scene) && phase === 'payoff' ? check.playerVisible === true : check.ballVisible === true)
+      && ((isDisciplinaryAction(scene) || penaltyAward(scene,evidence)) && phase === 'payoff' ? check.playerVisible === true : check.ballVisible === true)
       && (!['setup','contact'].includes(phase) || check.playerVisible === true));
     if (!observed.length) missing.push(`unobserved_${phase}_gap`);
   }
@@ -341,7 +353,7 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
   const key = createHash('sha256').update(JSON.stringify({ sourceFingerprint, model,
     version: HYBRID_TRACKING_VERSION, videoOnly,
     ...(presentationMode==='source_contain'?{presentationMode}:{}),
-    reviewVersion:scene.eventType==='normal_play'?6:5, start: scene.startTime, end: scene.endTime,
+    reviewVersion:nonFinishingPlay(scene)||decisionOnly(scene)||scene.eventType==='penalty'?7:5, start: scene.startTime, end: scene.endTime,
     ratio, supportOnly: supportOnly(scene), trackingBrief: scene.trackingBrief,
     geometryIssues: geometry.issues, keyframes: evidence.keyframes })).digest('hex');
   const folder = join(directory, key);

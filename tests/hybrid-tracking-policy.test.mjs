@@ -11,6 +11,59 @@ test('finishing setup follows the eventual scorer and incoming ball', () => {
   assert.match(contract,/clip beginning at or after decisive contact still fails setup/);
 });
 
+test('football action families use their own visible resolution', () => {
+  for (const eventType of ['assist','free_kick','skill','dribble','tackle','normal_play']) {
+    const contract=hybridActionReviewContract({eventType});
+    assert.match(contract,/NON-FINISHING football action/);
+    assert.doesNotMatch(contract,/eventual shooter or header player/);
+  }
+  assert.match(hybridActionReviewContract({eventType:'penalty'}),/penalty AWARD or a TAKEN penalty/);
+  for (const eventType of ['offside','var']) {
+    const contract=hybridActionReviewContract({eventType});
+    assert.match(contract,/football decision/);
+    assert.doesNotMatch(contract,/decisive finishing action/);
+  }
+});
+
+test('decision-only views require an observed ruling but not a match ball', () => {
+  const scene={eventType:'var',startTime:10,endTime:12};
+  const evidence={provider:'hybrid-football',hybridTrackingVersion:HYBRID_TRACKING_VERSION,
+    sourceRecords:[{time:1.5,action_phase:'payoff',direct_ball:false,player_track_id:1,
+      player_x1:.4,player_x2:.6,player_top:.2,player_bottom:.8}],
+    keyframes:[{time:1.5,cameraX:.5,cropBox:[0,0,1,1]}],
+    renderReview:{passed:true,correctSubject:true,
+      stableCamera:true,outcomeVisible:true,observations:[
+        {time:.5,description:'The referee approaches the review screen.'},
+        {time:1.5,description:'The referee gives the final decision.'}],
+      phaseChecks:[{phase:'payoff',time:1.5,ballVisible:false,playerVisible:true,
+        description:'The referee visibly signals the decision.'}]}};
+  assert.equal(assessHybridFraming(scene,evidence).usable,true);
+  evidence.renderReview.phaseChecks=[];
+  assert.deepEqual(assessHybridFraming(scene,evidence).issues,['unobserved_decision_payoff']);
+});
+
+test('a penalty award resolves at the referee decision without a later kick', () => {
+  const scene={eventType:'penalty',startTime:10,endTime:12,
+    trackingBrief:{contactTime:10.5,payoffStartTime:11.5,payoffEndTime:12}};
+  const times=[0,.5,1,1.5];
+  const phases=['setup','contact','flight','payoff'];
+  const evidence={provider:'hybrid-football',hybridTrackingVersion:HYBRID_TRACKING_VERSION,
+    sourceRecords:times.map((time,index)=>({time,action_phase:phases[index],
+      direct_ball:index<3,ball_x:.5,ball_y:.5,player_track_id:1,
+      player_x1:.4,player_x2:.6,player_top:.2,player_bottom:.8})),
+    keyframes:times.map(time=>({time,cameraX:.5,cropBox:[0,0,1,1]})),
+    renderReview:{passed:true,correctSubject:true,stableCamera:true,outcomeVisible:true,
+      ballFollowed:true,setupVisible:true,contactVisible:true,ballEnteredGoal:false,
+      observedOutcome:{type:'not_applicable',time:1.5,description:'The referee awards the penalty.'},
+      observations:[{time:.5,description:'The defender challenges the carrier.'},
+        {time:1.5,description:'The referee signals a penalty.'}],
+      phaseChecks:[{phase:'payoff',time:1.5,playerVisible:true,ballVisible:false,
+        description:'The referee visibly awards the penalty.'}]}};
+  assert.equal(assessHybridFraming(scene,evidence).usable,true);
+  evidence.renderReview.phaseChecks=[];
+  assert.ok(assessHybridFraming(scene,evidence).issues.includes('unobserved_decision_payoff'));
+});
+
 test('verified header phases can correct source timing without the original cross taker', () => {
   const scene={eventType:'goal',startTime:10,endTime:12.5,
     trackingBrief:{originTime:10,contactTime:10.75,flightStartTime:10.75,
