@@ -47,7 +47,7 @@ import { fastTrackingPolicy } from './fast-tracking-policy.mjs';
 import { createWorkflowPerformance } from './workflow-performance.mjs';
 import {ACTION_GUIDANCE_VERSION,actionGuidanceKey,matchingActionGuidance,actionGuidanceRequest,observeValidatedActionGuidance,applySavedActionGuidance,actionGuideObservationKey,matchingActionGuideObservation,sharedActionGuideObservation} from './action-guidance.mjs';
 import {sourceActionGuideWindow,selectGuidedSourceAction} from './source-action-selection.mjs';
-import {BLOCKED_SELECTION_VERSION,SOURCE_RESELECTION_FPS,SOURCE_CORRECTION_FPS,sourceCorrectionBounds,sourceAlternateReplayBounds,blockedSelectionScenes,blockedSelectionWindow,blockedSelectionRequest,applyBlockedSelection,mergeBlockedSelections} from './blocked-source-selection.mjs';
+import {BLOCKED_SELECTION_VERSION,SOURCE_RESELECTION_FPS,SOURCE_CORRECTION_FPS,sourceCorrectionBounds,sourceAlternateReplayBounds,rejectedSourceAngles,sourceReviewFailure,blockedSelectionScenes,blockedSelectionWindow,blockedSelectionRequest,applyBlockedSelection,mergeBlockedSelections} from './blocked-source-selection.mjs';
 import {framingVideoClockFilter} from './gemini-video-framing.mjs';
 import {outcomeNarrationProblems} from './narration-outcome-policy.mjs';
 import { lockedNarrationContract, lockedNarrationResponseSchema, projectLockedNarration } from './locked-narration.mjs';
@@ -6533,16 +6533,34 @@ async function reselectBlockedSourceActions(sourcePath,candidates,media,id) {
   if(!pending.length) return candidates;
   const shots=JSON.parse(await readFile(join(outputRoot,id,'shots.json'),'utf8')).shots;
   const fingerprint=await sourceContentFingerprint(sourcePath);
+  // Selection audits survive cloud checkpoints. Recover every earlier failed
+  // angle so a later retry cannot alternate between two rejected replays.
+  const angleHistory=new Map();
+  for(const name of (await readdir(directory)).filter(name=>/^selection-\d+\.json$/.test(name)).sort()) {
+    let audit;
+    try {audit=JSON.parse(await readFile(join(directory,name),'utf8'));} catch {continue;}
+    if(audit.sourceFingerprint?.sha256!==fingerprint.sha256) continue;
+    for(const previous of audit.replacements||[]) {
+      if(!previous?.id) continue;
+      const entries=angleHistory.get(previous.id)||[];
+      entries.push({startTime:previous.startTime,endTime:previous.endTime});
+      angleHistory.set(previous.id,entries);
+    }
+  }
   // Each blocked-source request can span many seconds of original video.
   // Run them one at a time so model failover and coordinate repair do not
   // compete with another long video request for the same project quota.
   const decisions=await mapWithConcurrency(pending,1,async(scene,index)=>{
     try {
+    scene={...scene,sourceReselection:{...scene.sourceReselection,
+      rejectedAngles:rejectedSourceAngles(scene,angleHistory.get(scene.id)||[])}};
     const window=blockedSelectionWindow(scene,shots,media.duration);
     const model=fastTracking.reviewModel;
-    const previousFailure=String(feedback[scene.id]||'');
+    const previousFailure=[String(feedback[scene.id]||''),
+      sourceReviewFailure(tracking.moments?.[scene.id])].filter(Boolean).join(' | ').slice(0,2500);
     const key=stableSignature({version:BLOCKED_SELECTION_VERSION,fingerprint,model,scene:scene.id,
-      originalStart:scene.startTime,originalEnd:scene.endTime,window,previousFailure});
+      originalStart:scene.startTime,originalEnd:scene.endTime,window,previousFailure,
+      rejectedAngles:scene.sourceReselection.rejectedAngles});
     const responsePath=join(directory,`${key}.response.json`);
     let parsed;
     try {parsed=JSON.parse(await readFile(responsePath,'utf8'));} catch { /* New authorized selection. */ }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {applyBlockedSelection,blockedSelectionScenes,blockedSelectionWindow,sourceCorrectionBounds,sourceAlternateReplayBounds} from '../local-processor/blocked-source-selection.mjs';
+import {applyBlockedSelection,blockedSelectionScenes,blockedSelectionWindow,sourceCorrectionBounds,sourceAlternateReplayBounds,rejectedSourceAngles,sourceReviewFailure} from '../local-processor/blocked-source-selection.mjs';
 import {fixedSceneQueue,sourceTimelineStart} from '../local-processor/fixed-scene-queue.mjs';
 import {selectGuidedSourceAction} from '../local-processor/source-action-selection.mjs';
 import {assessPlannedSceneTracking} from '../local-processor/editorial-policy.mjs';
@@ -79,6 +79,30 @@ test('reselecting a failed replay searches from the original live incident and k
   assert.equal(mislabeled.isReplay,true);
   assert.equal(mislabeled.sourceReselection.replayInferredFromVerifiedTimeline,true);
   assert.equal(mislabeled.sourceReselection.selectedReplayClaim,false);
+});
+
+test('a later retry remembers earlier rejected camera angles',()=>{
+  const current={...scene,startTime:30,endTime:33,
+    sourceReselection:{previousStart:10,previousEnd:15,selectedReplay:true,
+      rejectedAngles:rejectedSourceAngles(scene,[{startTime:20,endTime:24}])}};
+  const oldAngle={...replay,selectionStart:20,selectionEnd:24};
+  assert.throws(()=>applyBlockedSelection(current,{startTime:0,endTime:45},oldAngle,context),
+    /repeats the independently rejected camera angle/);
+  const wider={...oldAngle,selectionStart:18.5,guide:{...oldAngle.guide,
+    anchors:[anchor(18.7,'setup'),anchor(21,'contact'),anchor(21.7,'flight'),anchor(23,'payoff')]}};
+  const replacement=applyBlockedSelection(current,{startTime:0,endTime:45},wider,context);
+  assert.equal(replacement.startTime,18.5);
+  assert.ok(replacement.sourceReselection.rejectedAngles.some(item=>item.startTime===20));
+});
+
+test('source repair receives concise independent crop and full-source observations',()=>{
+  const failure=sourceReviewFailure({renderReview:{issues:['setup_phase_missing'],
+    observedOutcome:{type:'uncertain'},phaseChecks:[{phase:'contact',time:.6,
+      ballVisible:true,playerVisible:true}],observations:[{time:.6,description:'Ball is obscured after contact.'}]},
+    sourceContainReview:{review:{issues:['outcome_hidden'],observedOutcome:{type:'uncertain'}}}});
+  assert.match(failure,/setup_phase_missing/);
+  assert.match(failure,/outcome_hidden/);
+  assert.match(failure,/Ball is obscured/);
 });
 
 test('a keeper collecting a pass cannot be certified as a shot save',()=>{

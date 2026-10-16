@@ -3,7 +3,7 @@ import {footballVideoPart} from './gemini-media-policy.mjs';
 import {selectGuidedSourceAction} from './source-action-selection.mjs';
 import {semanticSignature} from './pipeline-state.mjs';
 
-export const BLOCKED_SELECTION_VERSION=10;
+export const BLOCKED_SELECTION_VERSION=11;
 // Source reselection compares several broadcast views over a long window.
 // Keep this overview light; the chosen short scene is observed again at 8fps
 // and its rendered portrait crop receives an independent review.
@@ -23,6 +23,35 @@ export function sourceAlternateReplayBounds(scene,window) {
   const startTime=Math.max(0,scene.endTime-window.startTime+.5);
   const endTime=window.endTime-window.startTime;
   return endTime-startTime>=1.5?{startTime,endTime}:null;
+}
+
+// Keep failed camera choices across checkpoint retries. An interval can be
+// reconsidered only when it gains substantial new setup or payoff footage.
+export function rejectedSourceAngles(scene,history=[]) {
+  const entries=[...(scene.sourceReselection?.rejectedAngles||[]),...history,
+    {startTime:scene.startTime,endTime:scene.endTime}];
+  const unique=new Map();
+  for(const item of entries) {
+    if(!Number.isFinite(item?.startTime)||!Number.isFinite(item?.endTime)
+      ||item.endTime-item.startTime<.5) continue;
+    const startTime=+item.startTime.toFixed(6),endTime=+item.endTime.toFixed(6);
+    unique.set(`${startTime}:${endTime}`,{startTime,endTime});
+  }
+  return [...unique.values()].sort((a,b)=>a.startTime-b.startTime||a.endTime-b.endTime);
+}
+
+export function sourceReviewFailure(evidence) {
+  const summarize=review=>review?{
+    issues:(review.issues||[]).slice(0,8),
+    observedOutcome:review.observedOutcome?.type,
+    phases:(review.phaseChecks||[]).slice(0,12).map(check=>({phase:check.phase,
+      time:check.time,ballVisible:check.ballVisible,playerVisible:check.playerVisible})),
+    observations:(review.observations||[]).slice(0,4).map(item=>({time:item.time,
+      description:String(item.description||'').slice(0,160)})),
+  }:null;
+  const crop=summarize(evidence?.renderReview);
+  const fullSource=summarize(evidence?.sourceContainReview?.review);
+  return crop||fullSource?JSON.stringify({crop,fullSource}):'';
 }
 
 export function blockedSelectionScenes(candidates,tracking) {
@@ -53,7 +82,7 @@ export function blockedSelectionWindow(scene,shots,duration) {
 export function blockedSelectionRequest(model,data,scene,window,previousFailure='') {
   return {model,contents:[footballVideoPart(data,SOURCE_RESELECTION_FPS),{text:
     `Choose ONE clear complete action from this original ${ (window.endTime-window.startTime).toFixed(3)}s source video. This is an explicitly authorized Step 1 source reselection, NOT a crop verification. The existing selection was source-local ${(scene.startTime-window.startTime).toFixed(3)} to ${(scene.endTime-window.startTime).toFixed(3)} seconds. It is ${scene.eventType==='goal'?'a selected scoring incident':'an unverified action with no reliable outcome label'}; determine the actual action from moving video pixels. Preserve that SAME incident, never replace a goal with an unrelated chance or celebration. All times must be seconds on the burned SCENE clock (input source-local seconds). Measured camera shots: ${JSON.stringify(window.shots)}.
-Compare the live view and each immediate replay for four independently visible phases: setup BEFORE the decisive touch with both actor and ball, actual ball contact, the same ball in flight, and resolved payoff. Choose the clearest COMPLETE single camera view, preferring live when equally complete. For a GOAL ONLY, if no complete live view exists, you may choose one immediate broadcast replay only when you can verify from moving ball, players and sequence that it is the SAME goal; set selectedReplay and sameIncidentVerified true. The replay must itself show the eventual scorer and incoming match ball BEFORE decisive contact, contact, flight and goal-line payoff. A tight goalmouth view can omit the original corner taker but must show the eventual scorer and incoming ball before the header. A claimed goal needs the ball visibly inside the posts after contact; a cut to a reaction is not payoff. For a long corner-and-second-shot sequence, choose the complete second shot from its own setup through payoff. A keeper collecting a through pass is not a save unless a separate visible shot contact occurs before the collection; label the actual observed pass, tackle or reception. Do not join phases from different camera angles, unrelated reactions, or another incident. Do not make a vertical crop or invent coordinates; this selects original-ratio footage only. A later dense tracker and independent rendered crop review still verify geometry. ${previousFailure?`A previous choice at source ${scene.startTime.toFixed(3)}-${scene.endTime.toFixed(3)}s FAILED independent verification (${previousFailure}). Choose a different camera view or a materially wider interval with newly visible phases; never return the same interval on this repair.`:''}
+Compare the live view and each immediate replay for four independently visible phases: setup BEFORE the decisive touch with both actor and ball, actual ball contact, the same ball in flight, and resolved payoff. Choose the clearest COMPLETE single camera view, preferring live when equally complete. For a GOAL ONLY, if no complete live view exists, you may choose one immediate broadcast replay only when you can verify from moving ball, players and sequence that it is the SAME goal; set selectedReplay and sameIncidentVerified true. The replay must itself show the eventual scorer and incoming match ball BEFORE decisive contact, contact, flight and goal-line payoff. A tight goalmouth view can omit the original corner taker but must show the eventual scorer and incoming ball before the header. A claimed goal needs the ball visibly inside the posts after contact; a cut to a reaction is not payoff. For a long corner-and-second-shot sequence, choose the complete second shot from its own setup through payoff. A keeper collecting a through pass is not a save unless a separate visible shot contact occurs before the collection; label the actual observed pass, tackle or reception. Do not join phases from different camera angles, unrelated reactions, or another incident. Do not make a vertical crop or invent coordinates; this selects original-ratio footage only. A later dense tracker and independent rendered crop review still verify geometry. ${previousFailure?`Previous independent review found this failure: ${previousFailure}. Treat those observations as evidence of what failed, then inspect this source video yourself. Choose a different camera view or a materially wider interval with newly visible phases.`:''} Rejected source intervals: ${JSON.stringify(rejectedSourceAngles(scene))}. Do not return one unchanged.
 Return selectionStart, selectionEnd, selectionReason, selectedReplay, sameIncidentVerified, and guide. Include at most six directly observed full-frame semantic anchors WITHIN the chosen interval, but timestamps must remain on the input SCENE clock (not rebased). The guide MUST include an observed setup anchor BEFORE the decisive contact, with BOTH initiating player and match ball visible. An incoming cross approaching a header is setup for that header: identify the jumping player before the touch. Then include that decisive contact, ball flight, and its IMMEDIATE resolved outcome (goalkeeper touch, ball off post, ball wide, goal, block, or controlled reception). Stop after that payoff; do NOT wait through a later scramble or whistle to decide the original shot outcome. Do not label a saved shot as 'reaction' merely because players react later. For multiple consecutive attempts, choose ONE complete decisive attempt rather than inventing one contact from a header and another result from a later volley. Ball and player boxes are normalized [ymin,xmin,ymax,xmax] 0..1000, null if hidden. Do not confuse white boots or spare balls with the moving match ball. A contact actor must actually touch/control this ball. Use the observed sporting outcome, not the provisional label. A real goal must include visible crossing inside the posts; do not downgrade a goal because framing is hard. If no complete view exists, return null selection bounds and honestly explain why. Never certify a crop here.`}],
     config:{responseMimeType:'application/json',responseJsonSchema:{type:'object',
       required:['selectionStart','selectionEnd','selectionReason','selectedReplay','sameIncidentVerified','guide'],properties:{
@@ -101,11 +130,11 @@ export function applyBlockedSelection(scene,window,value,context) {
   const correctedEvent={save:'save',wide:'shot_off_target',over:'shot_off_target',
     blocked:'big_chance',woodwork:'big_chance',pass:'normal_play',
     dribble:'dribble',tackle:'tackle'}[guide.outcome]||scene.eventType;
-  if(scene.sourceReselection&&correctedEvent===scene.eventType) {
-    const leadGain=scene.startTime-absoluteStart;
-    const payoffGain=absoluteEnd-scene.endTime;
-    const overlap=Math.max(0,Math.min(absoluteEnd,scene.endTime)-Math.max(absoluteStart,scene.startTime));
-    const overlapFraction=overlap/Math.min(absoluteEnd-absoluteStart,scene.endTime-scene.startTime);
+  if(correctedEvent===scene.eventType) for(const rejected of rejectedSourceAngles(scene)) {
+    const leadGain=rejected.startTime-absoluteStart;
+    const payoffGain=absoluteEnd-rejected.endTime;
+    const overlap=Math.max(0,Math.min(absoluteEnd,rejected.endTime)-Math.max(absoluteStart,rejected.startTime));
+    const overlapFraction=overlap/Math.min(absoluteEnd-absoluteStart,rejected.endTime-rejected.startTime);
     if(overlapFraction>.65 && (Math.max(leadGain,payoffGain)<.75 || leadGain+payoffGain<1)) {
       const error=new Error('The replacement repeats the independently rejected camera angle without enough new setup or payoff footage.');
       error.code='SOURCE_ANGLE_UNCHANGED';
@@ -133,6 +162,7 @@ export function applyBlockedSelection(scene,window,value,context) {
       previousEnd:incidentEnd,selectedReplay:replay,
       selectedReplayClaim:value.selectedReplay===true,
       replayInferredFromVerifiedTimeline:replay&&value.selectedReplay!==true,
+      rejectedAngles:rejectedSourceAngles(scene),
       reason:value.selectionReason,approvedCropPreserved:false},
     finalCropVerified:undefined,trackingRepairError:undefined};
   selected.semanticSignature=semanticSignature(selected);
