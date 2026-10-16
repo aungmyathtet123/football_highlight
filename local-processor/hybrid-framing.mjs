@@ -104,15 +104,21 @@ export function reviewedHybridPhaseBrief(scene, evidence) {
   const contact=contacts.at(-1);
   const flight=checks.filter(check=>check.phase==='flight' && contact && payoff
     && check.time>=contact.time && check.time<payoff.time).sort((a,b)=>a.time-b.time)[0];
-  if (!setups.length || !contact || !flight || !payoff || setups[0].time>contact.time) return null;
+  if (!setups.length || !contact || !flight || !payoff
+    || setups[0].time > contact.time - .15
+    || payoff.time < contact.time + .15
+    || payoff.time > duration - .05) return null;
   const absolute=time=>+(scene.startTime+time).toFixed(3);
+  const payoffStart=Math.max(contact.time+.15,payoff.time-.25);
+  const payoffEnd=Math.min(duration,Math.max(payoff.time+.35,
+    finite(review.observedOutcome?.time)?review.observedOutcome.time+.25:0));
   return {...scene.trackingBrief, originTime:absolute(setups[0].time),
     contactTime:absolute(contact.time), flightStartTime:absolute(contact.time),
-    handoffTime:absolute(flight.time), payoffStartTime:absolute(payoff.time), payoffEndTime:absolute(payoff.time),
+    handoffTime:absolute(flight.time), payoffStartTime:absolute(payoffStart), payoffEndTime:absolute(payoffEnd),
     annotationStartTime:absolute(Math.max(0,contact.time-.6)),
     annotationEndTime:absolute(Math.min(duration,contact.time+.3)),
     payoffEvidence:scene.trackingBrief?.payoffEvidence ? {...scene.trackingBrief.payoffEvidence,
-      startTime:absolute(payoff.time),endTime:absolute(Math.min(duration,payoff.time+1/8))}:null,
+      startTime:absolute(payoffStart),endTime:absolute(payoffEnd)}:null,
     timingEvidence:'independent_actual_crop_phase_checks'};
 }
 export const HYBRID_REVIEW_SCHEMA = {type:'object',required:[...reviewFlags,'issues','observations','phaseChecks','observedOutcome','keeperContactVisible'],

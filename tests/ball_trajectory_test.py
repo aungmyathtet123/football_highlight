@@ -71,6 +71,18 @@ class TrajectoryTests(unittest.TestCase):
         self.assertGreater(len(observed), 15)
         self.assertTrue(all(item and item["cx"] > .75 for item in list(path.values())[-7:]))
 
+    def test_observed_moving_keeper_lane_guides_flight_without_a_fixed_goal_hint(self):
+        frames=[]
+        for i in range(16):
+            genuine=ball(.55-i*.014,.18)
+            wrong_boot=ball(.52+i*.012,.85)
+            people=[dict(cx=genuine["cx"],y2=.6,pitchSupport=1),
+                    dict(cx=wrong_boot["cx"],y2=.6,pitchSupport=1)]
+            frames.append(dict(frame=i,time=i*.1,people=people,balls=[genuine,wrong_boot],
+                goal_focus_x=.15+i*.003,goal_payoff=i>=8))
+        path=choose_trajectory(frames,.3164,attack_direction="left",contact_time=.35)
+        self.assertTrue(all(item and item["cx"] < .43 for item in list(path.values())[-5:]))
+
     def test_pre_contact_goal_prior_cannot_replace_real_ball_with_goal_side_boot(self):
         frames=[]
         for i in range(8):

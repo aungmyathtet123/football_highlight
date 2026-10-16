@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { HYBRID_TRACKING_VERSION, hybridDetectorScene, providerEvidenceMatches } from '../local-processor/hybrid-tracking-policy.mjs';
 import { reviewedFramingEvent } from '../local-processor/gemini-framing.mjs';
-import { assessHybridFraming, sourceContainEvidence, hybridCropReviewRequest, hybridActionReviewContract } from '../local-processor/hybrid-framing.mjs';
+import { assessHybridFraming, sourceContainEvidence, hybridCropReviewRequest, hybridActionReviewContract, reviewedHybridPhaseBrief } from '../local-processor/hybrid-framing.mjs';
 
 test('finishing setup follows the eventual scorer and incoming ball', () => {
   const contract=hybridActionReviewContract({eventType:'goal'});
@@ -123,6 +123,31 @@ test('the detector scene excludes unverified semantic coordinate hints', () => {
   assert.equal(tracked.trackingBrief.goalFocusX, null);
   assert.equal(tracked.trackingBrief.payoffEvidence, null);
   assert.deepEqual(source.recommendedCrop, [{x: .9}]);
+});
+
+test('a collapsed prior crop clock is discarded before new tracking', () => {
+  const scene={startTime:382.5,endTime:387.354,trackingBrief:{
+    contactTime:382.503,flightStartTime:382.503,
+    payoffStartTime:382.503,payoffEndTime:382.503,attackDirection:'left'}};
+  const prepared=hybridDetectorScene(scene);
+  assert.equal(prepared.trackingBrief.contactTime,undefined);
+  assert.equal(prepared.trackingBrief.payoffStartTime,undefined);
+  assert.equal(prepared.trackingBrief.attackDirection,'left');
+});
+
+test('a real crop review saves a payoff interval rather than one instant', () => {
+  const scene={eventType:'goal',startTime:10,endTime:13,trackingBrief:{}};
+  const phaseChecks=[['setup',.3],['contact',1.2],['flight',1.6],['payoff',2.4]]
+    .map(([phase,time])=>({phase,time,ballVisible:true,playerVisible:true,
+      description:'The match ball and relevant player are clearly visible.'}));
+  const review={passed:true,correctSubject:true,stableCamera:true,outcomeVisible:true,
+    ballFollowed:true,setupVisible:true,contactVisible:true,ballEnteredGoal:true,
+    issues:[],phaseChecks,observedOutcome:{type:'goal',time:2.4,
+      description:'The ball visibly crosses between the posts.'}};
+  const brief=reviewedHybridPhaseBrief(scene,{renderReview:review});
+  assert.ok(brief.payoffEndTime-brief.payoffStartTime>=.5);
+  assert.equal(reviewedHybridPhaseBrief(scene,{renderReview:{...review,
+    phaseChecks:phaseChecks.map(check=>({...check,time:.003}))}}),null);
 });
 
 test('a verified portrait review can correct a selected save to a shot wide', () => {

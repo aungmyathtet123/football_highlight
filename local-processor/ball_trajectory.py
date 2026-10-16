@@ -132,9 +132,12 @@ def choose_trajectory(frames, view_width, output_width=1080, beam_width=24,
                 <=maximum_candidate_diameter(b,f['people'],view_width,output_width,source_aspect)
             for b in f['balls'])]
         for frame in shot:
+            frame_goal_x = frame.get("goal_focus_x")
+            if not isinstance(frame_goal_x, (int, float)) or not math.isfinite(frame_goal_x):
+                frame_goal_x = goal_focus_x
             route_context = (attack_direction in {"left", "right"}
                 and isinstance(contact_time, (int, float))
-                and isinstance(goal_focus_x, (int, float))
+                and isinstance(frame_goal_x, (int, float))
                 and (route_end_time is None or frame['time']<=route_end_time))
             candidates = []
             for ball in frame["balls"]:
@@ -191,7 +194,7 @@ def choose_trajectory(frames, view_width, output_width=1080, beam_width=24,
                     score+=semantic_region_cost(ball,frame)
                 if route_context:
                     strength = payoff_route_strength_at(frame["time"])
-                    horizontal_gap = abs(ball["cx"] - float(goal_focus_x))
+                    horizontal_gap = abs(ball["cx"] - float(frame_goal_x))
                     score += (horizontal_gap * 4.0 + max(0.0, horizontal_gap - .24) * 30.0) * strength
                     if isinstance(goal_focus_y, (int, float)):
                         vertical_gap = abs(ball["cy"] - float(goal_focus_y))
@@ -261,7 +264,7 @@ def choose_trajectory(frames, view_width, output_width=1080, beam_width=24,
                         # path; a goal-side prior before the kick can lock onto
                         # an unrelated boot and lose the scorer.
                         route_strength = payoff_route_strength_at(frame["time"])
-                        horizontal_gap = abs(ball["cx"] - float(goal_focus_x))
+                        horizontal_gap = abs(ball["cx"] - float(frame_goal_x))
                         cost += (horizontal_gap * 4.0 + max(0.0, horizontal_gap - .24) * 30.0) * route_strength
                         if isinstance(goal_focus_y, (int, float)):
                             vertical_gap = abs(ball["cy"] - float(goal_focus_y))

@@ -10,7 +10,8 @@ import numpy as np
 from ultralytics import YOLO
 from football_detection import PersonTracker as MotionPersonTracker, SlicedBallDetector, closeup_people
 from detector_roles import football_classes, reacquisition_hint, touch_distance, broadcast_scale_transition
-from football_action_phase import action_phase
+from football_action_phase import action_phase, action_clock
+from football_source_geometry import goalkeeper_targets
 from tracking_motion import active_joint_fit_in_crop, camera_ownership_phase, constrained_camera, framing_bounds, vertical_framing_bounds, flight_target, visible_in_crop, observed_payoff_box, possession_handoff, goal_outcome_subject, goal_outcome_target, reconcile_goal_destination
 from tracking_cache import ObservationStore, fingerprint, content_fingerprint, scene_key, atomic_json, digest
 from tracking_decode import usable_tracking_checkpoint, normalize_tracking_source
@@ -947,10 +948,8 @@ def build_keyframes(
 def track_moment(person_model, ball_model, capture, moment, media_width, media_height, source_fps, args):
     start, end = float(moment["startTime"]), float(moment["endTime"])
     duration = end - start
-    contact_time = brief_local_time(moment, "contactTime", duration * 0.34)
-    flight_time = brief_local_time(moment, "flightStartTime", duration * 0.38)
-    handoff_time = max(flight_time, brief_local_time(moment, "handoffTime", duration * 0.50))
-    payoff_time = max(handoff_time, brief_local_time(moment, "payoffStartTime", duration * 0.68))
+    contact_time, flight_time, handoff_time, payoff_time = action_clock(
+        moment.get("trackingBrief") or {}, start, end)
     recommended_x = next((item.get("x") for item in moment.get("recommendedCrop", [])
         if isinstance(item, dict) and isinstance(item.get("x"), (int, float))), 0.5)
     semantic_x = float(moment.get("focusX", recommended_x))
@@ -1084,6 +1083,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         # Directly observed semantic opening region is only an association
         # prior. The local detector still owns every direct ball coordinate.
         fallback_x=float(guide_focus)
+    observed_keeper_targets = goalkeeper_targets(observed_frames, attack_direction) if moment.get("eventType") in {"goal", "disallowed_goal", "save", "shot_on_target", "shot_off_target", "big_chance"} else {}
     goal_focus_value = tracking_brief.get("goalFocusX")
     goal_focus_x = clamp(float(goal_focus_value), 0.0, 1.0) if isinstance(goal_focus_value, (int, float)) else None
     payoff_target = (tracking_brief.get("payoffEvidence") or tracking_brief.get("shotDestination") or {}).get("targetBox")
@@ -1121,7 +1121,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         observation["payoff_box"] = observed_payoff_box(moment, observation["time"])
         observation["airborne"] = (moment.get("eventType") in {"goal", "save", "shot_on_target", "shot_off_target", "big_chance"}
             and flight_time <= observation["time"] - start <= payoff_time+.5)
-        observation["goal_focus_x"] = goal_focus_x
+        observation["goal_focus_x"] = observed_keeper_targets.get(observation["frame"], goal_focus_x)
         observation["goal_payoff"] = bool(moment.get("eventType") == "goal" and observation["time"] - start >= payoff_time)
     sampled_frame_numbers = {observation["frame"] for observation in observed_frames}
     observed_by_frame = {observation['frame']:observation for observation in observed_frames}
@@ -1207,6 +1207,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
             origin_candidate_hits = 0
             tracker.reset()
         observed=observed_by_frame.get(frame_number)
+        current_goal_x = observed.get("goal_focus_x", goal_focus_x) if observed is not None else goal_focus_x
         observations = [observed['people'],observed['balls']] if observed is not None else args.observations.get(frame_number)
         if observations is None:
             # Detection is independent of the edit plan and previous guessed ball.
@@ -1356,7 +1357,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         else:
             subject_confidence = 0.0
         planned_goal_x = ((planned_payoff[0] + planned_payoff[2]) / 2
-            if planned_payoff is not None else goal_focus_x)
+            if planned_payoff is not None else current_goal_x)
         ball_near_goal = bool(
             last_ball is not None and isinstance(planned_goal_x, (int, float))
             and abs(last_ball[0] - planned_goal_x) <= max(.10, view_width * .42)
@@ -1377,7 +1378,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         )
         outcome_box = payoff_box or (planned_payoff if goal_handoff_ready else None)
         outcome_subject = goal_outcome_subject(
-            detected_people, outcome_box, goal_focus_x, last_ball
+            detected_people, outcome_box, current_goal_x, last_ball
         ) if goal_mode and phase in {"flight", "payoff"} else None
         observed_keeper_x = None
         if goal_mode and phase in {"flight", "payoff"} and last_ball is not None and outcome_subject is None:
@@ -1406,14 +1407,14 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         target_x, target_y, spread = action_target(
             people, last_ball, camera_active, ball_velocity, continuity_x, view_width, goal_mode, phase
         )
-        if (verified_goal_route and isinstance(goal_focus_x, (int, float))
+        if (verified_goal_route and isinstance(current_goal_x, (int, float))
                 and elapsed >= max(0.0, contact_time - 2.5)):
             # Compose the approaching carrier and the visible goal together,
             # then hand ownership to the goal after contact. This creates one
             # deliberate pan instead of a last-frame snap behind a fast shot.
             route_progress = clamp((elapsed - (contact_time - 2.5)) / 3.15, 0.0, 1.0)
             goal_weight = .42 * route_progress if elapsed < contact_time else min(1.0, .42 + (elapsed - contact_time) / .72)
-            target_x = target_x * (1.0 - goal_weight) + goal_focus_x * goal_weight
+            target_x = target_x * (1.0 - goal_weight) + current_goal_x * goal_weight
         if (verified_goal_route and phase == "setup" and elapsed <= 1.6
                 and (last_ball is None or goal_focus_y is None
                     or abs(last_ball[1] - goal_focus_y) > .14)):
@@ -1421,8 +1422,8 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
             # portrait crop away from Gemini's verified attack-side framing.
             # This is a one-sided safety bound, not a synthetic ball location:
             # a stronger observed trajectory can still lead farther forward.
-            opening_anchor_x = (semantic_x * .65 + goal_focus_x * .35
-                if isinstance(goal_focus_x, (int, float)) else semantic_x)
+            opening_anchor_x = (semantic_x * .65 + current_goal_x * .35
+                if isinstance(current_goal_x, (int, float)) else semantic_x)
             target_x = (max(target_x, opening_anchor_x) if attack_direction == "right"
                 else min(target_x, opening_anchor_x))
         if goal_mode and phase in {"flight", "payoff"} and outcome_box is not None:
@@ -1432,9 +1433,9 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
             # empty grass.
             routed_ball = None if semantic_route_conflict else last_ball
             target_x, target_y = goal_outcome_target(
-                outcome_box, goal_focus_x, outcome_subject, routed_ball, phase, target_x
+                outcome_box, current_goal_x, outcome_subject, routed_ball, phase, target_x
             )
-            context_points = [goal_focus_x]
+            context_points = [current_goal_x]
             if outcome_subject is not None:
                 context_points.extend([outcome_subject["x1"], outcome_subject["x2"]])
             if last_ball is not None and not semantic_route_conflict:
@@ -1515,7 +1516,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
             "pitch_ball": bool(direct_ball and detected.get("pitchSupport", 0.0) >= 0.08) if detected is not None else False,
             "origin_track_id": origin_id, "action_phase": phase, "camera_owner": camera_owner,
             "payoff_box": payoff_box,
-            "goal_focus_x": goal_focus_x if goal_focus_x is not None else observed_keeper_x,
+            "goal_focus_x": current_goal_x if current_goal_x is not None else observed_keeper_x,
             "outcome_subject": outcome_subject,
         })
     scene_zoom = adaptive_scene_zoom(
@@ -1684,7 +1685,7 @@ def main():
         "imageSize": args.image_size, "ballImageSize": args.ball_image_size,
         "confidence": args.confidence, "ballConfidence": args.ball_confidence,
         "sampleFps": args.sample_fps, "coarseSampleFps": args.coarse_sample_fps, "device": args.device}
-    signature = {"detection": detection_signature, "version": 109, "associationVersion": 50, "tacticalSubjects": 4, "compositionVersion": 42, "tracker": args.tracker,
+    signature = {"detection": detection_signature, "version": 110, "associationVersion": 51, "tacticalSubjects": 4, "compositionVersion": 43, "tracker": args.tracker,
         "cameraMotion": args.camera_motion, "zoom": args.zoom,
         "output": [args.output_width, args.output_height, args.window_top, args.window_height],
         "shots": json.loads(Path(args.shots).read_text(encoding="utf-8"))["shots"] if args.shots else None}
