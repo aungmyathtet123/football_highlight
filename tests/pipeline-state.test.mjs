@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { stableSignature, semanticSignature, needsSemanticReview, mergeSemanticReview, incidentManifest, rankIncidentGroups, evidenceReport, parseTrackingProgress, matchingTrackingEvidence, summarizeTracking, localRepairPriority } from "../local-processor/pipeline-state.mjs";
+import { stableSignature, semanticSignature, needsSemanticReview, mergeSemanticReview, incidentManifest, rankIncidentGroups, evidenceReport, parseTrackingProgress, matchingTrackingEvidence, summarizeTracking, localRepairPriority, SEMANTIC_VERIFICATION_VERSION } from "../local-processor/pipeline-state.mjs";
 import { selectDirectorCandidates } from "../local-processor/editorial-policy.mjs";
 import { naturalStoryCapacity, validateAutomaticStory } from "../local-processor/automatic-duration.mjs";
 import { createJobQueue } from "../local-processor/job-queue.mjs";
@@ -155,7 +155,7 @@ test("cached semantic approval preserves a newer framing rejection and edit sett
 });
 test("signatures ignore JSON key ordering", () => assert.equal(stableSignature({b:2,a:1}), stableSignature({a:1,b:2})));
 test("review is reused only for unchanged event evidence", () => {
-  const reviewed = {...goal, semanticVerificationVersion:9, semanticSignature:semanticSignature(goal)};
+  const reviewed = {...goal, semanticVerificationVersion:SEMANTIC_VERIFICATION_VERSION, semanticSignature:semanticSignature(goal)};
   assert.equal(needsSemanticReview(reviewed), false);
   assert.equal(needsSemanticReview({...reviewed, endTime:18}), true);
   assert.equal(needsSemanticReview({...reviewed, description:"A save"}), true);
