@@ -630,11 +630,15 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
         ? `crop=ih*${ratio}:ih:x='max(0,min(iw-ow,iw*(${x})-ow/2))':y=0`
         : `crop=iw:iw/${ratio}:x=0:y='(ih-oh)/2'`;
       const graph=join(folder,'paired-goal-filter.txt');
-      await writeFile(graph,`[0:v]setpts=PTS-STARTPTS,split=2[c][s];[c]${crop},fps=24[cv];[s]fps=24[sv]`);
+      await writeFile(graph,`[0:v]trim=duration=${scene.endTime-scene.startTime},setpts=PTS-STARTPTS,split=2[c][s];[c]${crop},fps=24[cv];[s]fps=24[sv]`);
       await run(ffmpeg,['-hide_banner','-loglevel','error','-y','-ss',String(scene.startTime),'-i',sourcePath,
         '-t',String(scene.endTime-scene.startTime),...await filterGraphArgs(ffmpeg,graph),
         '-map','[cv]','-an','-c:v','libx264','-preset','veryfast','-crf','16',cropVideo,
         '-map','[sv]','-an','-c:v','libx264','-preset','veryfast','-crf','16',sourceVideo]);
+      if(probeVideo) for(const video of [cropVideo,sourceVideo]) {
+        const checked=cropMediaPreflight(scene,await probeVideo(video),24);
+        if(!checked.usable) return {...result,reviewRepairError:`Independent outcome clip failed media check: ${checked.issue}`};
+      }
       try {paired=await generate({model:outcomeModel,contents:[
         {text:'Two synchronized complete clips, starting at scene-local zero: FIRST is the actual portrait delivery, SECOND is its original wide reference. Independently observe the moving match ball and the front goal plane in both; no expected result is supplied.'},
         footballVideoPart((await readFile(cropVideo)).toString('base64'),24),
