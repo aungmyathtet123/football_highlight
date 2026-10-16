@@ -215,7 +215,7 @@ test('a verified portrait review can correct a selected save to a shot wide', ()
   assert.equal(reviewedFramingEvent(scene,evidence),'shot_off_target');
 });
 
-test('a locked goal can be corrected to a directly observed keeper save', () => {
+test('a locked goal needs independent source agreement before becoming a save', () => {
   const scene={eventType:'goal',selectionLocked:true,startTime:20,endTime:27,
     trackingBrief:{contactTime:24,flightStartTime:24.1,payoffStartTime:25.2}};
   const evidence={provider:'hybrid-football',hybridTrackingVersion:HYBRID_TRACKING_VERSION,
@@ -230,6 +230,11 @@ test('a locked goal can be corrected to a directly observed keeper save', () => 
         {phase:'contact',time:4,ballVisible:true,playerVisible:true,description:'Shot contact.'},
         {phase:'flight',time:4.5,ballVisible:true,playerVisible:true,description:'Ball follows shot.'},
         {phase:'payoff',time:5.4,ballVisible:true,playerVisible:true,description:'Keeper deflects ball.'}]}};
+  assert.equal(reviewedFramingEvent(scene,evidence),null);
+  assert.equal(assessHybridFraming(scene,evidence).usable,false);
+  evidence.outcomeComparison={version:1,sameActionVerified:true,
+    sourceSceneStartTime:20,sourceSceneEndTime:27,
+    sourceOutcome:{observedOutcome:'keeper_save',goalLineCrossingVerified:false}};
   assert.equal(reviewedFramingEvent(scene,evidence),'save');
 });
 
@@ -294,5 +299,5 @@ test('a full-source inset cannot approve a 9:16 scene whose crop loses the actio
   const assessment=assessHybridFraming(scene,contained);
   assert.equal(assessment.usable,false);
   assert.equal(assessment.mode,'portrait_full_bleed_required');
-  assert.equal(reviewedFramingEvent(scene,contained),'big_chance');
+  assert.equal(reviewedFramingEvent(scene,contained),null);
 });

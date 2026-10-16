@@ -957,11 +957,16 @@ export function reviewedFramingEvent(scene,evidence) {
   // Never convert an awarded goal into a different event to satisfy framing.
   if(['goal','disallowed_goal'].includes(scene.eventType)) {
     if (outcome.type === 'goal' && review.ballEnteredGoal === true) return scene.eventType;
-    // Step 1 can over-classify a shot from a wide source observation. If the
-    // independently reviewed portrait crop proves a miss/woodwork/blocked
-    // outcome, correct the event instead of stopping Step 2 or narrating a
-    // goal that the actual pixels do not show.
-    return (scene.sourceSelectionEvidence || scene.selectionLocked === true)
+    // A single portrait reviewer can mistake a ball rebounding inside the net
+    // for a save. A locked source goal needs an independent same-action source
+    // verdict before it may be reclassified from the crop's different result.
+    const comparison=evidence?.outcomeComparison,source=comparison?.sourceOutcome;
+    const sourceAgrees=comparison?.version===1 && comparison.sameActionVerified===true
+      && comparison.sourceSceneStartTime===scene.startTime
+      && comparison.sourceSceneEndTime===scene.endTime
+      && source?.observedOutcome===outcome.type
+      && source.goalLineCrossingVerified===false;
+    return sourceAgrees
       ? ({keeper_save:review.keeperContactVisible===true?'save':null,
         woodwork:'big_chance',blocked:'big_chance',wide:'shot_off_target',over:'shot_off_target'}[outcome.type] || null)
       : null;

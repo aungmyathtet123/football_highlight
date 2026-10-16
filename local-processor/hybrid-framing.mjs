@@ -515,6 +515,57 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
       detailed=mergeHybridOutcomeReview(baseReview,finish,window);
       await writeFile(detailPath,JSON.stringify(finish));
     }
+    if(scene.eventType==='goal' && detailed.observedOutcome?.type!=='goal'
+      && baseReview.correctSubject===true && baseReview.ballFollowed===true) {
+      // A diving keeper can hide the goal-line crossing for only two or three
+      // broadcast frames. Reobserve those actual portrait pixels at source
+      // cadence before a locked goal is disputed. The wide view locates the
+      // posts; it cannot supply missing evidence to the delivered crop.
+      const contact=(baseReview.phaseChecks||[]).filter(check=>check.phase==='contact'
+        && finite(check.time)).map(check=>check.time).sort((a,b)=>b-a)[0];
+      const outcome=detailed.observedOutcome?.time;
+      if(finite(contact) && finite(outcome) && outcome>contact+.12
+        && outcome<=scene.endTime-scene.startTime) {
+        const focusStart=Math.max(0,contact-.3,outcome-.8);
+        const focusEnd=Math.min(scene.endTime-scene.startTime,Math.max(outcome+.55,contact+.75));
+        if(focusEnd-focusStart<.5) return {...result,initialRenderReview:review,
+          renderReview:detailed,finalCropVerified:false};
+        const focusedPath=join(folder,'goal-plane-video-review-v1.json');
+        let focused;
+        try {focused=JSON.parse(await readFile(focusedPath,'utf8'));} catch { /* New source-frame observation. */ }
+        if(!focused) {
+          const x=trackedPositionExpression(evidence.keyframes,'cameraX',.5);
+          const crop=media.width/media.height>=ratio
+            ? `crop=ih*${ratio}:ih:x='max(0,min(iw-ow,iw*(${x})-ow/2))':y=0`
+            : `crop=iw:iw/${ratio}:x=0:y='(ih-oh)/2'`;
+          const cropVideo=join(folder,'goal-plane-crop-24fps.mp4');
+          const sourceVideo=join(folder,'goal-plane-source-24fps.mp4');
+          const graph=join(folder,'goal-plane-filter.txt');
+          await writeFile(graph,`[0:v]setpts=PTS-STARTPTS,split=2[c][s];[c]${crop},trim=start=${focusStart}:end=${focusEnd},setpts=PTS-STARTPTS,fps=24[cv];[s]trim=start=${focusStart}:end=${focusEnd},setpts=PTS-STARTPTS,fps=24[sv]`);
+          await run(ffmpeg,['-hide_banner','-loglevel','error','-y','-ss',String(scene.startTime),
+            '-i',sourcePath,'-t',String(scene.endTime-scene.startTime),...await filterGraphArgs(ffmpeg,graph),
+            '-map','[cv]','-an','-c:v','libx264','-preset','veryfast','-crf','16',cropVideo,
+            '-map','[sv]','-an','-c:v','libx264','-preset','veryfast','-crf','16',sourceVideo]);
+          try {focused=await generate({model,contents:[
+            {text:`Examine only this decisive finish at 24fps. Video time zero is scene-local ${focusStart}s. The FIRST video is the actual 9:16 delivery; the SECOND is the synchronized full-width reference for locating both posts and the front goal plane. Neither the source label nor any earlier verdict is evidence.`},
+            footballVideoPart((await readFile(cropVideo)).toString('base64'),24),
+            footballVideoPart((await readFile(sourceVideo)).toString('base64'),24),
+            {text:`Trace the SAME moving ball frame by frame from the final attacking touch through keeper interaction and the earliest resolved result. A ball may pass under a diving keeper into the net and then emerge; a ball may also be parried away without crossing. Distinguish these by the ball's position relative to the FRONT goal plane between the posts, not by a dive, scoreboard or celebration. Record a goal only if that crossing is visible in the FIRST portrait video itself. The second video may identify the plane but cannot supply missing crop visibility. Give contact, post-contact flight and payoff checks with scene-local times between ${focusStart} and ${focusEnd}; set any unobserved check false. Return the full finish review schema. Do not assume either result.`}
+          ],config:{responseMimeType:'application/json',responseJsonSchema:HYBRID_FINISH_REVIEW_SCHEMA,
+            temperature:0,maxOutputTokens:16384,thinkingConfig:{thinkingLevel:'MEDIUM'}}},
+          `hybrid goal plane video ${scene.id}`);} catch(error) {
+            const retryable=error?.name==='AbortError'||error?.cause?.name==='AbortError'
+              ||[408,429,500,502,503,504].includes(Number(error?.status||error?.code));
+            if(!retryable) throw error;
+          }
+          if(focused) await writeFile(focusedPath,JSON.stringify(focused));
+        }
+        if(focused) {
+          try {detailed=mergeHybridOutcomeReview(baseReview,focused,{start:focusStart,end:focusEnd});}
+          catch { /* Retain the conservative prior verdict. */ }
+        }
+      }
+    }
     result.initialRenderReview=review;
     result.renderReview=detailed;
   }
