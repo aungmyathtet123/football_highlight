@@ -23,14 +23,17 @@ const stages: { key: JobStage; label: string; detail: string }[] = [
 
 // Production points this at the public HTTPS origin. Caddy forwards the API
 // paths to the private processor, so browsers never need access to port 8787.
-const processorUrl = (process.env.NEXT_PUBLIC_PROCESSOR_URL || "http://127.0.0.1:8787").replace(/\/+$/, "");
+const processorUrl = (process.env.NEXT_PUBLIC_PROCESSOR_URL || (typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname) ? "http://127.0.0.1:8787" : "")).replace(/\/+$/, "");
+const savedJobKey = "touchline-current-job";
 
 type LocalJob = {
-  id: string; stage: JobStage; progress: number; moments: FootballMoment[];
+  id: string; stage: JobStage | "uploading" | "queued"; progress: number; moments: FootballMoment[];
   progressDetail?: string;
   outputUrl?: string; analysisProvider?: "gemini" | "local_fallback"; warnings?: string[];
   media?: { duration: number }; editPlan?: Record<string, unknown>;
   error?: { code?: string; message: string; retryable?: boolean };
+  sourceName?: string; sourceSize?: number; updatedAt?: string; settings?: EditSettings;
+  trackingProgress?: { approved: number; total: number; needsRepair: number };
 };
 
 type YouTubeChannel = {
@@ -68,14 +71,54 @@ export function VideoStudio() {
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [failureProgress, setFailureProgress] = useState(0);
   const [retrying, setRetrying] = useState(false);
+  const [savedJobs, setSavedJobs] = useState<LocalJob[]>([]);
+  const [sourceName, setSourceName] = useState("");
+  const monitorGeneration = useRef(0);
 
-  const selected = useMemo(() => moments.filter((moment) => moment.selectedForFinalVideo), [moments]);
-  const finalDuration = selected.reduce((sum, moment, index) => {
+  const selected = useMemo(() => moments.filter((moment) => moment.selectedForFinalVideo).sort((a, b) => (a.editOrder ?? a.startTime) - (b.editOrder ?? b.startTime)), [moments]);
+  const estimatedDuration = selected.reduce((sum, moment, index) => {
     const clipDuration = (moment.endTime - moment.startTime) / (moment.playbackRate || 1);
     return sum + clipDuration - (index === 0 ? 0 : moment.transitionDuration || 0);
   }, 0);
 
+  const finalDuration = Number(editPlan?.plannedDuration) || estimatedDuration;
+
   useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl); }, [videoUrl]);
+
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get("job") || window.localStorage.getItem(savedJobKey);
+    if (id && /^[a-f0-9-]{36}$/i.test(id)) void openSavedJob(id);
+    void fetch(`${processorUrl}/jobs`, { cache: "no-store" }).then(async response => {
+      if (response.ok) setSavedJobs((await response.json()).jobs || []);
+    }).catch(() => {});
+    return () => { monitorGeneration.current++; };
+    // Restore once; live progress is owned by monitorJob.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function rememberJob(id: string) {
+    setCurrentJobId(id);
+    window.localStorage.setItem(savedJobKey, id);
+    const url = new URL(window.location.href);
+    url.searchParams.set("job", id);
+    window.history.replaceState(null, "", url);
+  }
+
+  async function openSavedJob(id: string) {
+    rememberJob(id);
+    setProcessingError(null);
+    setView("processing");
+    try { await monitorJob(id); }
+    catch (error) { setProcessingError(error instanceof Error ? error.message : "Could not open the saved project."); }
+  }
+
+  function showUpload() {
+    monitorGeneration.current++;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("job");
+    window.history.replaceState(null, "", url);
+    setView("upload");
+  }
 
   function chooseFile(next: File | undefined) {
     if (!next) return;
@@ -93,16 +136,22 @@ export function VideoStudio() {
     if (job.media?.duration) setSourceDuration(job.media.duration);
     setProcessingError(null);
     setView("result");
+    if (job.sourceName) setSourceName(job.sourceName);
+    if (job.settings?.editStyle) setEditStyle(job.settings.editStyle);
   }
 
   async function monitorJob(id: string) {
+    const generation = ++monitorGeneration.current;
     for (;;) {
       const statusResponse = await fetch(`${processorUrl}/jobs/${id}`, { cache: "no-store" });
       if (!statusResponse.ok) throw new Error("Could not read the saved processing job.");
       const job = await statusResponse.json() as LocalJob;
+      if (generation !== monitorGeneration.current) return;
+      if (job.sourceName) setSourceName(job.sourceName);
       setProgress(job.progress);
-      setProgressDetail(job.progressDetail || "");
+      setProgressDetail([job.progressDetail, job.trackingProgress ? `${job.trackingProgress.approved}/${job.trackingProgress.total} scenes approved; ${job.trackingProgress.needsRepair} need repair.` : ""].filter(Boolean).join(" "));
       setStageIndex(stageIndexFor(job.stage));
+      if (job.stage === "uploading") throw new Error("Upload is incomplete. Choose Review settings and select the same source file to resume.");
       if (job.stage === "failed" || job.stage === "attention_required") {
         setFailureProgress(job.progress);
         throw new Error(job.error?.message || job.progressDetail || "Video processing needs attention.");
@@ -117,6 +166,7 @@ export function VideoStudio() {
 
   async function analyze() {
     if (!file) return;
+    const previousJobId = currentJobId;
     setProgress(0);
     setProgressDetail("");
     setStageIndex(0);
@@ -128,8 +178,41 @@ export function VideoStudio() {
     setFailureProgress(0);
     setView("processing");
     const viral = editStyle === "viral_reel";
-    const settings: EditSettings = { editStyle, durationMode: "auto", recapBrief, targetDuration: viral ? 36 : editStyle === "complete_highlights" ? 60 : 30, durationMin: editStyle === "complete_highlights" ? 60 : 30, aspectRatio: viral ? "4:5" : editStyle === "complete_highlights" ? "16:9" : "9:16", commentary: editStyle === "complete_highlights" ? true : commentary, playerHighlight: highlight, captions, logoMasking, originalAudio: editStyle === "complete_highlights" ? "muted" : audio, intensity };
+    const settings: EditSettings = { editStyle, durationMode: "auto", recapBrief, targetDuration: viral ? 36 : editStyle === "complete_highlights" ? 60 : 30, durationMin: editStyle === "complete_highlights" ? 60 : 30, aspectRatio: "9:16", commentary: editStyle === "complete_highlights" ? true : commentary, playerHighlight: highlight, captions, logoMasking, originalAudio: editStyle === "complete_highlights" ? "muted" : audio, intensity };
     try {
+      const health = await fetch(`${processorUrl}/health`).then(response => response.json());
+      if (health.mode === "cloud_run_job") {
+        const previous = previousJobId ? await fetch(`${processorUrl}/jobs/${previousJobId}`).then(response => response.ok ? response.json() : null) : null;
+        const resumable = previous && ["uploading", "uploaded"].includes(previous.stage) && previous.sourceName === file.name && previous.sourceSize === file.size;
+        const response = await fetch(resumable ? `${processorUrl}/jobs/${previous.id}/upload-session` : `${processorUrl}/uploads/resumable`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fileName: file.name, contentType: file.type || "video/mp4", size: file.size, editSettings: toBase64Url(JSON.stringify(settings)) }) });
+        const created = await response.json();
+        if (!response.ok) throw new Error(created.error || "Could not prepare the upload.");
+        rememberJob(created.id);
+        setSourceName(file.name);
+        const chunkSize = 8 * 1024 * 1024;
+        let uploadedBytes = 0;
+        if (resumable) {
+          const probe = await fetch(created.uploadUrl, { method: "PUT", headers: { "Content-Range": `bytes */${file.size}` }, body: new Blob([]) });
+          if (probe.ok) uploadedBytes = file.size;
+          else if (probe.status === 308) uploadedBytes = Number(probe.headers.get("Range")?.match(/-(\d+)$/)?.[1] || -1) + 1;
+          else throw new Error("The saved upload session expired. Start a new edit with the same source.");
+        }
+        for (let offset = uploadedBytes; offset < file.size; offset += chunkSize) {
+          const end = Math.min(offset + chunkSize, file.size);
+          const upload = await fetch(created.uploadUrl, { method: "PUT", headers: { "Content-Type": file.type || "video/mp4", "Content-Range": `bytes ${offset}-${end - 1}/${file.size}` }, body: file.slice(offset, end) });
+          if (!upload.ok && upload.status !== 308) throw new Error("Upload interrupted. Your project is saved; select the same file to resume.");
+          const progressResponse = await fetch(`${processorUrl}/jobs/${created.id}/upload-progress`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ uploadedBytes: end }) });
+          if (!progressResponse.ok) throw new Error("Could not save the upload progress.");
+          setProgress(Math.max(1, Math.round(end / file.size * 5)));
+          setProgressDetail(`Uploading source: ${Math.round(end / file.size * 100)}%`);
+        }
+        const finalProgress = await fetch(`${processorUrl}/jobs/${created.id}/upload-progress`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ uploadedBytes: file.size }) });
+        if (!finalProgress.ok) throw new Error("Could not confirm the completed source upload.");
+        const start = await fetch(`${processorUrl}/jobs/${created.id}/start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ editSettings: toBase64Url(JSON.stringify(settings)) }) });
+        if (!start.ok) throw new Error((await start.json()).error || "Could not start the saved project.");
+        await monitorJob(created.id);
+        return;
+      }
       const response = await fetch(`${processorUrl}/jobs`, {
         method: "POST", body: file, headers: {
           "Content-Type": file.type || "video/mp4",
@@ -139,7 +222,7 @@ export function VideoStudio() {
       });
       const created = await response.json() as LocalJob & { error?: string };
       if (!response.ok) throw new Error(typeof created.error === "string" ? created.error : "The local processor rejected the upload.");
-      setCurrentJobId(created.id);
+      rememberJob(created.id);
       await monitorJob(created.id);
     } catch (error) {
       setProcessingError(error instanceof Error ? error.message : "The local processor could not be reached.");
@@ -162,10 +245,17 @@ export function VideoStudio() {
         showCompletedJob(job);
         return;
       }
+      if (job.stage === "uploading") {
+        if (file && file.name === job.sourceName && file.size === job.sourceSize) await analyze();
+        else { showUpload(); setProcessingError("Select the same source file to resume the saved upload."); }
+        return;
+      }
+      if (job.stage === "uploaded") {
+        const start = await fetch(`${processorUrl}/jobs/${currentJobId}/start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        if (!start.ok) throw new Error((await start.json()).error || "Could not start the saved source.");
+      }
       if (job.stage === "failed" || job.stage === "attention_required") {
-        const retryKind = job.stage === "attention_required" && job.error?.code === "FIXED_SCENE_FRAMING_PENDING"
-          ? "reselect-blocked"
-          : Number(job.progress || failureProgress) >= 84 ? "retry-render" : "retry-analysis";
+        const retryKind = Number(job.progress || failureProgress) >= 84 ? "retry-render" : "retry-analysis";
         const retryResponse = await fetch(`${processorUrl}/jobs/${currentJobId}/${retryKind}`, { method: "POST" });
         const retryJob = await retryResponse.json() as LocalJob & { error?: string };
         if (!retryResponse.ok && retryResponse.status !== 409) {
@@ -181,23 +271,24 @@ export function VideoStudio() {
   }
 
   function downloadPlan() {
-    if (!file) return;
     const viral = editStyle === "viral_reel";
-    const settings: EditSettings = { editStyle, durationMode: "auto", targetDuration: Number(editPlan?.plannedDuration || (viral ? 36 : 30)), durationMin: 30, aspectRatio: viral ? "4:5" : editStyle === "complete_highlights" ? "16:9" : "9:16", commentary, playerHighlight: highlight, captions, logoMasking, originalAudio: editStyle === "complete_highlights" ? "muted" : audio, intensity };
-    const blob = new Blob([JSON.stringify({ version: 2, source: { name: file.name, duration: sourceDuration }, settings, contentPlan: editPlan, moments: selected }, null, 2)], { type: "application/json" });
+    const settings: EditSettings = { editStyle, durationMode: "auto", targetDuration: Number(editPlan?.plannedDuration || (viral ? 36 : 30)), durationMin: 30, aspectRatio: "9:16", commentary, playerHighlight: highlight, captions, logoMasking, originalAudio: editStyle === "complete_highlights" ? "muted" : audio, intensity };
+    const blob = new Blob([JSON.stringify({ version: 2, source: { name: file?.name || sourceName, duration: sourceDuration }, settings, contentPlan: editPlan, moments: selected }, null, 2)], { type: "application/json" });
     const href = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = href;
-    anchor.download = `${file.name.replace(/\.[^.]+$/, "")}-touchline-edit-plan.json`;
+    anchor.download = `${(file?.name || sourceName || "touchline").replace(/\.[^.]+$/, "")}-touchline-edit-plan.json`;
     anchor.click();
     URL.revokeObjectURL(href);
   }
 
   return (
     <main className="app-shell">
-      <Sidebar view={view} onNew={() => setView("upload")} />
+      <Sidebar view={view} onNew={showUpload} onCurrent={() => { const id = currentJobId || window.localStorage.getItem(savedJobKey) || savedJobs[0]?.id; if (id) void openSavedJob(id); }} />
       <section className="workspace" id="new">
         {view === "upload" && (
+          <>
+          {savedJobs.length > 0 && <section className="saved-projects" aria-label="Saved projects"><h2>Saved projects</h2>{savedJobs.slice(0, 10).map(job => <button className="secondary-button" key={job.id} onClick={() => void openSavedJob(job.id)}>{job.sourceName || job.id} · {job.stage.replaceAll("_", " ")}{job.trackingProgress ? ` · ${job.trackingProgress.approved}/${job.trackingProgress.total} scenes approved` : ""}</button>)}</section>}
           <UploadView
             file={file} videoUrl={videoUrl} inputRef={inputRef} chooseFile={chooseFile} setSourceDuration={setSourceDuration}
             editStyle={editStyle} setEditStyle={(value) => { setEditStyle(value); if (value === "complete_highlights" || value === "viral_reel") { setCommentary(true); setAudio(value === "complete_highlights" ? "muted" : "reduced"); } }}
@@ -205,27 +296,28 @@ export function VideoStudio() {
             highlight={highlight} setHighlight={setHighlight} captions={captions} setCaptions={setCaptions} logoMasking={logoMasking} setLogoMasking={setLogoMasking}
             recapBrief={recapBrief} setRecapBrief={setRecapBrief} audio={audio} setAudio={setAudio} intensity={intensity} setIntensity={setIntensity} analyze={analyze}
           />
+          </>
         )}
-        {view === "processing" && <ProcessingView fileName={file?.name ?? "Match footage"} progress={progress} detail={progressDetail} stageIndex={stageIndex} error={processingError} canResume={Boolean(currentJobId)} retrying={retrying} onRetry={resumeProcessing} onBack={() => setView("upload")} />}
+        {view === "processing" && <ProcessingView fileName={file?.name || sourceName || "Match footage"} progress={progress} detail={progressDetail} stageIndex={stageIndex} error={processingError} canResume={Boolean(currentJobId)} retrying={retrying} onRetry={resumeProcessing} onBack={showUpload} />}
         {view === "result" && (
           <ResultView file={file} videoUrl={outputUrl || videoUrl} outputUrl={outputUrl} warnings={warnings} selected={selected} allMoments={moments} finalDuration={finalDuration}
-            sourceDuration={sourceDuration} videoTitle={typeof editPlan?.title === "string" ? editPlan.title : "Your football story"} editStyle={editStyle} downloadPlan={downloadPlan} jobId={currentJobId} />
+            sourceDuration={sourceDuration} videoTitle={typeof editPlan?.title === "string" ? editPlan.title : "Your football story"} editStyle={editStyle} downloadPlan={downloadPlan} jobId={currentJobId} synchronization={Array.isArray(editPlan?.synchronization) ? editPlan.synchronization : []} />
         )}
       </section>
     </main>
   );
 }
 
-function Sidebar({ view, onNew }: { view: View; onNew: () => void }) {
+function Sidebar({ view, onNew, onCurrent }: { view: View; onNew: () => void; onCurrent: () => void }) {
   return <aside className="sidebar">
     <button className="brand brand-button" onClick={onNew} aria-label="Touchline AI home"><span className="brand-mark"><span /></span><span>Touchline<span className="brand-accent">AI</span></span></button>
     <nav className="nav-list" aria-label="Main navigation">
       <button className={`nav-item ${view === "upload" ? "active" : ""}`} onClick={onNew}><span className="nav-icon">＋</span> New edit</button>
-      <button className={`nav-item ${view !== "upload" ? "active" : ""}`}><span className="nav-icon">▱</span> Current project</button>
+      <button className={`nav-item ${view !== "upload" ? "active" : ""}`} onClick={onCurrent}><span className="nav-icon">▱</span> Current project</button>
     </nav>
     <div className="sidebar-spacer" />
     <button className="nav-item sidebar-button"><span className="nav-icon">?</span> Processing guide</button>
-    <div className="account-card"><div className="avatar">T</div><div><strong>Creator workspace</strong><span>Local preview</span></div><button aria-label="Account menu">•••</button></div>
+    <div className="account-card"><div className="avatar">T</div><div><strong>Creator workspace</strong><span>Football studio</span></div><button aria-label="Account menu">•••</button></div>
   </aside>;
 }
 
@@ -254,14 +346,14 @@ function UploadView(props: UploadProps) {
           {file ? <><h2>{file.name}</h2><p>{formatBytes(file.size)} · Ready to analyze</p><button className="choose-button" onClick={() => inputRef.current?.click()}>Replace video</button></> : <><h2>Drop your match footage here</h2><p>We’ll scan the full video and find the moments worth watching.</p><button className="choose-button" onClick={() => inputRef.current?.click()}>Choose video</button><span className="file-hint">MP4, MOV or WebM · up to 2 GB</span></>}
         </div>
         <div className="trust-row"><span><i>✓</i> Full-video analysis</span><span><i>✓</i> Private processing</span><span><i>✓</i> One finished edit</span></div>
-        <div className={`format-preview ${viral ? "reel-format" : ""}`}><div className="phone-frame"><div className="pitch-lines"><span>{complete ? "16:9" : viral ? "4:5" : "9:16"}</span></div></div><div><span className="mini-label">OUTPUT FORMAT</span><h3>{complete ? "16:9 original football analysis" : viral ? "Compact 4:5 viral reel" : "Full-screen 9:16 tactical analysis"}</h3><p>{complete ? "Uses only necessary action evidence under continuous original narration, with live tactical networks, freezes, telestration and captions. This strengthens the analytical purpose but cannot guarantee fair use or prevent claims." : "The frame is filled edge to edge while the smart crop follows the ball, active player and nearby action."}</p><div className="spec-row"><span>{complete ? "1920 × 1080" : viral ? "1080 × 1350" : "1080 × 1920"}</span><span>{complete ? "Adaptive · evidence-led" : "30+ sec · AI selected"}</span><span>MP4</span></div></div></div>
+        <div className={`format-preview ${viral ? "reel-format" : ""}`}><div className="phone-frame"><div className="pitch-lines"><span>9:16</span></div></div><div><span className="mini-label">OUTPUT FORMAT</span><h3>Full-screen 9:16 football analysis</h3><p>{complete ? "Uses only necessary action evidence under continuous original narration, with live tactical networks, freezes, telestration and captions. This strengthens the analytical purpose but cannot guarantee fair use or prevent claims." : "The frame is filled edge to edge while the smart crop follows the ball, active player and nearby action."}</p><div className="spec-row"><span>1080 × 1920</span><span>{complete ? "Adaptive · evidence-led" : "30+ sec · AI selected"}</span><span>MP4</span></div></div></div>
       </section>
       <aside className="settings-card" aria-label="Edit settings">
         <div className="settings-heading"><div><span className="mini-label">YOUR EDIT</span><h2>Settings</h2></div><button className="reset-button" onClick={() => { setEditStyle("complete_highlights"); setCommentary(true); setHighlight(true); setCaptions(true); setLogoMasking(true); setAudio("muted"); setIntensity("dynamic"); setRecapBrief(""); }}>Reset</button></div>
         <Setting label="Edit style" note="Choose the storytelling system"><div className="segmented two">{(["complete_highlights", "tactical_analysis"] as EditStyle[]).map((value) => <button key={value} className={editStyle === value ? "selected" : ""} onClick={() => { setEditStyle(value); if (value === "complete_highlights" || value === "viral_reel") { setCommentary(true); setAudio(value === "complete_highlights" ? "muted" : "reduced"); } }}>{value === "complete_highlights" ? "Analysis recap" : "Tactical"}</button>)}</div></Setting>
         {complete && <Setting label="Recap request" note="Optional · natural language"><textarea className="recap-brief" value={recapBrief} maxLength={320} rows={3} onChange={(event) => setRecapBrief(event.target.value)} placeholder="Create a 2-minute recap covering every goal and explain why the result happened." /><small className="recap-hint">Describe any match, duration, score or angle. Teams, scores and players are verified externally before use.</small></Setting>}
         <Setting label="Adaptive highlight length" note={complete ? "Based on source duration" : "At least 30 seconds"}><p>{complete ? "Keeps every verified goal, removes downtime, and caps 5–7 minute sources at 2 minutes and long sources at 4–5 minutes." : "AI chooses the best complete moments and lets the story set the length."}</p></Setting>
-        <Setting label="Aspect ratio" note="Stable full-frame output"><div className="select-row"><span><b className="ratio-icon" /> {complete ? "16:9 Native" : viral ? "4:5 Social" : "9:16 Vertical"}</span></div></Setting>
+        <Setting label="Aspect ratio" note="Stable full-frame output"><div className="select-row"><span><b className="ratio-icon" /> 9:16 Vertical</span></div></Setting>
         <div className="toggle-group"><Toggle label="AI commentary" detail={complete ? "Required evidence-specific criticism and analysis" : viral ? "Short analysis mixed over quieter match sound" : "Replaces the source audio with analysis narration"} checked={complete || commentary} disabled={complete} onChange={(value) => { setCommentary(value); if (value) setAudio(viral ? "reduced" : "muted"); }} /><Toggle label="Player highlight" detail="Large thick red circle on the verified active player only" checked={highlight} onChange={setHighlight} /><Toggle label="Captions" detail="Sparse bold story captions" checked={captions} onChange={setCaptions} /><Toggle label="Logo / watermark masking" detail="Blur authorized persistent overlays" checked={logoMasking} onChange={setLogoMasking} /></div>
         <Setting label="Source audio" note={complete ? "Broadcast commentary and source music are always removed" : commentary ? (viral ? "Ducked beneath the analysis voice" : "Muted while AI commentary is enabled") : "Match sound level"}><div className="segmented three">{(["normal", "reduced", "muted"] as AudioMode[]).map((value) => <button key={value} disabled={complete || (!viral && commentary)} className={(complete ? value === "muted" : audio === value) ? "selected" : ""} onClick={() => setAudio(value)}>{titleCase(value)}</button>)}</div></Setting>
         <Setting label="Editing intensity" note="Pacing and effects"><div className="segmented three">{(["natural", "dynamic", "high_energy"] as Intensity[]).map((value) => <button key={value} className={intensity === value ? "selected" : ""} onClick={() => setIntensity(value)}>{value === "high_energy" ? "High energy" : titleCase(value)}</button>)}</div></Setting>
@@ -277,20 +369,26 @@ function ProcessingView({ fileName, progress, detail, stageIndex, error, canResu
     <header className="topbar"><div><div className="eyebrow"><span className="pulse-dot" /> PROCESSING PROJECT</div><h1>Building your edit</h1></div><div className="step-indicator"><span>2</span> AI processing</div></header>
     <div className="processing-card">
       <div className="processing-visual"><div className="scan-field"><div className="scan-line" /><span className="tracked-player one" /><span className="tracked-player two" /><span className="tracked-ball" /></div><div className="percent">{progress}<small>%</small></div></div>
-      <div className="processing-copy"><span className="mini-label">{fileName}</span><h2>{error ? "Processing paused" : stages[stageIndex].label}</h2><p role="status" aria-live="polite">{error || detail || `${stages[stageIndex].detail}. Keep the local processor running.`}</p>{error && <div className="retry-actions"><button className="primary-compact" disabled={retrying} onClick={onRetry}>{retrying ? "Resuming..." : canResume ? "Resume saved job" : "Retry upload"}</button><button className="secondary-button" disabled={retrying} onClick={onBack}>Review settings</button></div>}<div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
+      <div className="processing-copy"><span className="mini-label">{fileName}</span><h2>{error ? "Processing paused" : stages[stageIndex].label}</h2><p role="status" aria-live="polite">{error || detail || `${stages[stageIndex].detail}. Your progress is saved.`}</p>{error && <div className="retry-actions"><button className="primary-compact" disabled={retrying} onClick={onRetry}>{retrying ? "Resuming..." : canResume ? "Resume saved job" : "Retry upload"}</button><button className="secondary-button" disabled={retrying} onClick={onBack}>Review settings</button></div>}<div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
         <ol className="stage-list">{stages.map((stage, index) => <li key={stage.key} className={index < stageIndex ? "done" : index === stageIndex ? "current" : ""}><i>{index < stageIndex ? "✓" : index + 1}</i><span><strong>{stage.label}</strong><small>{stage.detail}</small></span></li>)}</ol>
       </div>
     </div>
   </div>;
 }
 
-type ResultProps = { file: File | null; videoUrl: string | null; outputUrl: string | null; warnings: string[]; selected: FootballMoment[]; allMoments: FootballMoment[]; finalDuration: number; sourceDuration: number; videoTitle: string; editStyle: EditStyle; downloadPlan: () => void; jobId: string | null };
+type ResultProps = { file: File | null; videoUrl: string | null; outputUrl: string | null; warnings: string[]; selected: FootballMoment[]; allMoments: FootballMoment[]; finalDuration: number; sourceDuration: number; videoTitle: string; editStyle: EditStyle; downloadPlan: () => void; jobId: string | null; synchronization: { momentId: string; sceneIds?: string[]; visualStart: number }[] };
 
-function ResultView({ file, videoUrl, outputUrl, warnings, selected, allMoments, finalDuration, sourceDuration, videoTitle, editStyle, downloadPlan, jobId }: ResultProps) {
+function ResultView({ file, videoUrl, outputUrl, warnings, selected, allMoments, finalDuration, sourceDuration, videoTitle, editStyle, downloadPlan, jobId, synchronization }: ResultProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [copied, setCopied] = useState<"title" | "hashtags" | "all" | null>(null);
   const hashtags = publishingHashtags(selected, editStyle);
-  function seek(moment: FootballMoment) { if (videoRef.current) { videoRef.current.currentTime = moment.startTime; void videoRef.current.play(); } }
+  function seek(moment: FootballMoment) {
+    if (!videoRef.current) return;
+    const cut = synchronization.find(cut => cut.momentId === moment.id || cut.sceneIds?.includes(moment.id));
+    if (outputUrl && !cut) return;
+    videoRef.current.currentTime = outputUrl ? cut!.visualStart : moment.startTime;
+    void videoRef.current.play().catch(() => {});
+  }
   async function copyPublishingText(kind: "title" | "hashtags" | "all") {
     const text = kind === "title" ? videoTitle : kind === "hashtags" ? hashtags : `${videoTitle}\n\n${hashtags}`;
     try {
@@ -313,8 +411,8 @@ function ResultView({ file, videoUrl, outputUrl, warnings, selected, allMoments,
     <header className="topbar result-topbar"><div><div className="eyebrow"><span className="pulse-dot" /> EDIT READY</div><h1>{videoTitle}</h1></div><div className="result-actions"><button className="secondary-button" onClick={downloadPlan}>Download edit plan</button>{outputUrl && <a className="primary-compact" href={outputUrl} download={`${file?.name.replace(/\.[^.]+$/, "") || "touchline"}-vertical.mp4`}>Download MP4 ↓</a>}</div></header>
     <div className="result-grid">
       <section className="preview-panel">
-        <div className="preview-stage"><div className={`vertical-video ${editStyle === "complete_highlights" ? "landscape-video" : ""}`}>{videoUrl ? <video ref={videoRef} src={videoUrl} controls playsInline><track kind="captions" label="Captions are included when generated" /></video> : <div className="video-fallback">Preview unavailable</div>}</div></div>
-        <div className="preview-note"><span className="status-pill"><i /> Render complete</span><span>{outputUrl ? `This is the locally rendered ${editStyle === "complete_highlights" ? "16:9 analysis" : "9:16"} MP4.` : "Rendered preview unavailable."}</span></div>
+        <div className="preview-stage"><div className="vertical-video">{videoUrl ? <video ref={videoRef} src={videoUrl} controls playsInline><track kind="captions" label="Captions are included when generated" /></video> : <div className="video-fallback">Preview unavailable</div>}</div></div>
+        <div className="preview-note"><span className="status-pill"><i /> Render complete</span><span>{outputUrl ? "Your finished full-screen 9:16 video." : "Rendered preview unavailable."}</span></div>
         {warnings.map((warning) => <div className="preview-note" key={warning}><span>{warning}</span></div>)}
       </section>
       <aside className="timeline-panel">
@@ -325,7 +423,7 @@ function ResultView({ file, videoUrl, outputUrl, warnings, selected, allMoments,
           <button className="moment-main" onClick={() => seek(moment)}><span><b>{formatTime(moment.startTime)}–{formatTime(moment.endTime)}</b><em>{moment.eventType.replaceAll("_", " ")}</em></span><strong>{moment.description}</strong><small>{moment.commentary ?? "No commentary generated"}</small></button>
           <div className="score"><b>{moment.importanceScore}</b><small>SCORE</small></div>
         </article>)}</div>
-        <div className="summary-strip"><span><small>SOURCE</small><b>{formatTime(sourceDuration)}</b></span><span><small>FINAL</small><b>{formatTime(finalDuration)}</b></span><span><small>FORMAT</small><b>{editStyle === "complete_highlights" ? "16:9" : "9:16"} MP4</b></span></div>
+        <div className="summary-strip"><span><small>SOURCE</small><b>{formatTime(sourceDuration)}</b></span><span><small>FINAL</small><b>{formatTime(finalDuration)}</b></span><span><small>FORMAT</small><b>9:16 MP4</b></span></div>
       </aside>
     </div>
     <section className="publishing-card" aria-labelledby="publishing-title">
@@ -336,7 +434,7 @@ function ResultView({ file, videoUrl, outputUrl, warnings, selected, allMoments,
       </div>
       {outputUrl && jobId && <YouTubePublishingPanel jobId={jobId} videoTitle={videoTitle} hashtags={hashtags} />}
     </section>
-    <div className="render-banner"><div><span className="mini-label">PRIVATE LOCAL OUTPUT</span><strong>{file?.name}</strong><p>The source, job data and finished video are stored only in this project&apos;s local-data folder.</p></div>{outputUrl ? <a href={outputUrl} download>Download MP4</a> : <button onClick={downloadPlan}>Export JSON plan</button>}</div>
+    <div className="render-banner"><div><span className="mini-label">PRIVATE OUTPUT</span><strong>{file?.name}</strong><p>Your source, saved progress and finished video stay in this private workspace.</p></div>{outputUrl ? <a href={outputUrl} download>Download MP4</a> : <button onClick={downloadPlan}>Export JSON plan</button>}</div>
   </div>;
 }
 
@@ -435,7 +533,7 @@ function formatTime(seconds: number) { const safe = Number.isFinite(seconds) ? M
 function titleCase(value: string) { return value.charAt(0).toUpperCase() + value.slice(1); }
 function formatSubscribers(value: number) { return new Intl.NumberFormat(undefined, { notation: value >= 1000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value || 0); }
 function publishingHashtags(moments: FootballMoment[], editStyle: EditStyle) {
-  const events = new Set(moments.map((moment) => moment.eventType));
+  const events = new Set<string>(moments.map((moment) => moment.eventType));
   const tags = ["#GoalVision", "#Football", "#FootballHighlights", "#MatchRecap", "#FootballAnalysis"];
   if (events.has("goal") || events.has("disallowed_goal")) tags.push("#Goals");
   if (events.has("save")) tags.push("#Goalkeeper");
@@ -444,5 +542,5 @@ function publishingHashtags(moments: FootballMoment[], editStyle: EditStyle) {
   if (editStyle === "tactical_analysis") tags.push("#TacticalAnalysis");
   return [...new Set(tags)].join(" ");
 }
-function stageIndexFor(stage: JobStage) { const index = stages.findIndex((item) => item.key === stage); if (index >= 0) return index; if (stage === "ranking") return stages.findIndex((item) => item.key === "aligning_content"); return stages.length - 1; }
+function stageIndexFor(stage: LocalJob["stage"]) { const index = stages.findIndex((item) => item.key === stage); if (index >= 0) return index; if (["uploading", "uploaded", "queued"].includes(stage)) return 0; if (stage === "ranking") return stages.findIndex((item) => item.key === "aligning_content"); return stages.length - 1; }
 function toBase64Url(value: string) { const bytes = new TextEncoder().encode(value); let binary = ""; bytes.forEach((byte) => { binary += String.fromCharCode(byte); }); return window.btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""); }
