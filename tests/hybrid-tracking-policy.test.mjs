@@ -2,7 +2,38 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { HYBRID_TRACKING_VERSION, hybridDetectorScene, providerEvidenceMatches } from '../local-processor/hybrid-tracking-policy.mjs';
 import { reviewedFramingEvent } from '../local-processor/gemini-framing.mjs';
-import { assessHybridFraming, sourceContainEvidence, hybridCropReviewRequest } from '../local-processor/hybrid-framing.mjs';
+import { assessHybridFraming, sourceContainEvidence, hybridCropReviewRequest, hybridActionReviewContract } from '../local-processor/hybrid-framing.mjs';
+
+test('finishing setup follows the eventual scorer and incoming ball', () => {
+  const contract=hybridActionReviewContract({eventType:'goal'});
+  assert.match(contract,/eventual shooter or header player with the incoming moving match ball BEFORE/);
+  assert.match(contract,/earlier assister or cross taker may be off-screen/);
+  assert.match(contract,/clip beginning at or after decisive contact still fails setup/);
+});
+
+test('verified header phases can correct source timing without the original cross taker', () => {
+  const scene={eventType:'goal',startTime:10,endTime:12.5,
+    trackingBrief:{originTime:10,contactTime:10.75,flightStartTime:10.75,
+      payoffStartTime:12,payoffEndTime:12.5}};
+  const times=[0,.25,.58,.83,1.17,2];
+  const phases=['setup','setup','contact','flight','payoff','payoff'];
+  const evidence={provider:'hybrid-football',hybridTrackingVersion:HYBRID_TRACKING_VERSION,
+    sourceStartTime:10,sourceEndTime:12.5,
+    sourceRecords:times.map((time,index)=>({time,action_phase:phases[index],
+      direct_ball:true,ball_x:.5,ball_y:.4,player_track_id:index<2?1:null,
+      player_x1:.45,player_x2:.55,player_top:.2,player_bottom:.8})),
+    keyframes:times.map(time=>({time,cameraX:.5,cropBox:[0,0,1,1]})),
+    renderReview:{passed:true,correctSubject:true,stableCamera:true,outcomeVisible:true,
+      ballFollowed:true,setupVisible:true,contactVisible:true,ballEnteredGoal:true,
+      keeperContactVisible:false,issues:[],observedOutcome:{type:'goal',time:1.17,
+        description:'The headed ball crosses between the posts.'},
+      observations:[{time:.25,description:'Scorer and incoming ball are visible before the header.'},
+        {time:1.17,description:'The ball crosses into the goal.'}],
+      phaseChecks:[['setup',.25],['contact',.58],['flight',.83],['payoff',1.17]]
+        .map(([phase,time])=>({phase,time,ballVisible:true,playerVisible:true,
+          description:'The relevant player and moving match ball are visible.'}))}};
+  assert.equal(assessHybridFraming(scene,evidence).usable,true);
+});
 
 test('a hybrid run never reuses Gemini-generated camera coordinates', () => {
   const oldVisualRepair = {
