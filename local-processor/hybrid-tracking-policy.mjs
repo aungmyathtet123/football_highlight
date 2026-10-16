@@ -34,6 +34,8 @@ export function providerEvidenceMatches(provider, evidence) {
   if (!evidence) return false;
   if (provider === 'gemini') return evidence.provider === 'gemini-vision';
   if (provider === 'hybrid') return evidence.provider === 'hybrid-football'
-    && evidence.hybridTrackingVersion === HYBRID_TRACKING_VERSION;
+    && (evidence.hybridTrackingVersion === HYBRID_TRACKING_VERSION
+      || evidence.hybridTrackingVersion === 6 && evidence.finalCropVerified === true
+        && evidence.layoutMode !== 'source_contain' && evidence.renderReview?.passed === true);
   return evidence.provider !== 'gemini-vision' && evidence.provider !== 'hybrid-football';
 }

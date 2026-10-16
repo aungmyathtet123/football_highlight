@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { HYBRID_TRACKING_VERSION, hybridDetectorScene, providerEvidenceMatches } from '../local-processor/hybrid-tracking-policy.mjs';
 import { reviewedFramingEvent } from '../local-processor/gemini-framing.mjs';
-import { assessHybridFraming, sourceContainEvidence, hybridCropReviewRequest, hybridActionReviewContract, reviewedHybridPhaseBrief } from '../local-processor/hybrid-framing.mjs';
+import { assessHybridFraming, sourceContainEvidence, hybridCropReviewRequest, hybridActionReviewContract, reviewedHybridPhaseBrief, needsHybridOpeningDetail, applyHybridOpeningDetail } from '../local-processor/hybrid-framing.mjs';
 
 test('finishing setup follows the eventual scorer and incoming ball', () => {
   const contract=hybridActionReviewContract({eventType:'goal'});
@@ -104,6 +104,14 @@ test('a hybrid run accepts only current native tracker evidence', () => {
   assert.equal(providerEvidenceMatches('hybrid', {
     provider: 'hybrid-football', hybridTrackingVersion: HYBRID_TRACKING_VERSION - 1,
   }), false);
+  assert.equal(providerEvidenceMatches('hybrid', {
+    provider:'hybrid-football',hybridTrackingVersion:6,finalCropVerified:true,
+    layoutMode:'action',renderReview:{passed:true},
+  }),true);
+  assert.equal(providerEvidenceMatches('hybrid', {
+    provider:'hybrid-football',hybridTrackingVersion:6,finalCropVerified:false,
+    layoutMode:'action',renderReview:{passed:true},
+  }),false);
 });
 
 test('the detector scene excludes unverified semantic coordinate hints', () => {
@@ -148,6 +156,33 @@ test('a real crop review saves a payoff interval rather than one instant', () =>
   assert.ok(brief.payoffEndTime-brief.payoffStartTime>=.5);
   assert.equal(reviewedHybridPhaseBrief(scene,{renderReview:{...review,
     phaseChecks:phaseChecks.map(check=>({...check,time:.003}))}}),null);
+});
+
+test('positive finish with missing setup timestamp gets a separate opening observation', () => {
+  const scene={eventType:'goal',startTime:10,endTime:12.5,
+    trackingBrief:{contactTime:10.5,flightStartTime:10.5,payoffStartTime:11.5,payoffEndTime:12.5}};
+  const times=[.1,.3,.5,.8,1.5,2];
+  const evidence={provider:'hybrid-football',hybridTrackingVersion:HYBRID_TRACKING_VERSION,
+    sourceStartTime:10,sourceEndTime:12.5,
+    sourceRecords:times.map((time,index)=>({time,action_phase:index<2?'setup':index<3?'contact':index<4?'flight':'payoff',
+      direct_ball:true,ball_x:.5,ball_y:.5,player_track_id:index>1?1:null,
+      player_x1:.4,player_x2:.6,player_top:.2,player_bottom:.8})),
+    keyframes:times.map(time=>({time,cameraX:.5,cropBox:[.34,0,.66,1]})),
+    renderReview:{passed:true,correctSubject:true,stableCamera:true,outcomeVisible:true,
+      ballFollowed:true,setupVisible:true,contactVisible:true,ballEnteredGoal:true,issues:[],
+      observedOutcome:{type:'goal',time:1.5,description:'The ball clearly enters the goal.'},
+      observations:[{time:.5,description:'The attacker touches the ball.'},
+        {time:1.5,description:'The ball enters the net.'}],
+      phaseChecks:[{phase:'contact',time:.5,ballVisible:true,playerVisible:true,description:'Touch'},
+        {phase:'flight',time:.8,ballVisible:true,playerVisible:true,description:'Flight'},
+        {phase:'payoff',time:1.5,ballVisible:true,playerVisible:true,description:'Goal'}]}};
+  assert.equal(needsHybridOpeningDetail(scene,evidence),true);
+  const reviewed=applyHybridOpeningDetail(evidence.renderReview,{setupVisible:true,setupTime:.3,
+    description:'The finisher controls the moving match ball before the touch.'},.5,2.5);
+  assert.equal(reviewed.phaseChecks.at(-1).phase,'setup');
+  assert.equal(assessHybridFraming(scene,{...evidence,renderReview:reviewed}).usable,true);
+  assert.equal(applyHybridOpeningDetail(evidence.renderReview,{setupVisible:false,setupTime:null,
+    description:'No ball is identifiable.'},.5,2.5).passed,false);
 });
 
 test('a verified portrait review can correct a selected save to a shot wide', () => {

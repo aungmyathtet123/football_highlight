@@ -4076,6 +4076,7 @@ async function prepareIncidentEvidence(sourcePath, candidates, media, id, option
       const evidence=trackingEvidenceFor(tracking,scene);
       return !providerEvidenceMatches(activeKeyframeProvider,evidence)
         || evidence?.layoutMode === 'source_contain'
+        || evidence?.hybridTrackingVersion !== HYBRID_TRACKING_VERSION && evidence?.finalCropVerified !== true
         || !hybridEvidenceWindowMatches(scene,evidence)
         || !Array.isArray(evidence.sourceRecords) || !evidence.sourceRecords.length
         || !Array.isArray(evidence.keyframes) || evidence.keyframes.length!==evidence.sourceRecords.length;

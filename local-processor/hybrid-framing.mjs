@@ -248,7 +248,9 @@ export function assessHybridFraming(scene, evidence) {
   // inset proves the source action, but cannot approve the delivered crop.
   if (evidence.layoutMode === 'source_contain')
     return { usable: false, mode: 'portrait_full_bleed_required', issues: ['portrait_full_bleed_required'] };
-  if (evidence.hybridTrackingVersion !== HYBRID_TRACKING_VERSION)
+  if (evidence.hybridTrackingVersion !== HYBRID_TRACKING_VERSION
+    && !(evidence.hybridTrackingVersion === 6 && evidence.finalCropVerified === true
+      && evidence.renderReview?.passed === true))
     return { usable: false, mode: 'hybrid_cache_version_mismatch' };
   if (evidence.reviewRepairError)
     return { usable: false, mode: 'hybrid_review_unavailable', issues: [evidence.reviewRepairError] };
@@ -335,6 +337,28 @@ export function needsHybridPhaseDetail(scene, evidence) {
     && assessment.issues.every(issue=>/^unobserved_(?:contact|flight|payoff)_gap$/.test(issue));
 }
 
+export function needsHybridOpeningDetail(scene,evidence) {
+  const review=evidence?.renderReview;
+  if (!review || review.passed!==true || review.setupVisible!==true
+    || review.issues?.length || (review.phaseChecks||[]).some(check=>check.phase==='setup'
+      && check.ballVisible===true && check.playerVisible===true)) return false;
+  const assessment=assessHybridFraming(scene,evidence);
+  return assessment.usable===false && assessment.issues?.length===1
+    && assessment.issues[0]==='unobserved_setup_gap';
+}
+
+export function applyHybridOpeningDetail(review,detail,contact,duration) {
+  const observed=detail?.setupVisible===true && finite(detail.setupTime)
+    && detail.setupTime>=0 && detail.setupTime<contact-.05
+    && detail.setupTime<=duration && typeof detail.description==='string'
+    && detail.description.trim().length>=12;
+  if (!observed) return {...review,passed:false,setupVisible:false,
+    issues:[...new Set([...(review.issues||[]),'opening_setup_unobserved'])]};
+  return {...review,phaseChecks:[...(review.phaseChecks||[]),{
+    phase:'setup',time:detail.setupTime,ballVisible:true,playerVisible:true,
+    description:detail.description.trim()}]};
+}
+
 // Shared by production and the bounded, video-only quality canary. The canary
 // must inspect exactly the same pixels, contract and detail as production.
 export function hybridCropReviewRequest({model,scene,videoData,geometryIssues=[],detail=[],videoOnly=true,presentationMode='portrait_crop'}) {
@@ -409,16 +433,48 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
     await writeFile(reviewPath, JSON.stringify(review));
   }
   result.renderReview = review;
+  if(videoOnly && needsHybridOpeningDetail(scene,result)) {
+    const openingPath=join(folder,'opening-video-review-v1.json');
+    const contact=(review.phaseChecks||[]).filter(check=>check.phase==='contact'
+      && finite(check.time)).sort((a,b)=>a.time-b.time)[0]?.time;
+    const duration=scene.endTime-scene.startTime;
+    if(finite(contact) && contact>.12) {
+      let detail;
+      try {detail=JSON.parse(await readFile(openingPath,'utf8'));} catch { /* New opening observation. */ }
+      if(!detail) {
+        const x=trackedPositionExpression(evidence.keyframes,'cameraX',.5);
+        const crop=media.width/media.height>=ratio
+          ? `crop=ih*${ratio}:ih:x='max(0,min(iw-ow,iw*(${x})-ow/2))':y=0`
+          : `crop=iw:iw/${ratio}:x=0:y='(ih-oh)/2'`;
+        const video=join(folder,'opening-crop.mp4');
+        await run(ffmpeg,['-hide_banner','-loglevel','error','-y','-ss',String(scene.startTime),
+          '-i',sourcePath,'-t',String(Math.min(duration,contact+.15)),
+          '-vf',`${crop},fps=24`,'-an','-c:v','libx264','-preset','veryfast','-crf','18',video]);
+        detail=await generate({model,contents:[
+          footballVideoPart((await readFile(video)).toString('base64'),24),
+          {text:`Inspect ONLY this actual 9:16 portrait opening, with scene-local time starting at zero. The independently observed decisive touch is at ${contact}s. Before that touch, is the SAME moving match ball visibly identifiable together with the eventual touching player? A distant earlier passer, white boot, spare ball, or off-screen action does not count. Return setupVisible=true only if both are identifiable BEFORE ${contact-.05}s, with the exact scene-local setupTime and a concrete description. Otherwise return false with setupTime=-1. Do not judge or alter the later outcome.`}
+        ],config:{responseMimeType:'application/json',responseJsonSchema:{type:'object',
+          required:['setupVisible','setupTime','description'],properties:{
+            setupVisible:{type:'boolean'},setupTime:{type:'number'},description:{type:'string'}}},
+          temperature:0,maxOutputTokens:1024,thinkingConfig:{thinkingLevel:'MEDIUM'}}},
+        `hybrid crop opening video ${scene.id}`);
+        await writeFile(openingPath,JSON.stringify(detail));
+      }
+      result.initialRenderReview=review;
+      result.renderReview=applyHybridOpeningDetail(review,detail,contact,duration);
+    }
+  }
   const phaseDetail=videoOnly && needsHybridPhaseDetail(scene,result);
-  if(videoOnly && (needsCropOutcomeDetail(scene,review) || phaseDetail)) {
+  const baseReview=result.renderReview;
+  if(videoOnly && (needsCropOutcomeDetail(scene,baseReview) || phaseDetail)) {
     // A goal/non-goal disagreement is an outcome ambiguity, not a reason to
     // repeat scene selection, run another tracker or reuse the same verdict.
     // Inspect one higher-temporal-detail finish from this exact crop and source.
     // The wide reference establishes the goal plane, never crop visibility.
     const detailPath=join(folder,phaseDetail?'phase-video-review-v2.json':'outcome-video-review-v3.json');
-    const window=hybridOutcomeVideoWindow(scene,review);
+    const window=hybridOutcomeVideoWindow(scene,baseReview);
     let detailed;
-    try {detailed=mergeHybridOutcomeReview(review,JSON.parse(await readFile(detailPath,'utf8')),window);} catch { /* New finish evidence. */ }
+    try {detailed=mergeHybridOutcomeReview(baseReview,JSON.parse(await readFile(detailPath,'utf8')),window);} catch { /* New finish evidence. */ }
     if(!detailed) {
       const {start,end}=window;
       const cropVideo=join(folder,'finish-crop.mp4'),sourceVideo=join(folder,'finish-source.mp4');
@@ -456,7 +512,7 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
         result.finalCropVerified=false;
         return result;
       }
-      detailed=mergeHybridOutcomeReview(review,finish,window);
+      detailed=mergeHybridOutcomeReview(baseReview,finish,window);
       await writeFile(detailPath,JSON.stringify(finish));
     }
     result.initialRenderReview=review;
