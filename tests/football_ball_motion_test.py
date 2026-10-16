@@ -2,11 +2,17 @@ import sys
 import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'local-processor'))
-from football_ball_motion import coherent_motion_path
+from football_ball_motion import coherent_motion_path, wide_motion_view
 from ball_trajectory import choose_trajectory
 
 
 class BallMotionTests(unittest.TestCase):
+    def test_closeup_replay_cannot_use_tiny_wide_shot_motion_rules(self):
+        def people(height):
+            return [dict(y1=.3,y2=.3+height,confidence=.8,pitchSupport=.8) for _ in range(8)]
+        self.assertTrue(wide_motion_view(people(.10)))
+        self.assertFalse(wide_motion_view(people(.33)))
+
     def test_fast_ball_survives_stronger_slow_boot_and_detection_gaps(self):
         frames=[]
         for index in range(16):

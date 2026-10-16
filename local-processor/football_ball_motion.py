@@ -8,6 +8,12 @@ import cv2
 import numpy as np
 
 
+def wide_motion_view(people):
+    sizes = sorted(person['y2']-person['y1'] for person in people
+        if person.get('pitchSupport',0)>=.08 and person.get('confidence',0)>=.3)
+    return len(sizes)>=4 and sizes[len(sizes)//2]<.18 and sizes[-1]<.32
+
+
 def coherent_motion_path(frames, minimum_hits=5):
     """Keep a sustained fast trajectory, rather than isolated white pixels."""
     tracks = []
@@ -98,7 +104,7 @@ def observe_ball_motion(capture, observations, source_fps, start, end):
         height, width = frame.shape[:2]
         people = min(observations,key=lambda value:abs(value['time']-time))['people']
         # This pitch-background method is deliberately limited to wide views.
-        if cut or len(people)<4:
+        if cut or not wide_motion_view(people):
             samples.append({'time':time,'balls':[],'cut':cut})
             previous = frame
             continue
