@@ -46,6 +46,14 @@ class TrajectoryTests(unittest.TestCase):
         self.assertIsNotNone(choose_trajectory([frame],.3164)[0])
         self.assertIsNone(choose_trajectory([{**frame,"airborne":False}],.3164)[0])
 
+    def test_confident_closeup_ball_can_approach_a_header_above_the_pitch(self):
+        incoming={**ball(.5,.92), 'cy':.12,'y1':.116,'y2':.124,
+            'pitchSupport':0,'closeupBall':True,'roleDetector':True}
+        frame=dict(frame=0,time=0,people=[],balls=[incoming],airborne=False)
+        self.assertIsNotNone(choose_trajectory([frame],.3164)[0])
+        weak={**incoming,'confidence':.2}
+        self.assertIsNone(choose_trajectory([{**frame,'balls':[weak]}],.3164)[0])
+
     def test_future_evidence_avoids_temporary_distant_false_ball(self):
         frames=[dict(frame=i,time=i*.1,people=[],balls=[ball(.2+i*.003)]+([ball(.8,.8)] if i<3 else [])) for i in range(20)]
         path=choose_trajectory(frames,.3164)

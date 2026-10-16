@@ -127,7 +127,8 @@ def choose_trajectory(frames, view_width, output_width=1080, beam_width=24,
         beam = [(0.0, None, 0.0, None)]
         shot_start_time = shot[0]["time"] if shot else 0.0
         role_times=[f['time'] for f in shot if any(b.get('roleDetector') is True
-            and b['confidence']>=.35 and b.get('pitchSupport',0)>=.1
+            and b['confidence']>=.35 and (b.get('pitchSupport',0)>=.1
+                or b.get('closeupBall') is True and b['confidence']>=.6)
             and 4<=candidate_diameter(b,view_width,output_width,source_aspect)
                 <=maximum_candidate_diameter(b,f['people'],view_width,output_width,source_aspect)
             for b in f['balls'])]
@@ -158,7 +159,8 @@ def choose_trajectory(frames, view_width, output_width=1080, beam_width=24,
                     continue
                 near = min((math.hypot(ball["cx"] - p["cx"], (ball["cy"] - p["y2"]) * .52)
                             for p in frame["people"] if p.get("pitchSupport", 0) >= .08), default=1)
-                if ball.get("pitchSupport", 0) < .1 and near > .11 and not frame.get("airborne"):
+                if (ball.get("pitchSupport", 0) < .1 and near > .11 and not frame.get("airborne")
+                    and not (ball.get('closeupBall') is True and ball['confidence']>=.6)):
                     continue
                 payoff = frame.get("payoff_box")
                 if payoff and not (payoff[0] <= ball["cx"] <= payoff[2] and payoff[1] <= ball["cy"] <= payoff[3]):
@@ -202,7 +204,8 @@ def choose_trajectory(frames, view_width, output_width=1080, beam_width=24,
                 return score
 
             has_role_ball=any(b.get('roleDetector') is True and b['confidence']>=.35
-                and b.get('pitchSupport',0)>=.1 for b,_ in candidates)
+                and (b.get('pitchSupport',0)>=.1 or b.get('closeupBall') is True
+                    and b['confidence']>=.6) for b,_ in candidates)
             role_context=has_role_ball or any(abs(frame['time']-t)<=.85 for t in role_times)
             def detector_cost(ball):
                 region = frame.get('motion_ball_region')

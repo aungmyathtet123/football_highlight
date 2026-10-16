@@ -8,7 +8,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from ultralytics import YOLO
-from football_detection import PersonTracker as MotionPersonTracker, SlicedBallDetector, closeup_people
+from football_detection import PersonTracker as MotionPersonTracker, SlicedBallDetector, closeup_people, closeup_balls
 from detector_roles import football_classes, reacquisition_hint, touch_distance, broadcast_scale_transition
 from football_action_phase import action_phase, action_clock
 from football_source_geometry import goalkeeper_targets, on_target_keeper_handoff
@@ -1034,6 +1034,28 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
             observations=[[*observations[0],*extra],observations[1]]
         else:
             opening_closeup=False
+        body_sizes=sorted(p['y2']-p['y1'] for p in observations[0] if p.get('confidence',0)>=.3)
+        if opening_closeup or body_sizes and body_sizes[-1]>=.18:
+            extra=args.closeup_ball_observations.get(number)
+            if extra is None:
+                model_path=Path(args.model).parent/'yolo11n.pt'
+                if args.closeup_model is None and model_path.exists():
+                    args.closeup_model=bind_detector_cpu_threads(YOLO(str(model_path)),args.cpu_threads)
+                extra={'balls':closeup_balls(args.closeup_model,frame,args.device),
+                    'people':closeup_people(args.closeup_model,frame,args.device)} if args.closeup_model is not None else {'balls':[],'people':[]}
+                hsv=cv2.cvtColor(frame,cv2.COLOR_BGR2HSV)
+                for ball in extra['balls']:
+                    ball['pitchSupport']=pitch_support(hsv,ball['cx'],ball['cy'],
+                        max(.018,(ball['x2']-ball['x1'])*3.5),max(.022,(ball['y2']-ball['y1'])*3.5))
+                for person in extra['people']:
+                    person['pitchSupport']=max(
+                        pitch_support(hsv,person['cx'],min(.995,person['y2']+.008),.025,.02),
+                        pitch_support(hsv,max(.02,person['x1']-.04),person['cy'],.025,.04),
+                        pitch_support(hsv,min(.98,person['x2']+.04),person['cy'],.025,.04))
+                args.closeup_ball_observations.put(number,extra)
+            observations=[extra['people'] if len(extra['people'])>=2 else observations[0],
+                [*observations[1],*extra['balls']]]
+            opening_closeup=bool(extra['people'])
         region=observed_search_region(guide_anchors, elapsed)
         if needs_detail_search(observations[1],region):
             detail=args.detail_observations.get(number)
@@ -1724,7 +1746,7 @@ def main():
         "imageSize": args.image_size, "ballImageSize": args.ball_image_size,
         "confidence": args.confidence, "ballConfidence": args.ball_confidence,
         "sampleFps": args.sample_fps, "coarseSampleFps": args.coarse_sample_fps, "device": args.device}
-    signature = {"detection": detection_signature, "version": 111, "associationVersion": 52, "tacticalSubjects": 4, "compositionVersion": 44, "tracker": args.tracker,
+    signature = {"detection": detection_signature, "version": 112, "associationVersion": 53, "tacticalSubjects": 4, "compositionVersion": 44, "tracker": args.tracker,
         "cameraMotion": args.camera_motion, "zoom": args.zoom,
         "output": [args.output_width, args.output_height, args.window_top, args.window_height],
         "shots": json.loads(Path(args.shots).read_text(encoding="utf-8"))["shots"] if args.shots else None}
@@ -1733,6 +1755,8 @@ def main():
     args.detail_observations=ObservationStore(cache_dir / 'guided-observations.sqlite', {})
     closeup_path=Path(args.model).parent/'yolo11n.pt'
     args.opening_observations=ObservationStore(cache_dir/'opening-observations.sqlite',
+        [detection_signature,2,fingerprint(closeup_path) if closeup_path.exists() else None])
+    args.closeup_ball_observations=ObservationStore(cache_dir/'closeup-ball-observations.sqlite',
         [detection_signature,2,fingerprint(closeup_path) if closeup_path.exists() else None])
     args.closeup_model=None
     args.shot_frames = None

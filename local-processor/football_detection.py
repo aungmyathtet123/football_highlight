@@ -36,6 +36,27 @@ def closeup_people(model, frame, device='cpu'):
     return people
 
 
+def closeup_balls(model, frame, device='cpu'):
+    """Use the general sports-ball model at foreground replay scale."""
+    _, _, classes = football_classes(model.names)
+    if not classes:
+        return []
+    result = model.predict(frame, classes=classes, conf=.12, imgsz=1280,
+        max_det=24, device=device, verbose=False)[0]
+    if result.boxes is None:
+        return []
+    height,width = frame.shape[:2]
+    output=[]
+    for box,score in zip(result.boxes.xyxy.cpu().numpy(),result.boxes.conf.cpu().numpy()):
+        x1,y1,x2,y2=box/np.array([width,height,width,height])
+        if not (0<x2-x1<=.13 and 0<y2-y1<=.16):
+            continue
+        output.append(dict(x1=float(x1),y1=float(y1),x2=float(x2),y2=float(y2),
+            cx=float((x1+x2)/2),cy=float((y1+y2)/2),confidence=float(score),
+            roleDetector=True,closeupBall=True,observationMethod='general_closeup_ball_detector'))
+    return output
+
+
 class PersonTracker:
     """Associate players after compensating for broadcast camera motion."""
     def __init__(self, sample_fps=10, method="tracktrack", camera_motion="sparseOptFlow"):
