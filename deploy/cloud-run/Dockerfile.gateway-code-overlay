@@ -1,8 +1,6 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 WORKDIR /app
-COPY app/video-studio.tsx ./app/video-studio.tsx
-COPY lib/video/types.ts ./lib/video/types.ts
 COPY deploy/cloud-run/gateway.mjs ./deploy/cloud-run/gateway.mjs
-RUN npm run build
+RUN node --check deploy/cloud-run/gateway.mjs
 CMD ["node", "deploy/cloud-run/gateway.mjs"]

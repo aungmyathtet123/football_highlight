@@ -80,8 +80,8 @@ http.createServer(async (request, response) => {
     if (request.method === "POST" && uploadProgressMatch) return saveUploadProgress(request, response, uploadProgressMatch[1]);
     const startMatch = url.pathname.match(/^\/jobs\/([a-f0-9-]{36})\/start$/i);
     if (request.method === "POST" && startMatch) return startJob(request, response, startMatch[1], false);
-    const retryMatch = url.pathname.match(/^\/jobs\/([a-f0-9-]{36})\/(?:retry-analysis|retry-render)$/i);
-    if (request.method === "POST" && retryMatch) return startJob(request, response, retryMatch[1], true);
+    const retryMatch = url.pathname.match(/^\/jobs\/([a-f0-9-]{36})\/(retry-analysis|retry-render)$/i);
+    if (request.method === "POST" && retryMatch) return startJob(request, response, retryMatch[1], true, false, retryMatch[2]);
     const reselectMatch = url.pathname.match(/^\/jobs\/([a-f0-9-]{36})\/reselect-blocked$/i);
     if (request.method === "POST" && reselectMatch) return startJob(request, response, reselectMatch[1], true, true);
     const jobMatch = url.pathname.match(/^\/jobs\/([a-f0-9-]{36})$/i);
@@ -300,11 +300,13 @@ async function createResumableSession({ sourceObject, contentType, size, origin 
   return uploadUrl;
 }
 
-async function startJob(request, response, id, retry, reselectBlocked=false) {
+async function startJob(request, response, id, retry, reselectBlocked=false, retryAction='') {
   let status = await readJsonObject(`jobs/${id}.json`);
   if (!status) return json(response, 404, { error: "Job not found" });
   if (!retry && status.stage !== "uploaded") return json(response, 409, { error: status.stage === "uploading" ? "Finish uploading the source before starting this job." : "This job has already been started." });
-  if (retry && !['failed','attention_required'].includes(status.stage)) return json(response, 409, { error: "This job is already running or waiting for its automatic retry." });
+  if (retry && !['failed','attention_required'].includes(status.stage)
+    && !(status.stage === 'completed' && retryAction === 'retry-analysis'))
+    return json(response, 409, { error: "This job is already running or waiting for its automatic retry." });
   if (reselectBlocked && (status.stage !== 'attention_required' || !status.checkpointObject))
     return json(response, 409, {error:'Source action repair requires a saved scene checkpoint needing attention.'});
   if (reselectBlocked && !await objectExists(status.checkpointObject))
@@ -347,6 +349,7 @@ async function startJob(request, response, id, retry, reselectBlocked=false) {
       ["JOB_ID", id], ["STORAGE_BUCKET", bucket], ["SOURCE_OBJECT", sourceObject],
       ["SOURCE_NAME", status.sourceName], ["SOURCE_CONTENT_TYPE", status.sourceContentType || "video/mp4"],
       ["EDIT_SETTINGS", status.editSettings || ""], ["RESUME_MODE", retry ? "checkpoint" : "fresh"],
+      ["RESUME_ACTION", retryAction],
       ["SOURCE_RESELECTION_REQUESTED", reselectBlocked ? "true" : "false"],
       ["SOURCE_RESELECTION_FEEDBACK", reselectBlocked ? JSON.stringify(repairFeedback):""],
     ]);
