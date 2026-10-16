@@ -75,6 +75,10 @@ test('reselecting a failed replay searches from the original live incident and k
   const replacement=applyBlockedSelection(first,window,next,context);
   assert.equal(replacement.sourceReselection.previousStart,10);
   assert.equal(sourceTimelineStart(replacement),10);
+  const mislabeled=applyBlockedSelection(first,window,{...next,selectedReplay:false},context);
+  assert.equal(mislabeled.isReplay,true);
+  assert.equal(mislabeled.sourceReselection.replayInferredFromVerifiedTimeline,true);
+  assert.equal(mislabeled.sourceReselection.selectedReplayClaim,false);
 });
 
 test('a keeper collecting a pass cannot be certified as a shot save',()=>{

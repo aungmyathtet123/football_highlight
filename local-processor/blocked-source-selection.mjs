@@ -87,9 +87,17 @@ export function applyBlockedSelection(scene,window,value,context) {
   const absoluteStart=+(window.startTime+start).toFixed(6);
   // Stop once this chosen action resolves; a later scramble/second attempt
   // is not padding for the first shot. Reactions have their own saved scenes.
-  const selectedEnd=Math.min(end,payoff.time+(guide.outcome==='goal'?1.25:.75));
+  const selectedEnd=Math.min(end,payoff.time+.75);
   const absoluteEnd=+(window.startTime+selectedEnd).toFixed(6);
-  const replay=value.selectedReplay===true;
+  const incidentStart=scene.sourceReselection?.previousStart??scene.startTime;
+  const incidentEnd=scene.sourceReselection?.previousEnd??scene.endTime;
+  // The bounded later-replay search can return a verified same-goal angle
+  // while mislabeling the replay boolean. Its source position after the live
+  // incident and the explicit same-incident verdict establish replay status.
+  const replay=value.selectedReplay===true || (scene.eventType==='goal'
+    &&scene.sourceReselection?.selectedReplay===true
+    &&value.sameIncidentVerified===true
+    &&absoluteStart>=incidentEnd&&absoluteStart<=incidentEnd+30);
   const correctedEvent={save:'save',wide:'shot_off_target',over:'shot_off_target',
     blocked:'big_chance',woodwork:'big_chance',pass:'normal_play',
     dribble:'dribble',tackle:'tackle'}[guide.outcome]||scene.eventType;
@@ -104,8 +112,6 @@ export function applyBlockedSelection(scene,window,value,context) {
       throw error;
     }
   }
-  const incidentStart=scene.sourceReselection?.previousStart??scene.startTime;
-  const incidentEnd=scene.sourceReselection?.previousEnd??scene.endTime;
   if(replay && (scene.eventType!=='goal'||value.sameIncidentVerified!==true
     ||absoluteStart<incidentEnd||absoluteStart>incidentEnd+30))
     throw new Error('A replay must independently match the selected goal immediately after its live view.');
@@ -124,7 +130,10 @@ export function applyBlockedSelection(scene,window,value,context) {
   const selected={...decision.scene,selectionLocked:true,sceneSelectionApproved:true,
     sourceAngleSelected:true,sourceAngleDeferred:false,keepDecision:'keep',
     sourceReselection:{version:BLOCKED_SELECTION_VERSION,previousStart:incidentStart,
-      previousEnd:incidentEnd,selectedReplay:replay,reason:value.selectionReason,approvedCropPreserved:false},
+      previousEnd:incidentEnd,selectedReplay:replay,
+      selectedReplayClaim:value.selectedReplay===true,
+      replayInferredFromVerifiedTimeline:replay&&value.selectedReplay!==true,
+      reason:value.selectionReason,approvedCropPreserved:false},
     finalCropVerified:undefined,trackingRepairError:undefined};
   selected.semanticSignature=semanticSignature(selected);
   return selected;
