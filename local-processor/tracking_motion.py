@@ -135,7 +135,10 @@ def framing_bounds(record, view_width, prefer_center=True):
     # travelling. Do not impose a second, narrower center constraint on a
     # released ball merely because the estimated phase changed to payoff.
     # The target objective still follows it; hard crop-edge containment stays.
-    if prefer_center and (phase in {"setup", "contact"} or phase == "payoff" and record.get("possession") is True):
+    measured_fast_flight = (phase in {'flight','payoff'} and record.get('direct_ball') is True
+        and record.get('ball_observation_method') == 'camera_compensated_motion')
+    if prefer_center and (phase in {"setup", "contact"} or phase == "payoff" and record.get("possession") is True
+            or measured_fast_flight):
         central_low = max(half, ball - view_width * .25)
         central_high = min(1 - half, ball + view_width * .25)
         centered_low = max(low, central_low)
@@ -389,7 +392,7 @@ def _solve_shot_path(targets, times, bounds, max_speed, max_acceleration):
     return [max(low, min(high, float(value))) for value, (low, high) in zip(result.x, bounds)]
 
 
-def constrained_camera(targets, records, view_width, max_speed=0.32, axis="x"):
+def constrained_camera(targets, records, view_width, max_speed=0.32, axis="x", speed_ceiling=.35):
     """Offline look-ahead: project smooth targets into per-frame visible bounds.
 
     Expand reachable intervals backwards so pans start before a fast pass reaches
@@ -470,7 +473,7 @@ def constrained_camera(targets, records, view_width, max_speed=0.32, axis="x"):
             # safe subject interval at the original speed. Do not sacrifice
             # visibility or remove a scene simply to keep the ball centred.
             for candidate_bounds in (shot_bounds,containment_bounds[start:end]):
-                for speed, acceleration_limit in ((min(.35,max_speed),.75),(min(.35,max_speed*1.5),1.25)):
+                for speed, acceleration_limit in ((min(speed_ceiling,max_speed),.75),(min(speed_ceiling,max_speed*1.5),1.25)):
                     solved = _solve_shot_path(shot_targets,shot_times,candidate_bounds,speed,acceleration_limit)
                     if solved is not None:
                         break
@@ -482,7 +485,7 @@ def constrained_camera(targets, records, view_width, max_speed=0.32, axis="x"):
                 # abandoning both constraints then caused avoidable fast pans.
                 # Acceleration remains penalized in the objective even here.
                 solved = _solve_shot_path(shot_targets,shot_times,
-                    containment_bounds[start:end],min(.35,max_speed*1.6),None)
+                    containment_bounds[start:end],min(speed_ceiling,max_speed*1.6),None)
             if solved is None:
                 for speed,acceleration_limit in ((max_speed*2.5,2.25),(None,None)):
                     solved=_solve_shot_path(shot_targets,shot_times,containment_bounds[start:end],speed,acceleration_limit)

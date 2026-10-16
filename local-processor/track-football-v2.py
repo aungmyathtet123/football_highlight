@@ -767,9 +767,13 @@ def build_keyframes(
         camera_y_targets, times, resets, [record["action_phase"] for record in records],
         0.5, half_y, sample_fps
     )
+    measured_fast_flight = sum(record.get('ball_observation_method')=='camera_compensated_motion'
+        and record.get('direct_ball') is True and record.get('motion_track_samples',0)>=5
+        for record in records)>=3
     camera_x = constrained_camera(
         smoothed_x_targets, records, crop_width / media_width,
-        max_speed=.22, axis="x",
+        max_speed=.4 if measured_fast_flight else .22, axis="x",
+        speed_ceiling=.65 if measured_fast_flight else .35,
     )
     camera_y = constrained_camera(
         smoothed_y_targets, records, crop_height / media_height,
@@ -1034,7 +1038,10 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
             observations=[[*observations[0],*extra],observations[1]]
         else:
             opening_closeup=False
-        body_sizes=sorted(p['y2']-p['y1'] for p in observations[0] if p.get('confidence',0)>=.3)
+        # A weak wide-shot role response still reveals the source's scale.
+        # The independent general detector must judge the foreground body;
+        # filtering that scale hint by role confidence hid incoming headers.
+        body_sizes=sorted(p['y2']-p['y1'] for p in observations[0])
         if opening_closeup or body_sizes and body_sizes[-1]>=.18:
             extra=args.closeup_ball_observations.get(number)
             if extra is None:
@@ -1746,7 +1753,7 @@ def main():
         "imageSize": args.image_size, "ballImageSize": args.ball_image_size,
         "confidence": args.confidence, "ballConfidence": args.ball_confidence,
         "sampleFps": args.sample_fps, "coarseSampleFps": args.coarse_sample_fps, "device": args.device}
-    signature = {"detection": detection_signature, "version": 112, "associationVersion": 53, "tacticalSubjects": 4, "compositionVersion": 44, "tracker": args.tracker,
+    signature = {"detection": detection_signature, "version": 113, "associationVersion": 53, "tacticalSubjects": 4, "compositionVersion": 45, "tracker": args.tracker,
         "cameraMotion": args.camera_motion, "zoom": args.zoom,
         "output": [args.output_width, args.output_height, args.window_top, args.window_height],
         "shots": json.loads(Path(args.shots).read_text(encoding="utf-8"))["shots"] if args.shots else None}

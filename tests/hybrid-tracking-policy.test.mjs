@@ -2,7 +2,37 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { HYBRID_TRACKING_VERSION, hybridDetectorScene, providerEvidenceMatches } from '../local-processor/hybrid-tracking-policy.mjs';
 import { reviewedFramingEvent } from '../local-processor/gemini-framing.mjs';
-import { assessHybridFraming, sourceContainEvidence, hybridCropReviewRequest, hybridActionReviewContract, reviewedHybridPhaseBrief, needsHybridOpeningDetail, applyHybridOpeningDetail } from '../local-processor/hybrid-framing.mjs';
+import { assessHybridFraming, sourceContainEvidence, hybridCropReviewRequest, hybridActionReviewContract, reviewedHybridPhaseBrief, needsHybridOpeningDetail, applyHybridOpeningDetail, mergeHybridOutcomeReview, hybridGeometry } from '../local-processor/hybrid-framing.mjs';
+
+test('a faster portrait pan needs sustained native flight and still retains the ball',()=>{
+  const scene={startTime:0,endTime:1,trackingBrief:{contactTime:.1,payoffStartTime:.3,payoffEndTime:1}};
+  const records=Array.from({length:5},(_,index)=>({time:index*.1,ball_x:.4+index*.045,ball_y:.5,
+    direct_ball:true,action_phase:'flight',scene_cut:false}));
+  const keyframes=records.map(record=>({cameraX:record.ball_x,cropBox:[record.ball_x-.158,0,record.ball_x+.158,1]}));
+  const evidence={sourceRecords:records,keyframes};
+  assert.equal(hybridGeometry(scene,evidence).usable,false);
+  const measured={...evidence,sourceRecords:records.map(record=>({...record,
+    ball_observation_method:'camera_compensated_motion',motion_track_samples:10}))};
+  assert.equal(hybridGeometry(scene,measured).usable,true);
+  measured.sourceRecords[2].ball_x=.05;
+  assert.ok(hybridGeometry(scene,measured).violations.includes('observed_ball_outside_safe_crop'));
+});
+
+test('a finish excerpt preserves independently observed setup inside its time window',()=>{
+  const setup={phase:'setup',time:.5,ballVisible:true,playerVisible:true,
+    description:'Incoming ball and eventual header player are jointly visible.'};
+  const earlier={passed:true,correctSubject:true,stableCamera:true,outcomeVisible:true,
+    ballFollowed:true,setupVisible:true,contactVisible:true,ballEnteredGoal:false,
+    observations:[],issues:[],phaseChecks:[setup]};
+  const finish={passed:true,correctSubject:true,stableCamera:true,outcomeVisible:true,
+    ballFollowed:true,contactVisible:true,ballEnteredGoal:false,keeperContactVisible:false,
+    observations:[],issues:[],observedOutcome:{type:'wide',time:1.75,description:'Ball passes outside the post.'},
+    phaseChecks:[{phase:'contact',time:.75,ballVisible:true,playerVisible:true,description:'The header contact is visible.'}]};
+  const merged=mergeHybridOutcomeReview(earlier,finish,{start:.25,end:2.25});
+  assert.deepEqual(merged.phaseChecks.find(check=>check.phase==='setup'),setup);
+  assert.equal(merged.passed,true);
+  assert.equal(mergeHybridOutcomeReview({...earlier,setupVisible:false},finish,{start:.25,end:2.25}).passed,false);
+});
 
 test('finishing setup follows the eventual scorer and incoming ball', () => {
   const contract=hybridActionReviewContract({eventType:'goal'});

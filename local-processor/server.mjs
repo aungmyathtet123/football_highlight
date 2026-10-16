@@ -6511,6 +6511,7 @@ async function trackFootball(sourcePath, moments, media, id, options = {}) {
         ratio: trackingOutputWidth / trackingOutputHeight,
         directory: join(directory, "hybrid-review"), ffmpeg: ffmpegPath, run,probeVideo:probe,
         model: fastTracking.enabled ? fastTracking.reviewModel : process.env.GEMINI_KEYFRAME_MODEL || process.env.GEMINI_MODEL,
+        outcomeModel:process.env.GEMINI_OUTCOME_REVIEW_MODEL || process.env.GEMINI_MODEL || fastTracking.reviewModel,
         videoOnly:fastTracking.enabled,
         generate: async (request, label) => (await generateGeminiJson(ai, request, label)).parsed });
     }
@@ -6790,6 +6791,7 @@ async function verifyHybridScene(sourcePath,scene,media,id,evidence) {
     scene,evidence,media,ratio:dimensions.width/dimensions.height,
     directory:join(outputRoot,id,'tracking','hybrid-review'),ffmpeg:ffmpegPath,run,probeVideo:probe,
     model:fastTracking.reviewModel,videoOnly:true,
+    outcomeModel:process.env.GEMINI_OUTCOME_REVIEW_MODEL || process.env.GEMINI_MODEL || fastTracking.reviewModel,
     generate:async(request,label)=>(await generateGeminiJson(ai,request,label)).parsed});
   if(observed.finalCropVerified && scene.sourceSceneAsset) {
     observed.portraitSceneAsset=await savePortraitSceneAsset({scene,

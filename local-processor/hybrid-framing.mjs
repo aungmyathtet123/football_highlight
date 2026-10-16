@@ -157,7 +157,8 @@ export function mergeHybridOutcomeReview(earlier,finish,{start,end}) {
     ...Object.fromEntries(preserved.map(key=>[key,earlier[key]===true&&finish[key]===true])),
     issues:[...new Set([...(earlier.issues||[]),...finish.issues])],
     observations:[...earlier.observations.filter(check=>finite(check.time)&&check.time<start),...finish.observations],
-    phaseChecks:[...earlier.phaseChecks.filter(check=>finite(check.time)&&check.time<start&&check.phase!=='payoff'),...finish.phaseChecks]};
+    phaseChecks:[...earlier.phaseChecks.filter(check=>finite(check.time)
+      && (check.phase==='setup' || check.time<start&&check.phase!=='payoff')),...finish.phaseChecks]};
   combined.passed=finish.passed===true&&combined.setupVisible===true
     &&preserved.every(key=>combined[key]===true)&&combined.issues.length===0;
   return normalizeHybridReview(combined);
@@ -217,11 +218,15 @@ export function hybridGeometry(scene, evidence) {
   }
   if (!decisionOnly(scene) && samples.some((sample,index) => records[index].direct_ball === true && !sample.ball))
     violations.push('observed_ball_outside_safe_crop');
+  const fastFlight=records.filter(record=>record.direct_ball===true
+    && record.ball_observation_method==='camera_compensated_motion' && record.motion_track_samples>=5);
   for (let index = 1; index < samples.length; index++) {
     const current = samples[index], previous = samples[index - 1];
     const dt = current.time - previous.time;
+    const observedFastFlight=fastFlight.length>=3 && fastFlight.some(record=>Math.abs(record.time-current.time)<=.5);
+    const speedLimit=observedFastFlight ? .65 : .35;
     if (!current.cut && dt > 0 && finite(current.cameraX) && finite(previous.cameraX)
-      && Math.abs(current.cameraX - previous.cameraX) / dt > .35 + .002) {
+      && Math.abs(current.cameraX - previous.cameraX) / dt > speedLimit + .002) {
       violations.push('within_shot_camera_speed_exceeded'); break;
     }
   }
@@ -249,7 +254,7 @@ export function assessHybridFraming(scene, evidence) {
   if (evidence.layoutMode === 'source_contain')
     return { usable: false, mode: 'portrait_full_bleed_required', issues: ['portrait_full_bleed_required'] };
   if (evidence.hybridTrackingVersion !== HYBRID_TRACKING_VERSION
-    && !([6, 7, 8].includes(evidence.hybridTrackingVersion) && evidence.finalCropVerified === true
+    && !([6, 7, 8, 9].includes(evidence.hybridTrackingVersion) && evidence.finalCropVerified === true
       && evidence.renderReview?.passed === true))
     return { usable: false, mode: 'hybrid_cache_version_mismatch' };
   if (evidence.reviewRepairError)
@@ -375,7 +380,7 @@ ${videoOnly?'The supplied native-detail video contains the complete actual prese
 }
 
 export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, evidence, media,
-  ratio, directory, ffmpeg, run, model, generate, videoOnly = false,
+  ratio, directory, ffmpeg, run, model, outcomeModel=model, generate, videoOnly = false,
   presentationMode = 'portrait_crop',
   probeVideo,
   filterGraphArgs = filterGraphFileArgs }) {
@@ -604,6 +609,56 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
     }
     result.initialRenderReview=review;
     result.renderReview=detailed;
+  }
+  if(videoOnly && scene.eventType==='goal' && outcomeModel!==model
+    && result.renderReview?.ballEnteredGoal!==true) {
+    // One independent full-scene comparison resolves a disputed sporting
+    // result. A short excerpt cannot repair earlier missing setup or establish
+    // which player made the final touch. The source never supplies crop proof.
+    const pairedPath=join(folder,`paired-goal-${createHash('sha256').update(outcomeModel).digest('hex').slice(0,12)}-v1.json`);
+    let paired;
+    try {paired=JSON.parse(await readFile(pairedPath,'utf8'));} catch { /* Independent observation required. */ }
+    if(!paired) {
+      const cropVideo=join(folder,'paired-goal-crop.mp4'),sourceVideo=join(folder,'paired-goal-source.mp4');
+      const x=trackedPositionExpression(evidence.keyframes,'cameraX',.5);
+      const crop=media.width/media.height>=ratio
+        ? `crop=ih*${ratio}:ih:x='max(0,min(iw-ow,iw*(${x})-ow/2))':y=0`
+        : `crop=iw:iw/${ratio}:x=0:y='(ih-oh)/2'`;
+      const graph=join(folder,'paired-goal-filter.txt');
+      await writeFile(graph,`[0:v]setpts=PTS-STARTPTS,split=2[c][s];[c]${crop},fps=24[cv];[s]fps=24[sv]`);
+      await run(ffmpeg,['-hide_banner','-loglevel','error','-y','-ss',String(scene.startTime),'-i',sourcePath,
+        '-t',String(scene.endTime-scene.startTime),...await filterGraphArgs(ffmpeg,graph),
+        '-map','[cv]','-an','-c:v','libx264','-preset','veryfast','-crf','16',cropVideo,
+        '-map','[sv]','-an','-c:v','libx264','-preset','veryfast','-crf','16',sourceVideo]);
+      try {paired=await generate({model:outcomeModel,contents:[
+        {text:'Two synchronized complete clips, starting at scene-local zero: FIRST is the actual portrait delivery, SECOND is its original wide reference. Independently observe the moving match ball and the front goal plane in both; no expected result is supplied.'},
+        footballVideoPart((await readFile(cropVideo)).toString('base64'),24),
+        footballVideoPart((await readFile(sourceVideo)).toString('base64'),24),
+        {text:`Return sameActionVerified only for the same continuous action. Source outcome and cropReview must be independent pixel verdicts. A goal requires the ball crossing the FRONT plane between posts and below the bar; side netting from outside, a keeper dive, scoreboard and celebration do not prove it. A keeper may fail to stop the ball and it may later rebound out of the net. A defensive backpass or deflection can produce an OWN GOAL without an attacking final touch: in that case setup, contact and correctSubject refer to the defender with the real ball before that last touch. Do not reject a complete visible own goal merely for lacking an attacking shot. Judge the entire FIRST clip for setup, touch, flight, actual result and camera stability. Only FIRST-clip visibility can approve its flags; source-only proof must fail the crop. Cite scene-local times. Keep uncertainty false. ${NEUTRAL_CROP_VERDICT}`}],
+        config:{responseMimeType:'application/json',responseJsonSchema:{type:'object',
+          required:['sameActionVerified','sourceOutcome','cropReview'],properties:{
+            sameActionVerified:{type:'boolean'},cropReview:HYBRID_REVIEW_SCHEMA,
+            sourceOutcome:{type:'object',required:['observedOutcome','goalLineCrossingVerified','goalLineCrossingTime','crossingEvidence'],
+              properties:{observedOutcome:HYBRID_REVIEW_SCHEMA.properties.observedOutcome.properties.type,
+                goalLineCrossingVerified:{type:'boolean'},goalLineCrossingTime:{type:['number','null']},crossingEvidence:{type:'string'}}}}},
+          temperature:0,maxOutputTokens:16384,thinkingConfig:{thinkingLevel:'HIGH'}}},
+        `independent full-clip goal comparison ${scene.id}`);} catch(error) {
+        if(error?.name!=='AbortError' && ![408,429,500,502,503,504].includes(Number(error?.status||error?.code))) throw error;
+      }
+      if(paired) await writeFile(pairedPath,JSON.stringify(paired));
+    }
+    if(paired?.sameActionVerified===true) {
+      const cropReview=normalizeHybridReview(paired.cropReview),source=paired.sourceOutcome;
+      const sameGoal=source?.observedOutcome!=='goal' || source.goalLineCrossingVerified===true
+        && finite(source.goalLineCrossingTime) && finite(cropReview.observedOutcome?.time)
+        && Math.abs(source.goalLineCrossingTime-cropReview.observedOutcome.time)<=.5;
+      if(sameGoal && source?.observedOutcome===cropReview.observedOutcome?.type) {
+        result.initialRenderReview ||= result.renderReview;
+        result.renderReview=cropReview;
+        result.outcomeComparison={version:1,sameActionVerified:true,sourceSceneStartTime:scene.startTime,
+          sourceSceneEndTime:scene.endTime,sourceOutcome:source,generationProvenance:paired.generationProvenance};
+      }
+    }
   }
   result.finalCropVerified = assessHybridFraming(scene, result).usable;
   return result;
