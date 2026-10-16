@@ -54,6 +54,12 @@ export function hybridDetailIndexes(scene,count,fps=3,maximum=8) {
 }
 const reviewFlags = ['passed','correctSubject','stableCamera','outcomeVisible','ballFollowed',
   'setupVisible','contactVisible','ballEnteredGoal'];
+export function needsHybridOutcomeComparison(scene,review) {
+  if(!review || !['goal','disallowed_goal','save','shot_on_target','shot_off_target','big_chance'].includes(scene.eventType)) return false;
+  return ['goal','disallowed_goal'].includes(scene.eventType)
+    ? review.ballEnteredGoal!==true || review.observedOutcome?.type!=='goal'
+    : review.ballEnteredGoal===true || review.observedOutcome?.type==='goal';
+}
 export function needsCropOutcomeDetail(scene,review) {
   const finishingEvent=['goal','save','shot_on_target','shot_off_target','big_chance'].includes(scene.eventType);
   const contradictory=scene.eventType==='goal' ? review?.ballEnteredGoal===false : review?.ballEnteredGoal===true;
@@ -610,8 +616,7 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
     result.initialRenderReview=review;
     result.renderReview=detailed;
   }
-  if(videoOnly && scene.eventType==='goal' && outcomeModel!==model
-    && result.renderReview?.ballEnteredGoal!==true) {
+  if(videoOnly && outcomeModel!==model && needsHybridOutcomeComparison(scene,result.renderReview)) {
     // One independent full-scene comparison resolves a disputed sporting
     // result. A short excerpt cannot repair earlier missing setup or establish
     // which player made the final touch. The source never supplies crop proof.

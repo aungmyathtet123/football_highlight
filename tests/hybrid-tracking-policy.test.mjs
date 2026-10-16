@@ -2,7 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { HYBRID_TRACKING_VERSION, hybridDetectorScene, providerEvidenceMatches } from '../local-processor/hybrid-tracking-policy.mjs';
 import { reviewedFramingEvent } from '../local-processor/gemini-framing.mjs';
-import { assessHybridFraming, sourceContainEvidence, hybridCropReviewRequest, hybridActionReviewContract, reviewedHybridPhaseBrief, needsHybridOpeningDetail, applyHybridOpeningDetail, mergeHybridOutcomeReview, hybridGeometry } from '../local-processor/hybrid-framing.mjs';
+import { assessHybridFraming, sourceContainEvidence, hybridCropReviewRequest, hybridActionReviewContract, reviewedHybridPhaseBrief, needsHybridOpeningDetail, applyHybridOpeningDetail, mergeHybridOutcomeReview, hybridGeometry, needsHybridOutcomeComparison } from '../local-processor/hybrid-framing.mjs';
+
+test('sporting-result disagreements receive the same independent check in both directions',()=>{
+  assert.equal(needsHybridOutcomeComparison({eventType:'goal'},{ballEnteredGoal:false,observedOutcome:{type:'keeper_save'}}),true);
+  assert.equal(needsHybridOutcomeComparison({eventType:'save'},{ballEnteredGoal:true,observedOutcome:{type:'goal'}}),true);
+  assert.equal(needsHybridOutcomeComparison({eventType:'save'},{ballEnteredGoal:false,observedOutcome:{type:'keeper_save'}}),false);
+  assert.equal(needsHybridOutcomeComparison({eventType:'goal'},{ballEnteredGoal:true,observedOutcome:{type:'goal'}}),false);
+  assert.equal(needsHybridOutcomeComparison({eventType:'celebration'},{ballEnteredGoal:false}),false);
+});
 
 test('a faster portrait pan needs sustained native flight and still retains the ball',()=>{
   const scene={startTime:0,endTime:1,trackingBrief:{contactTime:.1,payoffStartTime:.3,payoffEndTime:1}};

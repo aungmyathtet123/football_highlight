@@ -994,7 +994,9 @@ export function verifiedPairedGoalOutcome(scene,evidence) {
     && source?.observedOutcome==='goal' && source.goalLineCrossingVerified===true
     && Number.isFinite(source.goalLineCrossingTime) && source.goalLineCrossingTime>=0 && source.goalLineCrossingTime<=duration
     && typeof source.crossingEvidence==='string' && source.crossingEvidence.trim().length>=20
-    && crop?.type==='goal' && evidence.renderReview.goalVisible===true && evidence.renderReview.ballEnteredGoal===true
+    && crop?.type==='goal' && (evidence.renderReview.goalVisible===true
+      || evidence.provider==='hybrid-football' && evidence.renderReview.outcomeVisible===true)
+    && evidence.renderReview.ballEnteredGoal===true
     && Number.isFinite(crop.time) && Math.abs(crop.time-source.goalLineCrossingTime)<=.5;
 }
 
