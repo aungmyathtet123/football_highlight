@@ -470,7 +470,11 @@ async function retryAnalysisJob(response, id, automatic=false, reselectBlocked=f
     ? { ...job, moments: savedStep1Scenes.length ? savedStep1Scenes : (job.observedMoments?.length ? job.observedMoments : job.moments), resumeFromCandidates: true }
     : { ...job, moments: [], warnings: [], overlayMasks: [], discoveryPassesCompleted: 0 };
   restarted.resumeTrackingOnly = trackingOnlyRetry;
+  // A source-reselection request is single use. A later ordinary tracking
+  // retry must not inherit it and repeat a failed search instead of testing
+  // the newly deployed camera tracker against the saved locked scenes.
   if(reselectBlocked) restarted.resumeBlockedSelection=true;
+  else delete restarted.resumeBlockedSelection;
   restarted.processingRecovery=automatic?{...job.processingRecovery,status:'retrying'}:undefined;
   for (const key of ["error", "outputKey", "outputUrl", "completedAt", "qualityReview", "renderValidation", "editPlan", "trackingSummary", "evidenceReport"]) delete restarted[key];
   restarted.progress = trackingOnlyRetry ? 34 : reusableCandidates ? 30 : 5;
