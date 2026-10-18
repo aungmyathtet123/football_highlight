@@ -1,0 +1,16 @@
+{
+  "observedAt": "2026-10-18T05:56:51.443Z",
+  "jobId": "bfb63105-943d-4cbd-8923-b274d49f5d03",
+  "workerGeneration": 79,
+  "execution": "touchline-worker-mqxkd",
+  "runtimeCommit": "760862f",
+  "workerImage": "asia-southeast1-docker.pkg.dev/football-506506/touchline-ai/worker@sha256:0e05c6fffd8110a135f45f2bc71221da5919000171a25bbd6a802fe5c96991b0",
+  "keyframeScenesApproved": 16,
+  "lockedSourceIntervalsUnchanged": true,
+  "aspectRatio": "9:16",
+  "currentStage": "Researching the exact fixture and scorers after visual coverage passed.",
+  "verification": "server_execution_and_automated_crop_reviews",
+  "humanReferenceLabels": false,
+  "chromeUiTest": "unavailable_because_chrome_was_not_connected",
+  "fullVideoCompleted": false
+}
