@@ -71,6 +71,28 @@ approval or a guarantee for unseen footage. See `production-runs/2026-10-18/`
 for the immutable image digest and saved status evidence. Chrome was not
 connected, so this run was checked through server access rather than the UI.
 
+## Additional Dortmund–Bayern regression
+
+A new production upload exposed three additional failures after the earlier
+run passed: a celebration camera constrained by an irrelevant football, a
+coarse save label hiding a penalty award and referee signal, and a rapid
+finishing action whose observed setup was shorter than the fixed 150 ms rule.
+
+The shared repair now recomposes reactions and referee decisions from saved
+native detections. A continuous constrained pan hands off after the challenge
+and reaches the official by the observed signal. Reaction crops still need
+positive subject and stability reviews. Gameplay retains its measured ball
+containment requirements. Short, independently observed setup is allowed at
+the sampled frame cadence; unseen or simultaneous setup remains rejected.
+
+Worker generation 80 resumed the same checkpoint and all 15 required scenes
+passed. Chrome's production UI showed 15/15 approved and zero needing repair.
+All locked source intervals and full-screen 9:16 settings were preserved. The
+job advanced to match research; final-video completion is a separate gate.
+The patch passed 70 focused JavaScript and 23 native tracking checks. Source,
+canary and production evidence is saved in
+`regressions/2026-10-18-dortmund/`. No model weights were trained.
+
 ## Reproduce and extend
 
 See `README.md` for collection and reference-label requirements. The benchmark

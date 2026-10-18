@@ -1,0 +1,19 @@
+{
+  "observedAt": "2026-10-18T08:22:01.982Z",
+  "jobId": "0ee36a4a-f072-48b1-b9b8-fe85114ce9f1",
+  "runtimeCommit": "a0b91f8",
+  "workerGeneration": 80,
+  "execution": "touchline-worker-k45fv",
+  "workerImage": "asia-southeast1-docker.pkg.dev/football-506506/touchline-ai/worker@sha256:eba9e5e4dbc9d4ba76131d15b58181de2e75d99c305ead8a98e4cbbc186f1bde",
+  "requiredKeyframeScenes": 15,
+  "approvedKeyframeScenes": 15,
+  "lockedSourceIntervalsUnchanged": true,
+  "aspectRatio": "9:16",
+  "stage": "editing",
+  "progress": 48,
+  "detail": "Finishing the complete muted visual edit before Gemini watches it and writes the recap.",
+  "uiVerification": "Chrome production page showed 15/15 scenes approved, zero need repair, Step 2 checked complete",
+  "fullVideoCompleted": false,
+  "humanReferenceLabels": false,
+  "weightsTrained": false
+}
