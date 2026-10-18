@@ -960,6 +960,10 @@ export function reviewedFramingEvent(scene,evidence) {
     if(scene.eventType==='penalty' && sourceActionMatches && review.ballEnteredGoal===false
       && ['normal_play','save','shot_off_target','big_chance','foul','tackle'].includes(sourceAction.eventType))
       return sourceAction.eventType;
+    if(['save','shot_on_target','shot_off_target','big_chance','foul','normal_play'].includes(scene.eventType)
+      && sourceActionMatches && sourceAction.eventType==='penalty'
+      && outcome.type==='not_applicable' && review.ballEnteredGoal===false)
+      return 'penalty';
     if (outcome.type==='not_applicable' && review.ballEnteredGoal===false
     && ['save','shot_on_target','shot_off_target','big_chance'].includes(scene.eventType)
     && ['contact','payoff'].every(phase=>(review.phaseChecks||[]).some(check=>check.phase===phase
@@ -1083,14 +1087,16 @@ export function cropOutcomeComparisonNeeded(scene,review,observations=[]) {
 export function reviewedFramingNarration(scene,evidence) {
   const event=reviewedFramingEvent(scene,evidence);
   if(!event) return null;
-  const description={goal:'The moving ball crosses the goal line inside the goal.',
+  const description=event==='penalty'&&evidence.renderReview.observedOutcome.type==='not_applicable'
+    ? 'The referee visibly awards a penalty after the challenge.'
+    : {goal:'The moving ball crosses the goal line inside the goal.',
     keeper_save:'The goalkeeper visibly stops or deflects the shot.',
     woodwork:'The ball strikes the goal frame and stays out.',
     blocked:'The attempt is blocked and the ball stays out.',
     not_applicable:'The visible open-play move resolves without a shot.',
     wide:'The shot passes outside the goalpost.',over:'The shot goes over the crossbar.'}[evidence.renderReview.observedOutcome.type];
   if(!description) return null;
-  const setupFacts=(scene.semanticNarrationFacts||[]).filter(fact=>
+  const setupFacts=(event==='penalty'?[]:scene.semanticNarrationFacts||[]).filter(fact=>
     !/\b(goal|scores?|scored|saves?|saved|blocks?|blocked|net|crossbar|post|wide|over|stops?|deflects?)\b/i.test(fact));
   return {description,facts:[...setupFacts,description]};
 }

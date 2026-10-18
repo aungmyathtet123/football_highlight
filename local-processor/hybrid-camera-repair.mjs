@@ -2,7 +2,7 @@ import {createHash} from 'node:crypto';
 import {hybridDetectorScene} from './hybrid-tracking-policy.mjs';
 import {hybridEvidenceWindowMatches} from './hybrid-framing.mjs';
 
-export const HYBRID_CAMERA_REPAIR_VERSION=1;
+export const HYBRID_CAMERA_REPAIR_VERSION=2;
 const finite=Number.isFinite;
 const hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
@@ -32,8 +32,10 @@ export function hybridRepairScene(scene,evidence) {
     ? evidence.initialRenderReview:evidence?.renderReview;
   const checks=(sourceObserved?source.phaseChecks:review?.phaseChecks)||[];
   const duration=scene.endTime-scene.startTime;
+  const award=sourceObserved && source.eventType==='penalty' && source.observedOutcome==='not_applicable';
   const visible=checks.filter(check=>finite(check.time)&&check.time>=0&&check.time<=duration
-    &&check.ballVisible===true&&typeof check.description==='string'&&check.description.trim().length>=12);
+    &&(check.ballVisible===true || award&&check.phase==='payoff'&&check.playerVisible===true)
+    &&typeof check.description==='string'&&check.description.trim().length>=12);
   const payoffs=visible.filter(check=>check.phase==='payoff').sort((a,b)=>a.time-b.time);
   const payoff=payoffs[0];
   const contact=visible.filter(check=>check.phase==='contact'&&check.playerVisible===true
@@ -59,17 +61,21 @@ export async function repairHybridCamera(scene,evidence,{track,review,assess,che
   const source=evidence?.outcomeComparison?.sourceOutcome;
   if(source?.actionComplete===false)return {evidence:current,assessment:assess(scene,current),reason:'source_action_unresolved'};
   const repairScene=hybridRepairScene(scene,evidence);
-  const plans=[
+  const actor=repairScene.eventType==='celebration'||repairScene.storyPhase==='reaction'?'reaction'
+    : repairScene.eventType==='penalty'&&source?.observedOutcome==='not_applicable'?'referee':null;
+  const detectorPlans=[
     {name:'dense_ball_follow',sampleFps:20,coarseSampleFps:10,ballImageSize:1600,imageSize:1280,cameraStrategy:'ball_follow'},
     {name:'source_cadence_ball_follow',sampleFps:30,coarseSampleFps:15,ballImageSize:1920,imageSize:1280,cameraStrategy:'ball_follow'},
   ];
   const history=[...(evidence?.cameraRepairHistory||[])];
+  const plans=actor ? [{name:`native_${actor}_composition`,recomposeStrategy:actor}]
+    : detectorPlans.filter(plan=>!history.some(entry=>entry.version===1&&entry.strategy===plan.name));
   for(const plan of plans) {
     const key=hash({version:HYBRID_CAMERA_REPAIR_VERSION,id:scene.id,start:scene.startTime,end:scene.endTime,
       eventType:repairScene.eventType,brief:repairScene.trackingBrief,plan});
     if(history.some(entry=>entry.key===key))continue;
     const priorSignature=cameraPlanSignature(scene,current);
-    const native=await track(repairScene,plan);
+    const native=await track(repairScene,{...plan,sourceEvidence:current});
     if(!hybridEvidenceWindowMatches(scene,native))throw new Error('Camera repair changed the locked source interval.');
     const signature=cameraPlanSignature(scene,native);
     const entry={key,version:HYBRID_CAMERA_REPAIR_VERSION,strategy:plan.name,cameraSignature:signature,

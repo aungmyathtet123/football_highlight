@@ -1,0 +1,195 @@
+{
+  "jobId": "0ee36a4a-f072-48b1-b9b8-fe85114ce9f1",
+  "sourceFingerprint": "2822cf1725f42659ab5d516febf29682d68d274333639dadb036cd7e7b9905aa",
+  "createdAt": "2026-10-18T08:14:27.406Z",
+  "productionBaselineGate": {
+    "pass": "crop_review",
+    "completed": 15,
+    "total": 15,
+    "approved": 12,
+    "needsRepair": 3
+  },
+  "cases": [
+    {
+      "sceneId": "initial-4-4",
+      "sourceStartTime": 570.804,
+      "sourceEndTime": 577.043,
+      "finalCropVerified": true,
+      "review": {
+        "passed": true,
+        "correctSubject": true,
+        "stableCamera": true,
+        "outcomeVisible": true,
+        "ballFollowed": false,
+        "setupVisible": false,
+        "contactVisible": false,
+        "ballEnteredGoal": false,
+        "issues": [],
+        "observations": [
+          {
+            "time": 0.27,
+            "description": "Player jumps in celebration."
+          },
+          {
+            "time": 2.87,
+            "description": "Player bends down to gather the ball."
+          },
+          {
+            "time": 4.1,
+            "description": "Player jogs with the ball tucked under arm."
+          }
+        ],
+        "phaseChecks": [
+          {
+            "phase": "payoff",
+            "time": 3.1,
+            "ballVisible": true,
+            "playerVisible": true,
+            "description": "Player retrieves ball during post-event reaction."
+          }
+        ],
+        "observedOutcome": {
+          "type": "not_applicable",
+          "time": 0.03,
+          "description": "Support reaction clip showing celebration and ball retrieval."
+        },
+        "keeperContactVisible": false
+      },
+      "geometry": {
+        "usable": true,
+        "fullyMeasured": true,
+        "issues": [],
+        "violations": [],
+        "phases": {
+          "setup": {
+            "samples": 63,
+            "ball": 0.031746031746031744,
+            "joint": 0
+          },
+          "contact": {
+            "samples": 8,
+            "ball": 0,
+            "joint": 0
+          },
+          "flight": {
+            "samples": 56,
+            "ball": 0.19642857142857142,
+            "joint": 0
+          },
+          "payoff": {
+            "samples": 49,
+            "ball": 0.7551020408163265,
+            "joint": 0
+          }
+        }
+      }
+    },
+    {
+      "sceneId": "initial-5-5",
+      "sourceStartTime": 726,
+      "sourceEndTime": 733.5,
+      "finalCropVerified": true,
+      "review": {
+        "passed": true,
+        "correctSubject": true,
+        "stableCamera": true,
+        "outcomeVisible": true,
+        "ballFollowed": true,
+        "setupVisible": true,
+        "contactVisible": true,
+        "ballEnteredGoal": false,
+        "issues": [],
+        "observations": [
+          {
+            "time": 2.035,
+            "description": "Attacker dribbles toward the penalty area."
+          },
+          {
+            "time": 5.083,
+            "description": "Defender tackles attacker from behind inside the penalty box."
+          },
+          {
+            "time": 7.107,
+            "description": "Referee points to the penalty spot awarding a penalty."
+          }
+        ],
+        "phaseChecks": [
+          {
+            "phase": "setup",
+            "time": 2.035,
+            "ballVisible": true,
+            "playerVisible": true,
+            "description": "Attacking player advances with the ball."
+          },
+          {
+            "phase": "contact",
+            "time": 5.083,
+            "ballVisible": true,
+            "playerVisible": true,
+            "description": "Foul contact by trailing defender inside the box."
+          },
+          {
+            "phase": "flight",
+            "time": 5.873,
+            "ballVisible": true,
+            "playerVisible": true,
+            "description": "Attacker falls to ground as loose ball rolls toward keeper."
+          },
+          {
+            "phase": "payoff",
+            "time": 7.107,
+            "ballVisible": false,
+            "playerVisible": true,
+            "description": "Referee signals penalty award."
+          }
+        ],
+        "observedOutcome": {
+          "type": "not_applicable",
+          "time": 7.107,
+          "description": "Penalty awarded by match referee following the challenge."
+        },
+        "keeperContactVisible": false
+      },
+      "geometry": {
+        "usable": true,
+        "fullyMeasured": false,
+        "issues": [
+          "contact_carrier_and_ball_unverified"
+        ],
+        "violations": [],
+        "phases": {
+          "setup": {
+            "samples": 117,
+            "ball": 0.9145299145299145,
+            "joint": 0.8803418803418803
+          },
+          "contact": {
+            "samples": 17,
+            "ball": 0.35294117647058826,
+            "joint": 0.29411764705882354
+          },
+          "flight": {
+            "samples": 58,
+            "ball": 0.6724137931034483,
+            "joint": 0.3793103448275862
+          },
+          "payoff": {
+            "samples": 13,
+            "ball": 0.15384615384615385,
+            "joint": 0
+          }
+        }
+      }
+    }
+  ],
+  "rapidFinish": {
+    "sceneId": "initial-5-6",
+    "savedPositiveCropPassedAfterTimingFix": true,
+    "setupTime": 3.5,
+    "contactTime": 3.583,
+    "flightTime": 3.667,
+    "payoffTime": 3.792
+  },
+  "humanReferenceLabels": false,
+  "weightsTrained": false
+}

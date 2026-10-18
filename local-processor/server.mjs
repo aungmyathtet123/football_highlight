@@ -44,6 +44,7 @@ import { trackSceneWithGemini, assessGeminiFraming, reviewedFramingEvent, review
 import { keyframeProvider, hybridDetectorScene, providerEvidenceMatches, HYBRID_TRACKING_VERSION } from "./hybrid-tracking-policy.mjs";
 import { reviewHybridCrop, reviewedHybridPhaseBrief, hybridEvidenceWindowMatches } from "./hybrid-framing.mjs";
 import {repairHybridCamera} from './hybrid-camera-repair.mjs';
+import {recomposeNativeCamera} from './native-camera-recompose.mjs';
 import {buildFootballEvaluationReport} from './football-evaluation.mjs';
 import { fastTrackingPolicy } from './fast-tracking-policy.mjs';
 import { createWorkflowPerformance } from './workflow-performance.mjs';
@@ -4029,6 +4030,14 @@ async function trackLockedSceneUntilVerified(sourcePath, scene, media, id, scene
     const repaired=await repairHybridCamera(scene,repairEvidence,{
       track:async(repairScene,plan)=>{
         const current=await readJob(id);
+        if(plan.recomposeStrategy) {
+          await updateJob(current,'tracking',Math.max(34,current.progress),{
+            activeTrackingScene:{id:scene.id,index:sceneIndex+1,total:sceneCount,status:'repairing',round:2},
+            progressDetail:`Rebuilding scene ${sceneIndex+1}/${sceneCount} around its ${plan.recomposeStrategy==='reaction'?'celebrating player':'referee decision'} using saved detections.`});
+          return recomposeNativeCamera({scene:repairScene,evidence:plan.sourceEvidence,media,
+            dimensions:outputDimensions(current.settings),strategy:plan.recomposeStrategy,
+            directory:repairDirectory,python:trackingPythonPath,run});
+        }
         await updateJob(current,'tracking',Math.max(34,current.progress),{
           activeTrackingScene:{id:scene.id,index:sceneIndex+1,total:sceneCount,status:'repairing',round:plan.sampleFps===20?2:3},
           progressDetail:`Repairing scene ${sceneIndex+1}/${sceneCount}: checking more source frames and rebuilding its ball-follow camera.`});

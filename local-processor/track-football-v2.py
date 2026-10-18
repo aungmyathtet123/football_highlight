@@ -774,7 +774,8 @@ def build_keyframes(
         camera_y_targets, times, resets, [record["action_phase"] for record in records],
         0.5, half_y, sample_fps
     )
-    measured_fast_flight = sum(record.get('ball_observation_method')=='camera_compensated_motion'
+    measured_fast_flight = sum(record.get('camera_owner') not in {'reaction','referee','decision_handoff'}
+        and record.get('ball_observation_method')=='camera_compensated_motion'
         and record.get('direct_ball') is True and record.get('motion_track_samples',0)>=5
         for record in records)>=3
     camera_x = constrained_camera(

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {cameraPlanSignature,hybridRepairScene,repairHybridCamera} from '../local-processor/hybrid-camera-repair.mjs';
-import {assessHybridFraming,needsHybridOutcomeComparison,hybridPairedClockProblems,hybridComparisonFrameTimes} from '../local-processor/hybrid-framing.mjs';
+import {assessHybridFraming,needsHybridOutcomeComparison,hybridPairedClockProblems,hybridComparisonFrameTimes,reviewedHybridPhaseBrief} from '../local-processor/hybrid-framing.mjs';
 import {HYBRID_TRACKING_VERSION} from '../local-processor/hybrid-tracking-policy.mjs';
-import {reviewedFramingEvent} from '../local-processor/gemini-framing.mjs';
+import {reviewedFramingEvent,reviewedFramingNarration} from '../local-processor/gemini-framing.mjs';
 
 const scene={id:'any-action',eventType:'save',startTime:100,endTime:107};
 const checks=[['setup',2],['contact',3.25],['flight',3.58],['payoff',3.75]].map(([phase,time])=>({phase,time,
@@ -24,6 +24,27 @@ test('a payoff lead-in cannot erase directly observed final-shot flight',()=>{
   assert.equal(assessHybridFraming(scene,unseen).usable,false);
 });
 
+test('one visible source frame of setup before a rapid finish is not a missing payoff',()=>{
+  const rapid={...review,phaseChecks:checks.map((check,index)=>({...check,time:[3.5,3.583,3.667,3.792][index]})),
+    observedOutcome:{type:'woodwork',time:3.75,description:'The ball strikes the crossbar and rebounds out.'},keeperContactVisible:false};
+  const brief=reviewedHybridPhaseBrief(scene,{...evidence,renderReview:rapid});
+  assert.equal(brief.contactTime,103.583);
+  assert.ok(brief.payoffStartTime<103.792);
+  assert.equal(assessHybridFraming({...scene,trackingBrief:{contactTime:103.625,payoffStartTime:104.125,payoffEndTime:107}},
+    {...evidence,renderReview:rapid}).usable,true);
+  assert.equal(reviewedHybridPhaseBrief(scene,{...evidence,renderReview:{...rapid,phaseChecks:rapid.phaseChecks.map(check=>
+    check.phase==='setup'?{...check,time:3.582}:check)}}),null);
+});
+
+test('a reaction may leave a ball outside its crop but must still pass camera and subject review',()=>{
+  const reaction={...scene,eventType:'celebration'};
+  const value={...evidence,sourceRecords:evidence.sourceRecords.map(r=>({...r,direct_ball:true,ball_x:.9})),
+    renderReview:{...review,ballFollowed:false,setupVisible:false,contactVisible:false}};
+  assert.equal(assessHybridFraming(reaction,value).usable,true);
+  assert.equal(assessHybridFraming(reaction,{...value,renderReview:{...value.renderReview,correctSubject:false}}).usable,false);
+  assert.equal(assessHybridFraming(scene,value).usable,false);
+});
+
 test('penalty appeals and keeper collections need independent source agreement before relabeling',()=>{
   const penalty={...scene,eventType:'penalty'};
   assert.equal(reviewedFramingEvent(penalty,evidence),null);
@@ -33,6 +54,22 @@ test('penalty appeals and keeper collections need independent source agreement b
   assert.equal(reviewedFramingEvent(penalty,paired),'save');
   paired.renderReview={...review,passed:false};
   assert.equal(reviewedFramingEvent(penalty,paired),null);
+});
+
+test('a coarse save becomes a penalty award only after source and actual crop agree',()=>{
+  const value={...evidence,sourceRecords:evidence.sourceRecords.map((record,index)=>index===0?{...record,
+    player_track_id:2,player_x1:.45,player_x2:.55,player_top:.3,player_bottom:.7}:record),
+    renderReview:{...review,observedOutcome:{type:'not_applicable',time:6,
+    description:'The referee visibly points to the penalty spot after the challenge.'},phaseChecks:checks.map(check=>
+      check.phase==='payoff'?{...check,time:6,ballVisible:false}:check)},outcomeComparison:{version:1,
+    sameActionVerified:true,sourceSceneStartTime:100,sourceSceneEndTime:107,sourceOutcome:{eventType:'penalty',
+      observedOutcome:'not_applicable',actionComplete:true,actionDescription:'The source shows the foul and the referee visibly awarding a penalty.'}}};
+  assert.equal(reviewedFramingEvent(scene,value),'penalty');
+  assert.equal(reviewedHybridPhaseBrief(scene,value).payoffStartTime,105.75);
+  assert.deepEqual(reviewedFramingNarration(scene,value).facts,['The referee visibly awards a penalty after the challenge.']);
+  assert.equal(assessHybridFraming(scene,value).usable,true);
+  assert.equal(reviewedFramingEvent(scene,{...value,renderReview:{...value.renderReview,passed:false}}),null);
+  assert.equal(reviewedFramingEvent({...scene,eventType:'goal'},value),null);
 });
 
 test('a positive crop cannot contradict an independently complete source outcome',()=>{
@@ -116,4 +153,16 @@ test('incomplete source action stays unverified instead of looping or inventing 
     track:async()=>{calls++;},review:async()=>{},checkpoint:async()=>{}});
   assert.equal(calls,0);assert.equal(result.assessment.usable,false);
   assert.equal(result.reason,'source_action_unresolved');
+});
+
+test('reaction repairs change the measured subject plan without rerunning ball detection',async()=>{
+  const reaction={...scene,eventType:'celebration'};
+  let plan;
+  const result=await repairHybridCamera(reaction,{...evidence,renderReview:{...review,passed:false}},
+    {assess:(_scene,value)=>({usable:value.renderReview?.passed===true}),
+      track:async(_scene,value)=>{plan=value;return {...evidence,keyframes:[{time:0,cameraX:.4},{time:7,cameraX:.5}]};},
+      review:async(_scene,value)=>({...value,renderReview:review}),checkpoint:async()=>{}});
+  assert.equal(result.assessment.usable,true);
+  assert.equal(plan.recomposeStrategy,'reaction');
+  assert.equal(plan.sampleFps,undefined);
 });

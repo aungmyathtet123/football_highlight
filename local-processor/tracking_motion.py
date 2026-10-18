@@ -23,7 +23,7 @@ def camera_ownership_phase(record):
     a camera cut: one continuous source shot needs one continuous camera path.
     """
     explicit = record.get("camera_owner")
-    if explicit in {"carrier", "ball", "hold", "payoff"}:
+    if explicit in {"carrier", "ball", "hold", "payoff", "reaction", "referee", "decision_handoff"}:
         return explicit
     phase = str(record.get("action_phase") or "setup")
     if phase in {"setup", "contact"}:
@@ -57,6 +57,19 @@ def framing_bounds(record, view_width, prefer_center=True):
         # Relaxing that preference before speed avoids otherwise needless pans.
         edge=min(edge,.008)
     global_bounds = _global_bounds(view_width)
+    if record.get('camera_owner')=='decision_handoff':
+        return global_bounds
+    if record.get('camera_owner') in {'reaction','referee'}:
+        subject=record.get('framing_subject_box')
+        if subject is not None and record.get('camera_owner')=='reaction':
+            # A celebration needs the face/torso, not every extended arm.
+            # The measured body center guides composition; the pixel review
+            # must still verify the actual subject remains readable.
+            center=(subject[0]+subject[2])/2
+            return _box_center_bounds(center,center,view_width,min(.06,view_width*.25))
+        if subject is not None and subject[2]-subject[0]<=view_width:
+            return _box_center_bounds(subject[0],subject[2],view_width,min(edge,.008))
+        return global_bounds
     closeup=record.get('observed_closeup_box')
     if (closeup is not None and record.get('direct_ball') is not True
             and phase in {'setup','contact'} and closeup[2]-closeup[0]<=view_width):
@@ -177,6 +190,9 @@ def _required_bounds(records, view_size, axis, prefer_center=True):
     for index, record in enumerate(records):
         if record['scene_cut']:
             previous = None
+        if record.get('camera_owner') in {'reaction','referee','decision_handoff'}:
+            previous=None
+            continue
         coordinate = record.get('ball_x' if axis == 'x' else 'ball_y')
         if record.get('direct_ball') is not True or coordinate is None:
             continue
@@ -201,6 +217,9 @@ def _required_bounds(records, view_size, axis, prefer_center=True):
             last_required = None
         if index in measured_handoff:
             last_required = None
+            continue
+        if records[index].get('camera_owner')=='decision_handoff':
+            last_required=None
             continue
         if constrained[index]:
             last_required = index
