@@ -1,0 +1,205 @@
+{
+  "createdAt": "2026-10-18T05:41:42.881Z",
+  "jobId": "bfb63105-943d-4cbd-8923-b274d49f5d03",
+  "scope": "local_canary_on_extracted_production_scenes",
+  "aspectRatio": "9:16",
+  "hybridTrackingVersion": 11,
+  "models": {
+    "person": "yolo11n.pt",
+    "ball": "yolo-football-ball-detection.pt",
+    "review": "gemini-3.8-flash",
+    "comparison": "gemini-3.1-pro-preview"
+  },
+  "limitations": [
+    "Production uses a different person detector; live replay remains required.",
+    "These are development cases, not held-out accuracy measurements.",
+    "No training or human crop labelling was performed."
+  ],
+  "cases": [
+    {
+      "id": "initial-3-6",
+      "sourceClipSha256": "4418d1924a4f4675b1aa0a8e75baeb21a346a5aab3edacce3ee1fa6f67b55161",
+      "repairedCamera": false,
+      "finalCropVerified": true,
+      "geometryIssues": [
+        "resolved_action_ball_unverified"
+      ],
+      "observedOutcome": {
+        "type": "keeper_save",
+        "time": 3.417,
+        "description": "The goalkeeper successfully blocks the shot."
+      },
+      "phaseChecks": [
+        {
+          "phase": "setup",
+          "time": 1.417,
+          "ballVisible": true,
+          "playerVisible": true,
+          "description": "The crop clearly shows the attacker receiving the ball."
+        },
+        {
+          "phase": "contact",
+          "time": 2.833,
+          "ballVisible": true,
+          "playerVisible": true,
+          "description": "The crop captures the moment the attacker shoots."
+        },
+        {
+          "phase": "flight",
+          "time": 3.125,
+          "ballVisible": true,
+          "playerVisible": true,
+          "description": "The ball is tracked as it flies towards the goal."
+        },
+        {
+          "phase": "payoff",
+          "time": 3.417,
+          "ballVisible": true,
+          "playerVisible": true,
+          "description": "The crop shows the goalkeeper making the save."
+        }
+      ],
+      "clockProblems": [],
+      "referenceLabelStatus": "not_human_labelled"
+    },
+    {
+      "id": "initial-4-2",
+      "sourceClipSha256": "7347112bf1ebaed4fdd0f075c175842ee17d1196604d69a6d761489367be8721",
+      "repairedCamera": true,
+      "finalCropVerified": true,
+      "geometryIssues": [],
+      "observedOutcome": {
+        "type": "keeper_save",
+        "time": 3.87,
+        "description": "The goalkeeper dives and parries the ball away."
+      },
+      "phaseChecks": [
+        {
+          "phase": "setup",
+          "time": 2.5,
+          "ballVisible": true,
+          "playerVisible": true,
+          "description": "The attacker and the ball are clearly visible during the setup."
+        },
+        {
+          "phase": "contact",
+          "time": 3.269,
+          "ballVisible": true,
+          "playerVisible": true,
+          "description": "The moment of the shot is well framed."
+        },
+        {
+          "phase": "flight",
+          "time": 3.5,
+          "ballVisible": true,
+          "playerVisible": true,
+          "description": "The camera follows the ball's trajectory towards the goal."
+        },
+        {
+          "phase": "payoff",
+          "time": 3.87,
+          "ballVisible": true,
+          "playerVisible": true,
+          "description": "The goalkeeper's diving save is fully visible within the crop."
+        }
+      ],
+      "clockProblems": [],
+      "referenceLabelStatus": "not_human_labelled",
+      "baselineCropVerified": false,
+      "baselineClockProblems": [
+        "independent_contact_clock_disagreement",
+        "independent_payoff_clock_disagreement"
+      ]
+    },
+    {
+      "id": "initial-4-3",
+      "sourceClipSha256": "7bb3e5c12b193cc98ab356480b97a328995bbb4d9f5383e4408789a19d594aa4",
+      "repairedCamera": true,
+      "finalCropVerified": true,
+      "geometryIssues": [
+        "contact_carrier_and_ball_unverified"
+      ],
+      "observedOutcome": {
+        "type": "keeper_save",
+        "time": 3.667,
+        "description": "The goalkeeper dives and blocks the shot."
+      },
+      "phaseChecks": [
+        {
+          "phase": "setup",
+          "time": 1.5,
+          "ballVisible": true,
+          "playerVisible": true,
+          "description": "Player receives the ball and starts dribbling."
+        },
+        {
+          "phase": "contact",
+          "time": 3.083,
+          "ballVisible": true,
+          "playerVisible": true,
+          "description": "Player strikes the ball."
+        },
+        {
+          "phase": "flight",
+          "time": 3.333,
+          "ballVisible": true,
+          "playerVisible": true,
+          "description": "Ball flies towards the goal."
+        },
+        {
+          "phase": "payoff",
+          "time": 3.667,
+          "ballVisible": true,
+          "playerVisible": true,
+          "description": "Goalkeeper dives and saves the ball."
+        }
+      ],
+      "clockProblems": [],
+      "referenceLabelStatus": "not_human_labelled"
+    },
+    {
+      "id": "initial-4-4",
+      "sourceClipSha256": "a8d483146d9a4a03abacc38c2825ecc7b403036c0b2aea57156568125ceb5b60",
+      "repairedCamera": true,
+      "finalCropVerified": true,
+      "geometryIssues": [],
+      "observedOutcome": {
+        "type": "over",
+        "time": 4.75,
+        "description": "The shot travels over the crossbar."
+      },
+      "phaseChecks": [
+        {
+          "phase": "setup",
+          "time": 3.92,
+          "ballVisible": true,
+          "playerVisible": true,
+          "description": "Attacker tracks incoming cross into the six-yard box."
+        },
+        {
+          "phase": "contact",
+          "time": 4.17,
+          "ballVisible": true,
+          "playerVisible": true,
+          "description": "Attacker makes contact with the sliding shot."
+        },
+        {
+          "phase": "flight",
+          "time": 4.44,
+          "ballVisible": true,
+          "playerVisible": true,
+          "description": "Ball rises toward the top of the goal frame."
+        },
+        {
+          "phase": "payoff",
+          "time": 4.75,
+          "ballVisible": true,
+          "playerVisible": true,
+          "description": "Ball clears the crossbar into the crowd."
+        }
+      ],
+      "clockProblems": [],
+      "referenceLabelStatus": "not_human_labelled"
+    }
+  ]
+}
