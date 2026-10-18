@@ -1,0 +1,687 @@
+{
+  "version": 1,
+  "scope": "isolated_visible_ball_detector",
+  "dataset": "SoccerNet/SN-Tracking-2023",
+  "revision": "3777f456d908570e10b19e7354744640e77c351e",
+  "officialPartition": "train",
+  "pretrainingOverlap": "unknown",
+  "model": "yolo11n.pt",
+  "modelSha256": "0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1",
+  "confidence": 0.03,
+  "imageSize": 1280,
+  "iouThreshold": 0.5,
+  "evaluatedFrames": 66,
+  "unlabelledBallFramesSkipped": 6,
+  "precision": 0.13861386138613863,
+  "recall": 0.42424242424242425,
+  "centerPrecision": 0.15841584158415842,
+  "centerRecall": 0.48484848484848486,
+  "centerThreshold": "max(4 pixels, half reference-ball diagonal)",
+  "truePositives": 28,
+  "falsePositives": 174,
+  "falseNegatives": 38,
+  "elapsedSeconds": 12.1,
+  "frames": [
+    {
+      "sequence": "SNMOT-060",
+      "frame": 1,
+      "truePositives": 0,
+      "falsePositives": 1,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 1,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-060",
+      "frame": 151,
+      "truePositives": 0,
+      "falsePositives": 3,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 3,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-060",
+      "frame": 301,
+      "truePositives": 1,
+      "falsePositives": 2,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 3,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-060",
+      "frame": 450,
+      "truePositives": 0,
+      "falsePositives": 2,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 2,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-060",
+      "frame": 600,
+      "truePositives": 0,
+      "falsePositives": 4,
+      "falseNegatives": 1,
+      "centerMatches": 1,
+      "predictions": 4,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-060",
+      "frame": 750,
+      "truePositives": 0,
+      "falsePositives": 2,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 2,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-065",
+      "frame": 1,
+      "truePositives": 0,
+      "falsePositives": 2,
+      "falseNegatives": 1,
+      "centerMatches": 1,
+      "predictions": 2,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-065",
+      "frame": 151,
+      "truePositives": 0,
+      "falsePositives": 1,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 1,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-065",
+      "frame": 301,
+      "truePositives": 1,
+      "falsePositives": 6,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 7,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-065",
+      "frame": 600,
+      "truePositives": 0,
+      "falsePositives": 3,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 3,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-065",
+      "frame": 750,
+      "truePositives": 0,
+      "falsePositives": 1,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 1,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-070",
+      "frame": 1,
+      "truePositives": 0,
+      "falsePositives": 3,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 3,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-070",
+      "frame": 151,
+      "truePositives": 1,
+      "falsePositives": 4,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 5,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-070",
+      "frame": 301,
+      "truePositives": 0,
+      "falsePositives": 1,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 1,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-070",
+      "frame": 450,
+      "truePositives": 0,
+      "falsePositives": 1,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 1,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-070",
+      "frame": 600,
+      "truePositives": 1,
+      "falsePositives": 1,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 2,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-070",
+      "frame": 750,
+      "truePositives": 1,
+      "falsePositives": 2,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 3,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-075",
+      "frame": 1,
+      "truePositives": 0,
+      "falsePositives": 0,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 0,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-075",
+      "frame": 151,
+      "truePositives": 0,
+      "falsePositives": 0,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 0,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-075",
+      "frame": 301,
+      "truePositives": 0,
+      "falsePositives": 4,
+      "falseNegatives": 1,
+      "centerMatches": 1,
+      "predictions": 4,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-075",
+      "frame": 450,
+      "truePositives": 1,
+      "falsePositives": 1,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 2,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-075",
+      "frame": 750,
+      "truePositives": 0,
+      "falsePositives": 1,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 1,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-099",
+      "frame": 1,
+      "truePositives": 1,
+      "falsePositives": 3,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 4,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-099",
+      "frame": 151,
+      "truePositives": 0,
+      "falsePositives": 1,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 1,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-099",
+      "frame": 301,
+      "truePositives": 0,
+      "falsePositives": 3,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 3,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-099",
+      "frame": 450,
+      "truePositives": 0,
+      "falsePositives": 2,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 2,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-104",
+      "frame": 1,
+      "truePositives": 0,
+      "falsePositives": 1,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 1,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-104",
+      "frame": 151,
+      "truePositives": 1,
+      "falsePositives": 1,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 2,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-104",
+      "frame": 301,
+      "truePositives": 1,
+      "falsePositives": 2,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 3,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-104",
+      "frame": 450,
+      "truePositives": 1,
+      "falsePositives": 1,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 2,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-104",
+      "frame": 600,
+      "truePositives": 0,
+      "falsePositives": 1,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 1,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-104",
+      "frame": 750,
+      "truePositives": 1,
+      "falsePositives": 2,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 3,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-110",
+      "frame": 1,
+      "truePositives": 1,
+      "falsePositives": 2,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 3,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-110",
+      "frame": 151,
+      "truePositives": 0,
+      "falsePositives": 3,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 3,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-110",
+      "frame": 301,
+      "truePositives": 0,
+      "falsePositives": 7,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 7,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-110",
+      "frame": 450,
+      "truePositives": 1,
+      "falsePositives": 4,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 5,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-110",
+      "frame": 600,
+      "truePositives": 1,
+      "falsePositives": 1,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 2,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-115",
+      "frame": 1,
+      "truePositives": 1,
+      "falsePositives": 0,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 1,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-115",
+      "frame": 151,
+      "truePositives": 0,
+      "falsePositives": 5,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 5,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-115",
+      "frame": 301,
+      "truePositives": 0,
+      "falsePositives": 3,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 3,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-115",
+      "frame": 450,
+      "truePositives": 1,
+      "falsePositives": 4,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 5,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-115",
+      "frame": 600,
+      "truePositives": 0,
+      "falsePositives": 2,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 2,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-115",
+      "frame": 750,
+      "truePositives": 0,
+      "falsePositives": 4,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 4,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-155",
+      "frame": 1,
+      "truePositives": 1,
+      "falsePositives": 4,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 5,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-155",
+      "frame": 151,
+      "truePositives": 1,
+      "falsePositives": 2,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 3,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-155",
+      "frame": 301,
+      "truePositives": 1,
+      "falsePositives": 5,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 6,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-155",
+      "frame": 450,
+      "truePositives": 0,
+      "falsePositives": 2,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 2,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-155",
+      "frame": 600,
+      "truePositives": 0,
+      "falsePositives": 3,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 3,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-155",
+      "frame": 750,
+      "truePositives": 1,
+      "falsePositives": 1,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 2,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-160",
+      "frame": 1,
+      "truePositives": 1,
+      "falsePositives": 2,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 3,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-160",
+      "frame": 151,
+      "truePositives": 0,
+      "falsePositives": 3,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 3,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-160",
+      "frame": 301,
+      "truePositives": 1,
+      "falsePositives": 0,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 1,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-160",
+      "frame": 450,
+      "truePositives": 1,
+      "falsePositives": 4,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 5,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-160",
+      "frame": 600,
+      "truePositives": 1,
+      "falsePositives": 1,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 2,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-160",
+      "frame": 750,
+      "truePositives": 0,
+      "falsePositives": 4,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 4,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-165",
+      "frame": 1,
+      "truePositives": 0,
+      "falsePositives": 4,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 4,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-165",
+      "frame": 151,
+      "truePositives": 0,
+      "falsePositives": 4,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 4,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-165",
+      "frame": 301,
+      "truePositives": 0,
+      "falsePositives": 4,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 4,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-165",
+      "frame": 450,
+      "truePositives": 1,
+      "falsePositives": 8,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 9,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-165",
+      "frame": 600,
+      "truePositives": 1,
+      "falsePositives": 1,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 2,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-165",
+      "frame": 750,
+      "truePositives": 1,
+      "falsePositives": 6,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 7,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-170",
+      "frame": 1,
+      "truePositives": 1,
+      "falsePositives": 0,
+      "falseNegatives": 0,
+      "centerMatches": 1,
+      "predictions": 1,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-170",
+      "frame": 151,
+      "truePositives": 0,
+      "falsePositives": 5,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 5,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-170",
+      "frame": 301,
+      "truePositives": 0,
+      "falsePositives": 6,
+      "falseNegatives": 1,
+      "centerMatches": 1,
+      "predictions": 6,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-170",
+      "frame": 450,
+      "truePositives": 0,
+      "falsePositives": 4,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 4,
+      "referenceBalls": 1
+    },
+    {
+      "sequence": "SNMOT-170",
+      "frame": 750,
+      "truePositives": 0,
+      "falsePositives": 4,
+      "falseNegatives": 1,
+      "centerMatches": 0,
+      "predictions": 4,
+      "referenceBalls": 1
+    }
+  ],
+  "supportsFullPipelineReliabilityClaim": false
+}

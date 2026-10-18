@@ -1,0 +1,1318 @@
+{
+  "version": 1,
+  "dataset": "SoccerNet/SN-Tracking-2023",
+  "revision": "3777f456d908570e10b19e7354744640e77c351e",
+  "officialPartition": "train",
+  "use": "reference_evaluation_only",
+  "pretrainingOverlap": "unknown",
+  "sequences": [
+    {
+      "id": "SNMOT-060",
+      "matchGroup": "soccernet-game-4",
+      "actionClass": "Kick-off",
+      "ballTrackIds": [
+        18
+      ],
+      "fps": 25,
+      "length": 750
+    },
+    {
+      "id": "SNMOT-065",
+      "matchGroup": "soccernet-game-4",
+      "actionClass": "Clearance",
+      "ballTrackIds": [
+        24,
+        26
+      ],
+      "fps": 25,
+      "length": 750
+    },
+    {
+      "id": "SNMOT-070",
+      "matchGroup": "soccernet-game-4",
+      "actionClass": "Shots on target",
+      "ballTrackIds": [
+        12
+      ],
+      "fps": 25,
+      "length": 750
+    },
+    {
+      "id": "SNMOT-075",
+      "matchGroup": "soccernet-game-4",
+      "actionClass": "Corner",
+      "ballTrackIds": [
+        22,
+        24
+      ],
+      "fps": 25,
+      "length": 750
+    },
+    {
+      "id": "SNMOT-099",
+      "matchGroup": "soccernet-game-6",
+      "actionClass": "Yellow card",
+      "ballTrackIds": [
+        5
+      ],
+      "fps": 25,
+      "length": 750
+    },
+    {
+      "id": "SNMOT-104",
+      "matchGroup": "soccernet-game-6",
+      "actionClass": "Goal",
+      "ballTrackIds": [
+        22
+      ],
+      "fps": 25,
+      "length": 750
+    },
+    {
+      "id": "SNMOT-110",
+      "matchGroup": "soccernet-game-6",
+      "actionClass": "Corner",
+      "ballTrackIds": [
+        18
+      ],
+      "fps": 25,
+      "length": 750
+    },
+    {
+      "id": "SNMOT-115",
+      "matchGroup": "soccernet-game-6",
+      "actionClass": "Shots off target",
+      "ballTrackIds": [
+        11,
+        23
+      ],
+      "fps": 25,
+      "length": 750
+    },
+    {
+      "id": "SNMOT-155",
+      "matchGroup": "soccernet-game-9",
+      "actionClass": "Shots off target",
+      "ballTrackIds": [
+        4
+      ],
+      "fps": 25,
+      "length": 750
+    },
+    {
+      "id": "SNMOT-160",
+      "matchGroup": "soccernet-game-9",
+      "actionClass": "Kick-off",
+      "ballTrackIds": [
+        10
+      ],
+      "fps": 25,
+      "length": 750
+    },
+    {
+      "id": "SNMOT-165",
+      "matchGroup": "soccernet-game-9",
+      "actionClass": "Goal",
+      "ballTrackIds": [
+        2
+      ],
+      "fps": 25,
+      "length": 750
+    },
+    {
+      "id": "SNMOT-170",
+      "matchGroup": "soccernet-game-9",
+      "actionClass": "Shots on target",
+      "ballTrackIds": [
+        10
+      ],
+      "fps": 25,
+      "length": 750
+    }
+  ],
+  "frames": [
+    {
+      "sequence": "SNMOT-060",
+      "frame": 1,
+      "image": "SNMOT-060/000001.jpg",
+      "sha256": "33aa1522f1313c4300cddc84efe6fb0a63335cec61d441329e015ac0e533b3c0",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          957.0,
+          551.0,
+          12.0,
+          11.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-060",
+      "frame": 151,
+      "image": "SNMOT-060/000151.jpg",
+      "sha256": "0df50a5b44bbd812b971a9d7e55a30ed689794520980fcad462abc0a2fa89ef2",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          372.0,
+          502.0,
+          12.0,
+          8.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-060",
+      "frame": 301,
+      "image": "SNMOT-060/000301.jpg",
+      "sha256": "e69423f31bc7e909662e30eb772a680da4be08b3dc42b01f883eb45094d3e708",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1123.0,
+          625.0,
+          23.0,
+          15.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-060",
+      "frame": 450,
+      "image": "SNMOT-060/000450.jpg",
+      "sha256": "196ad62cd1335fedd72ef2e4a8560b5b41674421713f42f61b6786d2007d0a30",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1430.0,
+          731.0,
+          19.0,
+          20.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-060",
+      "frame": 600,
+      "image": "SNMOT-060/000600.jpg",
+      "sha256": "a6208bfc06a4b6b1385eae61f3e99391cbeda7b1cbf0917d6ccb8c8211ce15b6",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1038.0,
+          719.0,
+          29.0,
+          17.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-060",
+      "frame": 750,
+      "image": "SNMOT-060/000750.jpg",
+      "sha256": "c522d591621449f65efd0ac69be56372e115b4fe4d1130b73f0fe912f8e1d7df",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1235.0,
+          654.0,
+          19.0,
+          14.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-065",
+      "frame": 1,
+      "image": "SNMOT-065/000001.jpg",
+      "sha256": "2806c1bc92d065002ceebd61f6427ec5496e332420a6aaaf548c277c0a270fd8",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          210.0,
+          466.0,
+          7.0,
+          5.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-065",
+      "frame": 151,
+      "image": "SNMOT-065/000151.jpg",
+      "sha256": "18ce54969afc5cb982e64722d249435e8b7dd67d50e1780c5f83aaeeefed771c",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          207.0,
+          449.0,
+          17.0,
+          11.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-065",
+      "frame": 301,
+      "image": "SNMOT-065/000301.jpg",
+      "sha256": "4d528c9d06aa771c53bef080bdf4af408524b49c072a34eb337b52abba0e0622",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1746.0,
+          518.0,
+          20.0,
+          17.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-065",
+      "frame": 450,
+      "image": "SNMOT-065/000450.jpg",
+      "sha256": "07e5eeddc921a878521437fefc2b60a84c34ed3c7e023c93f75394a0e7a7e409",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [],
+      "ballReferenceAvailable": false
+    },
+    {
+      "sequence": "SNMOT-065",
+      "frame": 600,
+      "image": "SNMOT-065/000600.jpg",
+      "sha256": "c9651efdc58454b873e4fc013e77c1f4cd95f6521aa2bef9b5179fcd509f3bd9",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          868.0,
+          302.0,
+          15.0,
+          16.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-065",
+      "frame": 750,
+      "image": "SNMOT-065/000750.jpg",
+      "sha256": "1b5988402c6a5a547fe28418445331f639a9a313930a75ed3a294b3ee5d698a9",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          573.0,
+          343.0,
+          14.0,
+          15.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-070",
+      "frame": 1,
+      "image": "SNMOT-070/000001.jpg",
+      "sha256": "47bd46f047eb8075666d005276e5c2a90543c9e826d4c1f4e1a0150d6a5b635a",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          523.0,
+          158.0,
+          17.0,
+          13.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-070",
+      "frame": 151,
+      "image": "SNMOT-070/000151.jpg",
+      "sha256": "7ac46116417d5117db864aedca5d481fb7821b849cc70369166d15d167f06873",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1069.0,
+          432.0,
+          13.0,
+          11.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-070",
+      "frame": 301,
+      "image": "SNMOT-070/000301.jpg",
+      "sha256": "12aa1a52d2a9211183bf7455f6980a65ad4fa14ef4eeb46b9afdc53175843871",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          945.0,
+          414.0,
+          15.0,
+          10.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-070",
+      "frame": 450,
+      "image": "SNMOT-070/000450.jpg",
+      "sha256": "d35e9271dc9e4ac7873adf139a03e4345422265074183be01805ca977a63135a",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1163.0,
+          490.0,
+          12.0,
+          12.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-070",
+      "frame": 600,
+      "image": "SNMOT-070/000600.jpg",
+      "sha256": "e5ad4a1ff09f73eff1edcb38587d01764087802bfbc4d341e1476da26a63d90e",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1191.0,
+          731.0,
+          15.0,
+          15.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-070",
+      "frame": 750,
+      "image": "SNMOT-070/000750.jpg",
+      "sha256": "d4629865eaaf8c4be25ec50a4a0c1da3124a0b85c978cef2196c8ac9d0be1ca4",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          431.0,
+          610.0,
+          15.0,
+          14.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-075",
+      "frame": 1,
+      "image": "SNMOT-075/000001.jpg",
+      "sha256": "2f83e0e1a0ed890578e4014437ec02f1a38caa94acff806f6bb085bb1eb484be",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          479.0,
+          337.0,
+          11.0,
+          11.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-075",
+      "frame": 151,
+      "image": "SNMOT-075/000151.jpg",
+      "sha256": "e169dd054ba1d67dc0ddc331ce5e765326c77bb50a3e7df4250fd1f63914e43f",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          479.0,
+          343.0,
+          10.0,
+          11.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-075",
+      "frame": 301,
+      "image": "SNMOT-075/000301.jpg",
+      "sha256": "a3fe3ef1889c2b910d5dc5a68c8c663815bb67b6ce0530c81e24f70db3ea0796",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1588.0,
+          667.0,
+          22.0,
+          23.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-075",
+      "frame": 450,
+      "image": "SNMOT-075/000450.jpg",
+      "sha256": "ecaa374b9b011515a0c4ba889288b32c38e301d1d5e0b04918ba1a2d57d6bb57",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1665.0,
+          685.0,
+          19.0,
+          17.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-075",
+      "frame": 600,
+      "image": "SNMOT-075/000600.jpg",
+      "sha256": "f8d6c40f45989e90cdbbf39f2ab3280216d9a3676cef9ac7501fef23d33014e6",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [],
+      "ballReferenceAvailable": false
+    },
+    {
+      "sequence": "SNMOT-075",
+      "frame": 750,
+      "image": "SNMOT-075/000750.jpg",
+      "sha256": "43b7307f10c3b567b155e0f796ff8e2a928f9766e21c0818ad34b5e236c9c16b",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1334.0,
+          525.0,
+          10.0,
+          10.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-099",
+      "frame": 1,
+      "image": "SNMOT-099/000001.jpg",
+      "sha256": "ad539d7c44f5ee07e49c8ed003b11abe4013789ce56b4ed6383bf88b7b8c03aa",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1453.0,
+          719.0,
+          18.0,
+          17.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-099",
+      "frame": 151,
+      "image": "SNMOT-099/000151.jpg",
+      "sha256": "a2f03dcbe4ac860bb8bda5e1e171799084112ab4c01bc8ac8e3fe9901389a1b0",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1188.0,
+          778.0,
+          20.0,
+          20.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-099",
+      "frame": 301,
+      "image": "SNMOT-099/000301.jpg",
+      "sha256": "b35483e355832fbf577f6b2c2b7efe9d1f2dc7a516441e7a82328db3993fff05",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1344.0,
+          661.0,
+          19.0,
+          18.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-099",
+      "frame": 450,
+      "image": "SNMOT-099/000450.jpg",
+      "sha256": "6b8fadae7c011dd08f85c801481391905e8e9c412111b00750d9253b3087426c",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1038.0,
+          608.0,
+          15.0,
+          15.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-099",
+      "frame": 600,
+      "image": "SNMOT-099/000600.jpg",
+      "sha256": "34c9499b1bf7458d244a4ff75393dd4a3fa340cd96233b122e9b66c7104de0ba",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [],
+      "ballReferenceAvailable": false
+    },
+    {
+      "sequence": "SNMOT-099",
+      "frame": 750,
+      "image": "SNMOT-099/000750.jpg",
+      "sha256": "4e4e71fc3936e6971f9c063c38fe6c7f525bcda08973c8ad0329a28e093dbbc6",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [],
+      "ballReferenceAvailable": false
+    },
+    {
+      "sequence": "SNMOT-104",
+      "frame": 1,
+      "image": "SNMOT-104/000001.jpg",
+      "sha256": "8d59863859dbccdd8a4f802d7235600a4dcc30ae53c3a2fa928d1429af59f19c",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          559.0,
+          579.0,
+          13.0,
+          12.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-104",
+      "frame": 151,
+      "image": "SNMOT-104/000151.jpg",
+      "sha256": "f5be3a9f1a66928d7ed665ca7d78dd13db19ea285b36d88e866dbe6f7454c891",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          385.0,
+          557.0,
+          12.0,
+          10.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-104",
+      "frame": 301,
+      "image": "SNMOT-104/000301.jpg",
+      "sha256": "9bbbccef3269a5a2a2608eda34f30f28eb830132fabc68ee4c257299ee9f0dd7",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          290.0,
+          617.0,
+          13.0,
+          13.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-104",
+      "frame": 450,
+      "image": "SNMOT-104/000450.jpg",
+      "sha256": "e83b205a527f0e9293c45fb058135e125c358980f0a11b9285391383be59ae24",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          253.0,
+          607.0,
+          12.0,
+          13.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-104",
+      "frame": 600,
+      "image": "SNMOT-104/000600.jpg",
+      "sha256": "bf50c6e92b3d71500deac7cdbb178982cf2c183eb0fec976501f815f5dc41676",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1022.0,
+          499.0,
+          17.0,
+          11.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-104",
+      "frame": 750,
+      "image": "SNMOT-104/000750.jpg",
+      "sha256": "315b5fab1d7ee1fd41b5f13fdb7b6c37dc83c0df5b5e91f8871d69d0a9a01552",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          550.0,
+          585.0,
+          14.0,
+          14.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-110",
+      "frame": 1,
+      "image": "SNMOT-110/000001.jpg",
+      "sha256": "a0a4a84430f3a28c2506e90fde496246f5295d4ee31dccbee8c7423739a8e18d",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          278.0,
+          602.0,
+          14.0,
+          12.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-110",
+      "frame": 151,
+      "image": "SNMOT-110/000151.jpg",
+      "sha256": "a93a6ac909c8e9b9179f586447125c5b5084d5433cc3e82b460d99e89d2f1ab8",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          275.0,
+          610.0,
+          13.0,
+          12.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-110",
+      "frame": 301,
+      "image": "SNMOT-110/000301.jpg",
+      "sha256": "e6204683d094cdc7f22d0347f69f83709deaf1873b899dd0e0c4d8550d522ab9",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1479.0,
+          580.0,
+          21.0,
+          26.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-110",
+      "frame": 450,
+      "image": "SNMOT-110/000450.jpg",
+      "sha256": "d05c1f1b26209db18b88311a4a2dfb70f6e74963f6ce7417661d51ae5a7906e1",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          734.0,
+          441.0,
+          23.0,
+          15.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-110",
+      "frame": 600,
+      "image": "SNMOT-110/000600.jpg",
+      "sha256": "b71e3608824b130707a2f261b45503b19114d9be6751cf696d13285d36115ad4",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          536.0,
+          389.0,
+          26.0,
+          22.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-110",
+      "frame": 750,
+      "image": "SNMOT-110/000750.jpg",
+      "sha256": "6c6d97c39c44ff316033731e32472ffc34a4d929eb5e8564d3ec23d487b01201",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [],
+      "ballReferenceAvailable": false
+    },
+    {
+      "sequence": "SNMOT-115",
+      "frame": 1,
+      "image": "SNMOT-115/000001.jpg",
+      "sha256": "dabb3c9d0f788f6a6293838dd5255e0d771dc9920c3019bd92293984a96e8e34",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          303.0,
+          585.0,
+          17.0,
+          15.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-115",
+      "frame": 151,
+      "image": "SNMOT-115/000151.jpg",
+      "sha256": "5ab867c7103c7234dc57a94370da9da7e575f85357d39df8c8d6af219f6bee77",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          706.0,
+          774.0,
+          20.0,
+          20.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-115",
+      "frame": 301,
+      "image": "SNMOT-115/000301.jpg",
+      "sha256": "087e0fbda41e564dab632e77309fd5baf82d029911f7a4e99f10ad01e4f3285d",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          765.0,
+          529.0,
+          15.0,
+          13.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-115",
+      "frame": 450,
+      "image": "SNMOT-115/000450.jpg",
+      "sha256": "f6304f63f4d93cd2a95a18ac79a71f9e29eaa07cd1a2f519e980675bebc6924a",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1073.0,
+          523.0,
+          14.0,
+          13.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-115",
+      "frame": 600,
+      "image": "SNMOT-115/000600.jpg",
+      "sha256": "c6f5fac7f2747b13615edf0e67336638ec7ef7fa8436175904fe68f07b0f43f9",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1091.0,
+          391.0,
+          8.0,
+          8.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-115",
+      "frame": 750,
+      "image": "SNMOT-115/000750.jpg",
+      "sha256": "116c33fea2c3e65e3e364b9712ed65157e1e9c96cdb68a5b5a093b9379823266",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1186.0,
+          445.0,
+          8.0,
+          8.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-155",
+      "frame": 1,
+      "image": "SNMOT-155/000001.jpg",
+      "sha256": "6411c1da70b00a0de1ed2663b56876189b4a4f2a27b633e4b961c9fb0e1fbe38",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          888.0,
+          610.0,
+          25.0,
+          14.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-155",
+      "frame": 151,
+      "image": "SNMOT-155/000151.jpg",
+      "sha256": "e5753cd79aa1d52a1f570801e77215065a80b9a16439068ef71d60703c17f393",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1385.0,
+          477.0,
+          12.0,
+          12.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-155",
+      "frame": 301,
+      "image": "SNMOT-155/000301.jpg",
+      "sha256": "4b432b8cd9bac864b91c34837ddee1a200e64647e68c7794491168255bac0895",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          789.0,
+          454.0,
+          10.0,
+          9.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-155",
+      "frame": 450,
+      "image": "SNMOT-155/000450.jpg",
+      "sha256": "23d2629fe2182f56529fcc189b0839a213b7b571b462251930ec2dc1af2c0db4",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          747.0,
+          363.0,
+          13.0,
+          11.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-155",
+      "frame": 600,
+      "image": "SNMOT-155/000600.jpg",
+      "sha256": "709cfe80bbe501b2d89fdf8bbcb84d026de9e924faa6c8d0445735cff562bb22",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          787.0,
+          381.0,
+          12.0,
+          12.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-155",
+      "frame": 750,
+      "image": "SNMOT-155/000750.jpg",
+      "sha256": "d983f31dfda340a47bc678ca52be2e3b6c58e9847e53787a8f31574ec0a3714e",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          678.0,
+          518.0,
+          12.0,
+          13.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-160",
+      "frame": 1,
+      "image": "SNMOT-160/000001.jpg",
+      "sha256": "81733254fdb1cecf35bc66dbb7cfe19a458baeb00a9d04013966938e98af6d88",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1020.0,
+          562.0,
+          15.0,
+          15.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-160",
+      "frame": 151,
+      "image": "SNMOT-160/000151.jpg",
+      "sha256": "9581c1125df058edc07b9a6e8dd195d6a88969e7bbc12e503f66ecb6f79c9b28",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1001.0,
+          562.0,
+          15.0,
+          14.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-160",
+      "frame": 301,
+      "image": "SNMOT-160/000301.jpg",
+      "sha256": "55d476c549972a9e3aef912dffd148ea48fcfc33756b774e674d1e9a8bb209d4",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          398.0,
+          614.0,
+          14.0,
+          14.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-160",
+      "frame": 450,
+      "image": "SNMOT-160/000450.jpg",
+      "sha256": "1f5d9c3bd8c33ab3c0846e718ab33e55d57d64ae0ddb26bbee1db6021af70208",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          530.0,
+          490.0,
+          12.0,
+          11.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-160",
+      "frame": 600,
+      "image": "SNMOT-160/000600.jpg",
+      "sha256": "f6289d72943c1653014b2c35ea6715625731976ea0adcb40f655460891634686",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          341.0,
+          706.0,
+          16.0,
+          14.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-160",
+      "frame": 750,
+      "image": "SNMOT-160/000750.jpg",
+      "sha256": "7a732413191603445a23784452a45eeedb6e23ce81d99566e559a2bcf1341083",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1599.0,
+          520.0,
+          10.0,
+          9.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-165",
+      "frame": 1,
+      "image": "SNMOT-165/000001.jpg",
+      "sha256": "5397b4617ac30fad8bc2dbbb17e5fb218eabdb0c004a3225334b3ca9ee11e8b2",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          134.0,
+          524.0,
+          19.0,
+          12.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-165",
+      "frame": 151,
+      "image": "SNMOT-165/000151.jpg",
+      "sha256": "007b1a2b5771741045b30b6dc71a798d0143ee04fa2d9f512ddf76e7ff4b6b71",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          124.0,
+          522.0,
+          17.0,
+          17.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-165",
+      "frame": 301,
+      "image": "SNMOT-165/000301.jpg",
+      "sha256": "9c866cfdb9e9cb82779340a078dfbb7f4f9fd759507e010e7c55a190041ea01a",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          561.0,
+          252.0,
+          19.0,
+          15.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-165",
+      "frame": 450,
+      "image": "SNMOT-165/000450.jpg",
+      "sha256": "9d5c988e4b90883cf414e38e2a246beddf80cb0b54dae1b4c1bc446a296678e4",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          613.0,
+          702.0,
+          25.0,
+          21.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-165",
+      "frame": 600,
+      "image": "SNMOT-165/000600.jpg",
+      "sha256": "8b8b949226cbb810179c55baab94e1fb5620cae653177f3ef7b1dac1efb28e83",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          1308.0,
+          615.0,
+          20.0,
+          15.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-165",
+      "frame": 750,
+      "image": "SNMOT-165/000750.jpg",
+      "sha256": "aeb0ee39943b3b9a1b844b1d78431115c22ea8ae6b966ae7757ed262bbba41c6",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          258.0,
+          500.0,
+          11.0,
+          10.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-170",
+      "frame": 1,
+      "image": "SNMOT-170/000001.jpg",
+      "sha256": "973f95157290b14fa33d0ed356d2b623145c5e12b69ee5be25db2801ff595ae1",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          335.0,
+          511.0,
+          16.0,
+          10.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-170",
+      "frame": 151,
+      "image": "SNMOT-170/000151.jpg",
+      "sha256": "6a5a7c2d01d772e3f6486ce3294315b967af54afd2d25f43f8a5ab84114d7b87",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          639.0,
+          481.0,
+          15.0,
+          14.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-170",
+      "frame": 301,
+      "image": "SNMOT-170/000301.jpg",
+      "sha256": "673473b1579fc8c9daf0d3ce5daced30323d9947ab7eb4da251015e99e9c497f",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          221.0,
+          677.0,
+          19.0,
+          16.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-170",
+      "frame": 450,
+      "image": "SNMOT-170/000450.jpg",
+      "sha256": "fdecebe4304a48512b4c63c403fe2b4d49c96faf58f7ddb0ad5e55cdecc0b021",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          504.0,
+          413.0,
+          22.0,
+          14.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    },
+    {
+      "sequence": "SNMOT-170",
+      "frame": 600,
+      "image": "SNMOT-170/000600.jpg",
+      "sha256": "5c359180fdaf390db7c3e18051df5d068000fd6237d5cdb7f5d5d50da12ce954",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [],
+      "ballReferenceAvailable": false
+    },
+    {
+      "sequence": "SNMOT-170",
+      "frame": 750,
+      "image": "SNMOT-170/000750.jpg",
+      "sha256": "d978a9ab0c7e527f845a0e2ce853c879495846d8c7c7e02e3b441afe7d769970",
+      "width": 1920,
+      "height": 1080,
+      "ballBoxesXYWH": [
+        [
+          150.0,
+          552.0,
+          11.0,
+          11.0
+        ]
+      ],
+      "ballReferenceAvailable": true
+    }
+  ],
+  "downloadedBytes": 29088852
+}

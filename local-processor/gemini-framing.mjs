@@ -948,7 +948,19 @@ export function reviewedFramingEvent(scene,evidence) {
     .some(key=>review[key]!==true) || review.issues?.length
     || !Number.isFinite(outcome.time) || outcome.time<0 || outcome.time>scene.endTime-scene.startTime
     || typeof outcome.description!=='string' || outcome.description.trim().length<12) return null;
-  if (outcome.type==='not_applicable' && review.ballEnteredGoal===false
+    const comparison=evidence?.outcomeComparison,sourceAction=comparison?.sourceOutcome;
+    const sourceActionMatches=comparison?.version===1 && comparison.sameActionVerified===true
+      && !comparison.clockProblems?.length
+      && comparison.sourceSceneStartTime===scene.startTime && comparison.sourceSceneEndTime===scene.endTime
+      && sourceAction?.actionComplete===true && sourceAction.observedOutcome===outcome.type
+      && typeof sourceAction.actionDescription==='string' && sourceAction.actionDescription.trim().length>=20;
+    // A coarse penalty label may describe an appeal or a keeper collecting a
+    // pass. Correct it only with an independent complete source observation
+    // AND a positive review of the actual crop, retaining the locked interval.
+    if(scene.eventType==='penalty' && sourceActionMatches && review.ballEnteredGoal===false
+      && ['normal_play','save','shot_off_target','big_chance','foul','tackle'].includes(sourceAction.eventType))
+      return sourceAction.eventType;
+    if (outcome.type==='not_applicable' && review.ballEnteredGoal===false
     && ['save','shot_on_target','shot_off_target','big_chance'].includes(scene.eventType)
     && ['contact','payoff'].every(phase=>(review.phaseChecks||[]).some(check=>check.phase===phase
       && check.ballVisible===true && check.playerVisible===true

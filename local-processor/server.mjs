@@ -3,7 +3,7 @@ import { localStudioOrigins, localStudioReturnOrigin } from './local-studio-orig
 import { createWriteStream } from "node:fs";
 import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { GoogleGenAI } from "@google/genai";
@@ -43,6 +43,8 @@ import { isDecisionScene, normalizeDecisionOnlyScene, repairDecisionFraming } fr
 import { trackSceneWithGemini, assessGeminiFraming, reviewedFramingEvent, reviewedFramingNarration, reviewedLeadInScene, FramingVerificationError } from "./gemini-framing.mjs";
 import { keyframeProvider, hybridDetectorScene, providerEvidenceMatches, HYBRID_TRACKING_VERSION } from "./hybrid-tracking-policy.mjs";
 import { reviewHybridCrop, reviewedHybridPhaseBrief, hybridEvidenceWindowMatches } from "./hybrid-framing.mjs";
+import {repairHybridCamera} from './hybrid-camera-repair.mjs';
+import {buildFootballEvaluationReport} from './football-evaluation.mjs';
 import { fastTrackingPolicy } from './fast-tracking-policy.mjs';
 import { createWorkflowPerformance } from './workflow-performance.mjs';
 import {ACTION_GUIDANCE_VERSION,actionGuidanceKey,matchingActionGuidance,actionGuidanceRequest,observeValidatedActionGuidance,applySavedActionGuidance,actionGuideObservationKey,matchingActionGuideObservation,sharedActionGuideObservation} from './action-guidance.mjs';
@@ -4012,6 +4014,38 @@ async function trackLockedSceneUntilVerified(sourcePath, scene, media, id, scene
     }
   }
   if (hybridKeyframing && !nativeLandscape) {
+    const repairDirectory=join(outputRoot,id,'tracking','camera-repairs');
+    await mkdir(repairDirectory,{recursive:true});
+    const repairKey=createHash('sha256').update(JSON.stringify([scene.id,scene.startTime,scene.endTime])).digest('hex');
+    let repairEvidence=trackingEvidenceFor(merged,scene);
+    try {
+      const saved=JSON.parse(await readFile(join(repairDirectory,`${repairKey}.json`),'utf8'));
+      if(saved.hybridTrackingVersion===HYBRID_TRACKING_VERSION && hybridEvidenceWindowMatches(scene,saved))repairEvidence=saved;
+    } catch { /* First repair for this immutable source interval. */ }
+    if(assessPlannedSceneTracking(scene,repairEvidence).usable)
+      return {tracking:mergeTrackingResults(merged,{version:93,moments:{[scene.id]:repairEvidence}}),
+        assessment:assessPlannedSceneTracking(scene,repairEvidence)};
+    const saveRepair=createSerializedJsonStore(repairDirectory);
+    const repaired=await repairHybridCamera(scene,repairEvidence,{
+      track:async(repairScene,plan)=>{
+        const current=await readJob(id);
+        await updateJob(current,'tracking',Math.max(34,current.progress),{
+          activeTrackingScene:{id:scene.id,index:sceneIndex+1,total:sceneCount,status:'repairing',round:plan.sampleFps===20?2:3},
+          progressDetail:`Repairing scene ${sceneIndex+1}/${sceneCount}: checking more source frames and rebuilding its ball-follow camera.`});
+        const native=await trackFootball(sourcePath,[{...repairScene,selectedForFinalVideo:true}],media,id,{...plan,nativeOnly:true});
+        return trackingEvidenceFor(native,repairScene);
+      },
+      review:(repairScene,evidence)=>verifyHybridScene(sourcePath,repairScene,media,id,evidence),
+      assess:assessPlannedSceneTracking,
+      checkpoint:async(evidence)=>{
+        // Persist each bounded repair before another model call or scene. The
+        // journal prevents Resume from paying for an identical rejected plan.
+        await saveRepair(repairKey,evidence);
+      },
+    });
+    merged=mergeTrackingResults(merged,{version:93,moments:{[scene.id]:repaired.evidence}});
+    lastAssessment=repaired.assessment;
+    if(lastAssessment.usable)return {tracking:merged,assessment:lastAssessment};
     // The hybrid provider cannot recover a rejected detector crop by accepting
     // another model-generated coordinate path. Keep the locked scene and its
     // native evidence for a targeted Step 2 repair or human review.
@@ -4289,6 +4323,12 @@ async function prepareIncidentEvidence(sourcePath, candidates, media, id, option
       : assessPlannedSceneTracking(scene, trackingEvidenceFor(tracking, scene));
     return { ...scene, trackingPassed: assessment.usable === true, trackingDecision: assessment.mode };
   });
+  const evaluationJob={...await readJob(id),moments:verifiedScenes};
+  const evaluation=buildFootballEvaluationReport(evaluationJob,tracking,(scene,evidence)=>nativeLandscape
+    ?assessNativeFrameAction(scene,evidence):assessPlannedSceneTracking(scene,evidence));
+  await writeFile(join(trackingDirectory,'evaluation-report.json'),JSON.stringify(evaluation,null,2));
+  await updateJob(await readJob(id),'tracking',Math.max(34,Number(evaluationJob.progress||0)),{
+    trackingEvaluation:evaluation.summary});
   return { candidates: verifiedScenes, tracking };
 }
 async function verifyCandidateSemanticsWithGemini(sourcePath, candidates, id, onlyIds = null) {
@@ -6482,6 +6522,7 @@ async function trackFootball(sourcePath, moments, media, id, options = {}) {
       "--zoom", "1",
       "--tracker", fastTracking.enabled ? "botsort" : "tracktrack",
       "--camera-motion", "sparseOptFlow",
+      "--camera-strategy", options.cameraStrategy || "balanced",
       "--cache-dir", process.env.TRACKING_CACHE_DIR ? join(resolveSetting(process.env.TRACKING_CACHE_DIR), id) : join(dataRoot, "tracking-cache", id),
       "--shots", join(outputRoot, id, "shots.json"),
     ], reportProgress);

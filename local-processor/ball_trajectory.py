@@ -208,6 +208,11 @@ def choose_trajectory(frames, view_width, output_width=1080, beam_width=24,
                     and b['confidence']>=.6) for b,_ in candidates)
             role_context=has_role_ball or any(abs(frame['time']-t)<=.85 for t in role_times)
             def detector_cost(ball):
+                if ball.get('backgroundStatic') is True:
+                    # A persistent scene-fixed white object is a spare ball or
+                    # background candidate during flight. Keep it as measured
+                    # evidence, but prefer a real moving ball or an honest gap.
+                    return 6.0
                 region = frame.get('motion_ball_region')
                 if region:
                     distance = math.hypot(ball['cx']-region[0],(ball['cy']-region[1])*.6)

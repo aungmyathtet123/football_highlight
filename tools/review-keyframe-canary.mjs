@@ -27,6 +27,7 @@ async function run(executable, args) {
 const result = await reviewHybridCrop({
   sourcePath, sourceFingerprint, scene, evidence, media: { width: 1920, height: 1080 },
   ratio: 9 / 16, directory, ffmpeg: 'ffmpeg', run, model: 'gemini-3.8-flash', videoOnly: true,
+  outcomeModel: process.env.GEMINI_OUTCOME_REVIEW_MODEL || 'gemini-3.1-pro-preview',
   generate: async request => {
     const response = await ai.models.generateContent(request);
     if (!response.text) throw new Error('Gemini crop review returned no text.');

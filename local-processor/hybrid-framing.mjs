@@ -8,6 +8,7 @@ import {cropMediaPreflight} from './crop-media-preflight.mjs';
 import { HYBRID_TRACKING_VERSION } from './hybrid-tracking-policy.mjs';
 import { isDisciplinaryAction, DISCIPLINARY_ACTION_CONTRACT } from './disciplinary-action.mjs';
 import { reviewedFramingEvent } from './gemini-framing.mjs';
+import {framingVideoClockFilter} from './gemini-video-framing.mjs';
 
 const supportOnly = scene => scene.eventType === 'celebration' || scene.storyPhase === 'reaction';
 const decisionOnly = scene => ['offside','var'].includes(scene.eventType);
@@ -54,8 +55,25 @@ export function hybridDetailIndexes(scene,count,fps=3,maximum=8) {
 }
 const reviewFlags = ['passed','correctSubject','stableCamera','outcomeVisible','ballFollowed',
   'setupVisible','contactVisible','ballEnteredGoal'];
+export function hybridPairedClockProblems(earlier,later) {
+  const problems=[];
+  for(const phase of ['contact','payoff']) {
+    const observed=review=>(review?.phaseChecks||[]).filter(check=>check.phase===phase
+      && check.ballVisible===true && finite(check.time)).map(check=>check.time).sort((a,b)=>a-b);
+    const a=observed(earlier),b=observed(later);
+    if(a.length && b.length && Math.abs((phase==='contact'?a.at(-1):a[0])
+      -(phase==='contact'?b.at(-1):b[0]))>.5)problems.push(`independent_${phase}_clock_disagreement`);
+  }
+  return problems;
+}
 export function needsHybridOutcomeComparison(scene,review) {
-  if(!review || !['goal','disallowed_goal','save','shot_on_target','shot_off_target','big_chance'].includes(scene.eventType)) return false;
+  if(!review) return false;
+  if(review.passed===false || review.correctSubject===false
+    || !supportOnly(scene)&&!decisionOnly(scene)&&review.ballFollowed===false
+    || review.outcomeVisible===false) return true;
+  if(!['goal','disallowed_goal','save','shot_on_target','shot_off_target','big_chance'].includes(scene.eventType)) return false;
+  const expected={save:['keeper_save'],shot_off_target:['wide','over'],shot_on_target:['keeper_save','blocked','woodwork'],big_chance:['keeper_save','blocked','woodwork','wide','over']};
+  if(expected[scene.eventType] && !expected[scene.eventType].includes(review.observedOutcome?.type)) return true;
   return ['goal','disallowed_goal'].includes(scene.eventType)
     ? review.ballEnteredGoal!==true || review.observedOutcome?.type!=='goal'
     : review.ballEnteredGoal===true || review.observedOutcome?.type==='goal';
@@ -115,7 +133,7 @@ export function reviewedHybridPhaseBrief(scene, evidence) {
     || payoff.time < contact.time + .15
     || payoff.time > duration - .05) return null;
   const absolute=time=>+(scene.startTime+time).toFixed(3);
-  const payoffStart=Math.max(contact.time+.15,payoff.time-.25);
+  const payoffStart=Math.max(contact.time+.15,flight.time+.001,payoff.time-.25);
   const payoffEnd=Math.min(duration,Math.max(payoff.time+.35,
     finite(review.observedOutcome?.time)?review.observedOutcome.time+.25:0));
   return {...scene.trackingBrief, originTime:absolute(setups[0].time),
@@ -260,7 +278,7 @@ export function assessHybridFraming(scene, evidence) {
   if (evidence.layoutMode === 'source_contain')
     return { usable: false, mode: 'portrait_full_bleed_required', issues: ['portrait_full_bleed_required'] };
   if (evidence.hybridTrackingVersion !== HYBRID_TRACKING_VERSION
-    && !([6, 7, 8, 9].includes(evidence.hybridTrackingVersion) && evidence.finalCropVerified === true
+    && !([6, 7, 8, 9, 10].includes(evidence.hybridTrackingVersion) && evidence.finalCropVerified === true
       && evidence.renderReview?.passed === true))
     return { usable: false, mode: 'hybrid_cache_version_mismatch' };
   if (evidence.reviewRepairError)
@@ -278,6 +296,11 @@ export function assessHybridFraming(scene, evidence) {
   if (!supportOnly(scene) && !decisionOnly(scene)) checks.push('ballFollowed', 'setupVisible', 'contactVisible');
   if (scene.eventType === 'goal') checks.push('ballEnteredGoal');
   const missing = checks.filter(key => review?.[key] !== true);
+  missing.push(...(evidence.outcomeComparison?.clockProblems||[]));
+  const source=evidence.outcomeComparison?.sourceOutcome;
+  if(evidence.outcomeComparison?.sameActionVerified===true && source?.actionComplete===true
+    && source.observedOutcome!=='uncertain' && source.observedOutcome!==review?.observedOutcome?.type)
+    missing.push('source_crop_outcome_disagreement');
   if ((decisionOnly(scene) || penaltyAward(scene,evidence)) && !(review?.phaseChecks || []).some(check => check.phase === 'payoff'
     && finite(check.time) && check.time >= 0 && check.time <= scene.endTime - scene.startTime
     && (!penaltyAward(scene,evidence) || check.playerVisible === true)
@@ -312,7 +335,15 @@ export function assessHybridFraming(scene, evidence) {
     if (phase === 'setup') return time <= (geometry.issues.includes('opening_carrier_and_ball_missing') && !reviewedBrief
       ? .8 : Math.min(contact ?? duration,release ?? duration));
     if (phase === 'contact' && contact != null) return time >= contact - .30 && time <= contact + .25;
-    if (phase === 'flight' && release != null) return time >= release && time <= (payoff ?? duration);
+    // The payoff hold can start before the observed outcome to give it a
+    // stable lead-in. That editorial hold must not erase directly observed
+    // flight between the last touch and the actual outcome frame.
+    if (phase === 'flight' && release != null) {
+      const observedPayoff=reviewedBrief && review.phaseChecks
+        .filter(check=>check.phase==='payoff' && finite(check.time) && check.ballVisible===true)
+        .map(check=>check.time).sort((a,b)=>a-b)[0];
+      return time >= release && time <= (finite(observedPayoff) ? observedPayoff : payoff ?? duration);
+    }
     // Video observations are sampled at 8fps. A visible outcome one sample
     // before the semantic estimate is still direct evidence of that outcome.
     if (phase === 'payoff' && payoff != null) return time >= payoff - 1/8;
@@ -377,7 +408,7 @@ export function hybridCropReviewRequest({model,scene,videoData,geometryIssues=[]
     {text:`Independently inspect this ACTUAL rendered ${presentationMode==='source_contain'?'full-source frame contained inside a portrait canvas':'portrait crop'}. No claimed score or player name is supplied. Use neutral roles only in observations and descriptions, never inferred player names, team names or scorelines; framing is not identity verification.
 ${hybridReviewInstructions(scene)}
 ${presentationMode==='source_contain'?'The full broadcast frame is the proposed final presentation. Judge whether the complete action and its real result remain identifiable at this displayed size. If this is actually a pass, challenge or clearance rather than a shot, evaluate its visible contact, flight and resolution as normal play and report observedOutcome.type=not_applicable. An incomplete source action must fail.':''}
-Do not infer a goal from celebration, a scoreboard, a spare ball or a shot wide/over. ballEnteredGoal is true only when the moving match ball visibly crosses the goal line inside the goal. Cite concrete scene-local timestamps.
+Do not infer a goal from celebration, a scoreboard, a spare ball or a shot wide/over. ballEnteredGoal is true only when the moving match ball visibly crosses the goal line inside the goal. Read the burned-in SCENE seconds clock for every timestamp. List all meaningful touches in chronological order; the decisive contact is the LAST shot/header before the resolved payoff, not an earlier pass or dribble touch.
 Native detector gaps need independent pixel evidence, not automatic approval: ${JSON.stringify(geometryIssues)}.
 The following are scene-local phase hints, NOT proof of the action or coordinates: ${JSON.stringify(Object.fromEntries(Object.entries(scene.trackingBrief || {}).filter(([key,value])=>/Time$/.test(key)&&finite(value)).map(([key,value])=>[key,value-scene.startTime])))}.
 ${videoOnly?'The supplied native-detail video contains the complete actual presented frame at 12fps. Inspect ball movement, receiving touches and finish directly from this video.':'The labelled high-detail stills show the SAME actual presented frame before preview downsampling; use them to inspect the small ball and contact, and use the video to judge movement.'} No video outside this presentation is supplied. Return ONE JSON object, not an array, with boolean passed, correctSubject, stableCamera, outcomeVisible, ballFollowed, setupVisible, contactVisible, ballEnteredGoal; issues:[string]; observations:[{time:number,description:string}]; phaseChecks:[{phase:string,time:number,ballVisible:boolean,playerVisible:boolean,description:string}].`}],
@@ -395,7 +426,7 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
     geometryReview: geometry, geometryVerified:geometry.usable === true, finalCropVerified: false };
   if (!geometry.usable) return result; // Never pay for approval of known bad geometry.
   const key = createHash('sha256').update(JSON.stringify({ sourceFingerprint, model,
-    version: HYBRID_TRACKING_VERSION, videoOnly,
+    version: HYBRID_TRACKING_VERSION, videoOnly, clockVersion:1,
     ...(presentationMode==='source_contain'?{presentationMode}:{}),
     reviewVersion:nonFinishingPlay(scene)||decisionOnly(scene)||scene.eventType==='penalty'?7:5, start: scene.startTime, end: scene.endTime,
     ratio, supportOnly: supportOnly(scene), trackingBrief: scene.trackingBrief,
@@ -417,7 +448,7 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
       ? `scale=${stillWidth}:${stillHeight}:force_original_aspect_ratio=decrease,pad=${stillWidth}:${stillHeight}:(ow-iw)/2:(oh-ih)/2:black`
       : `${crop},scale=${stillWidth}:${stillHeight}`;
     await writeFile(graph, videoOnly
-      ? `[0:v]setpts=PTS-STARTPTS,${presented},fps=12[v]`
+      ? `[0:v]setpts=PTS-STARTPTS,${presented},${framingVideoClockFilter()},fps=12[v]`
       : `[0:v]setpts=PTS-STARTPTS,${presented},split=2[c][q];[c]scale=-2:720,fps=8[v];[q]fps=3[qa]`);
     await run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y', '-ss', String(scene.startTime),
       '-i', sourcePath, '-t', String(scene.endTime - scene.startTime),
@@ -460,7 +491,7 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
         const video=join(folder,'opening-crop.mp4');
         await run(ffmpeg,['-hide_banner','-loglevel','error','-y','-ss',String(scene.startTime),
           '-i',sourcePath,'-t',String(Math.min(duration,contact+.15)),
-          '-vf',`${crop},fps=24`,'-an','-c:v','libx264','-preset','veryfast','-crf','18',video]);
+          '-vf',`setpts=PTS-STARTPTS,${crop},${framingVideoClockFilter()},fps=24`,'-an','-c:v','libx264','-preset','veryfast','-crf','18',video]);
         detail=await generate({model,contents:[
           footballVideoPart((await readFile(video)).toString('base64'),24),
           {text:`Inspect ONLY this actual 9:16 portrait opening, with scene-local time starting at zero. The independently observed decisive touch is at ${contact}s. Before that touch, is the SAME moving match ball visibly identifiable together with the eventual touching player? A distant earlier passer, white boot, spare ball, or off-screen action does not count. Return setupVisible=true only if both are identifiable BEFORE ${contact-.05}s, with the exact scene-local setupTime and a concrete description. Otherwise return false with setupTime=-1. Do not judge or alter the later outcome.`}
@@ -616,11 +647,12 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
     result.initialRenderReview=review;
     result.renderReview=detailed;
   }
-  if(videoOnly && outcomeModel!==model && needsHybridOutcomeComparison(scene,result.renderReview)) {
+  if(videoOnly && outcomeModel!==model && (needsHybridOutcomeComparison(scene,result.renderReview)
+    || result.outcomeComparison?.clockProblems?.length)) {
     // One independent full-scene comparison resolves a disputed sporting
     // result. A short excerpt cannot repair earlier missing setup or establish
     // which player made the final touch. The source never supplies crop proof.
-    const pairedPath=join(folder,`paired-goal-${createHash('sha256').update(outcomeModel).digest('hex').slice(0,12)}-v1.json`);
+    const pairedPath=join(folder,`paired-action-${createHash('sha256').update(outcomeModel).digest('hex').slice(0,12)}-v3.json`);
     let paired;
     try {paired=JSON.parse(await readFile(pairedPath,'utf8'));} catch { /* Independent observation required. */ }
     if(!paired) {
@@ -630,7 +662,7 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
         ? `crop=ih*${ratio}:ih:x='max(0,min(iw-ow,iw*(${x})-ow/2))':y=0`
         : `crop=iw:iw/${ratio}:x=0:y='(ih-oh)/2'`;
       const graph=join(folder,'paired-goal-filter.txt');
-      await writeFile(graph,`[0:v]trim=duration=${scene.endTime-scene.startTime},setpts=PTS-STARTPTS,split=2[c][s];[c]${crop},fps=24[cv];[s]fps=24[sv]`);
+      await writeFile(graph,`[0:v]trim=duration=${scene.endTime-scene.startTime},setpts=PTS-STARTPTS,split=2[c][s];[c]${crop},${framingVideoClockFilter()},fps=24[cv];[s]${framingVideoClockFilter()},fps=24[sv]`);
       await run(ffmpeg,['-hide_banner','-loglevel','error','-y','-ss',String(scene.startTime),'-i',sourcePath,
         '-t',String(scene.endTime-scene.startTime),...await filterGraphArgs(ffmpeg,graph),
         '-map','[cv]','-an','-c:v','libx264','-preset','veryfast','-crf','16',cropVideo,
@@ -640,19 +672,24 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
         if(!checked.usable) return {...result,reviewRepairError:`Independent outcome clip failed media check: ${checked.issue}`};
       }
       try {paired=await generate({model:outcomeModel,contents:[
-        {text:'Two synchronized complete clips, starting at scene-local zero: FIRST is the actual portrait delivery, SECOND is its original wide reference. Independently observe the moving match ball and the front goal plane in both; no expected result is supplied.'},
+        {text:'Two synchronized complete clips with burned-in SCENE seconds clocks: FIRST is the actual portrait delivery, SECOND is its original wide reference. Read the SCENE clock for every timestamp, never the match scoreboard or a guessed video time. List ALL meaningful contacts chronologically, including passes, receiving touches, the LAST shot/header, rebounds and follow-up shots. Each final outcome belongs to its own final contact, never an earlier pass. Independently observe the moving match ball and the front goal plane in both; no expected result is supplied.'},
         footballVideoPart((await readFile(cropVideo)).toString('base64'),24),
         footballVideoPart((await readFile(sourceVideo)).toString('base64'),24),
-        {text:`Return sameActionVerified only for the same continuous action. Source outcome and cropReview must be independent pixel verdicts. A goal requires the ball crossing the FRONT plane between posts and below the bar; side netting from outside, a keeper dive, scoreboard and celebration do not prove it. A keeper may fail to stop the ball and it may later rebound out of the net. A defensive backpass or deflection can produce an OWN GOAL without an attacking final touch: in that case setup, contact and correctSubject refer to the defender with the real ball before that last touch. Do not reject a complete visible own goal merely for lacking an attacking shot. Judge the entire FIRST clip for setup, touch, flight, actual result and camera stability. Only FIRST-clip visibility can approve its flags; source-only proof must fail the crop. Cite scene-local times. Keep uncertainty false. ${NEUTRAL_CROP_VERDICT}`}],
+        {text:`Return sameActionVerified only for the same continuous action. Independently classify the actual SOURCE eventType and describe its directly observed action and resolution; no expected label is supplied. Distinguish a penalty AWARD (challenge plus visible referee decision), a TAKEN penalty, a real shot/save, a through ball gathered by a keeper, a pass, tackle, foul, official decision and a player reaction. A keeper gathering a loose pass is normal_play, not a shot/save or proof of a penalty. For a penalty award require the referee decision in the source; a fallen attacker or appeal alone is insufficient. Source phaseChecks must use scene-local times and truthful ball/player visibility; actionComplete and ballContinuouslyVisible must be false when evidence is missing. Judge the FIRST crop against this actually observed action family: do not reject an otherwise complete open-play crop merely because an earlier tentative label called it a penalty. Require visible setup, decisive contact, continuation and its resolution for gameplay; a reaction needs the involved subject, and an official decision needs the actual signal. Source outcome and cropReview must be independent pixel verdicts. A goal requires the ball crossing the FRONT plane between posts and below the bar; side netting from outside, a keeper dive, scoreboard and celebration do not prove it. A defensive backpass can produce an own goal. Only FIRST-clip visibility can approve crop flags; source-only proof must fail the crop. Explicitly identify whether a lost ball is outside the portrait edge or absent even in the source. Keep all uncertainty false. ${NEUTRAL_CROP_VERDICT}`}],
         config:{responseMimeType:'application/json',responseJsonSchema:{type:'object',
           required:['sameActionVerified','sourceOutcome','cropReview'],properties:{
             sameActionVerified:{type:'boolean'},cropReview:HYBRID_REVIEW_SCHEMA,
-            sourceOutcome:{type:'object',required:['observedOutcome','goalLineCrossingVerified','goalLineCrossingTime','crossingEvidence'],
+            sourceOutcome:{type:'object',required:['observedOutcome','goalLineCrossingVerified','goalLineCrossingTime','crossingEvidence','eventType','actionDescription','actionComplete','ballContinuouslyVisible','phaseChecks'],
               properties:{observedOutcome:HYBRID_REVIEW_SCHEMA.properties.observedOutcome.properties.type,
-                goalLineCrossingVerified:{type:'boolean'},goalLineCrossingTime:{type:['number','null']},crossingEvidence:{type:'string'}}}}},
+                goalLineCrossingVerified:{type:'boolean'},goalLineCrossingTime:{type:['number','null']},crossingEvidence:{type:'string'},
+                eventType:{type:'string',enum:['goal','save','shot_on_target','shot_off_target','big_chance','normal_play','assist','free_kick','skill','dribble','tackle','foul','penalty','offside','var','yellow_card','red_card','celebration','uncertain']},
+                actionDescription:{type:'string'},actionComplete:{type:'boolean'},ballContinuouslyVisible:{type:'boolean'},
+                phaseChecks:HYBRID_REVIEW_SCHEMA.properties.phaseChecks}}}},
           temperature:0,maxOutputTokens:16384,thinkingConfig:{thinkingLevel:'HIGH'}}},
-        `independent full-clip goal comparison ${scene.id}`);} catch(error) {
-        if(error?.name!=='AbortError' && ![408,429,500,502,503,504].includes(Number(error?.status||error?.code))) throw error;
+      `independent full-clip action comparison ${scene.id}`);} catch(error) {
+        // Provider unavailability is not a failed camera. Preserve the cached
+        // first review and let service recovery retry the missing comparison.
+        throw error;
       }
       if(paired) await writeFile(pairedPath,JSON.stringify(paired));
     }
@@ -661,11 +698,14 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
       const sameGoal=source?.observedOutcome!=='goal' || source.goalLineCrossingVerified===true
         && finite(source.goalLineCrossingTime) && finite(cropReview.observedOutcome?.time)
         && Math.abs(source.goalLineCrossingTime-cropReview.observedOutcome.time)<=.5;
-      if(sameGoal && source?.observedOutcome===cropReview.observedOutcome?.type) {
+      // Preserve independently observed source phases even when its outcome is
+      // absent from the crop: they may guide a new native pass, never approve it.
+      if(sameGoal || cropReview.passed!==true) {
+        const clockProblems=hybridPairedClockProblems(result.renderReview,cropReview);
         result.initialRenderReview ||= result.renderReview;
         result.renderReview=cropReview;
         result.outcomeComparison={version:1,sameActionVerified:true,sourceSceneStartTime:scene.startTime,
-          sourceSceneEndTime:scene.endTime,sourceOutcome:source,generationProvenance:paired.generationProvenance};
+          sourceSceneEndTime:scene.endTime,sourceOutcome:source,clockProblems,generationProvenance:paired.generationProvenance};
       }
     }
   }

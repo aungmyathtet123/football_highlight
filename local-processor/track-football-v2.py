@@ -12,12 +12,13 @@ from football_detection import PersonTracker as MotionPersonTracker, SlicedBallD
 from detector_roles import football_classes, reacquisition_hint, touch_distance, broadcast_scale_transition
 from football_action_phase import action_phase, action_clock
 from football_source_geometry import goalkeeper_targets, on_target_keeper_handoff
-from tracking_motion import active_joint_fit_in_crop, camera_ownership_phase, constrained_camera, framing_bounds, vertical_framing_bounds, flight_target, visible_in_crop, observed_payoff_box, possession_handoff, goal_outcome_subject, goal_outcome_target, reconcile_goal_destination
+from tracking_motion import active_joint_fit_in_crop, camera_ownership_phase, constrained_camera, framing_bounds, vertical_framing_bounds, flight_target, visible_in_crop, observed_payoff_box, possession_handoff, goal_outcome_subject, goal_outcome_target, reconcile_goal_destination, ball_follow_repair_targets
 from tracking_cache import ObservationStore, fingerprint, content_fingerprint, scene_key, atomic_json, digest
 from tracking_decode import usable_tracking_checkpoint, normalize_tracking_source
 from tracking_cpu import detector_cpu_threads, bind_detector_cpu_threads
 from ball_trajectory import choose_trajectory, trajectory_camera_guidance, candidate_diameter, maximum_candidate_diameter
 from football_ball_motion import observe_ball_motion
+from football_ball_static import observe_static_ball_distractors
 from phase_quality import phase_quality
 from semantic_ball_search import observed_search_region, needs_detail_search
 from scorer_tracking import player_ball_distance, select_scorer_track_id, select_stable_action_track_id
@@ -78,6 +79,7 @@ def parse_args():
     parser.add_argument("--cache-dir")
     parser.add_argument("--tracker", choices=["tracktrack", "botsort", "bytetrack"], default="tracktrack")
     parser.add_argument("--camera-motion", choices=["sparseOptFlow", "none"], default="sparseOptFlow")
+    parser.add_argument("--camera-strategy", choices=["balanced", "ball_follow"], default="balanced")
     parser.add_argument("--moment-id", help="Track only one moment from a larger saved job (diagnostic use).")
     return parser.parse_args()
 
@@ -689,7 +691,7 @@ def create_ring(path):
 def build_keyframes(
     records, media_width, media_height, fallback_x, output_width, window_height,
     window_top, zoom, sample_fps, contact_time, annotation_start, annotation_end, goal_mode,
-    event_type,
+    event_type, camera_strategy="balanced",
 ):
     if not records:
         return [], {"style": "none", "confidence": 0.0, "duration": 0.0}
@@ -748,6 +750,11 @@ def build_keyframes(
             # When the ball is temporarily missing, retain the last verified
             # action crop. A scorer detection alone must never pull the camera
             # away from the football path.
+    if camera_strategy == "ball_follow":
+        # Repair a rejected crop using measured football positions. Start the
+        # handoff at the observed final contact, preserving player + ball in
+        # setup. Missing measurements remain missing; no semantic box is used.
+        ball_follow_repair_targets(records, contact_time)
     camera_x_targets = phase_camera_targets(
         records, "camera_target_x", crop_width / media_width, goal_mode
     )
@@ -1108,6 +1115,9 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
                 "cacheHits": args.observations.hits, "newFrames": args.observations.misses}), flush=True)
 
     tracking_brief = moment.get("trackingBrief") or {}
+    if args.camera_strategy == 'ball_follow':
+        observe_static_ball_distractors(capture,observed_frames,source_fps,
+            start+contact_time,start+payoff_time)
     if moment.get('eventType') in {'goal','disallowed_goal','save','shot_on_target','shot_off_target','big_chance'}:
         motion_path = observe_ball_motion(capture, observed_frames, source_fps,
             start+max(0,contact_time-.15), min(end,start+contact_time+4,
@@ -1593,7 +1603,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
     keyframes, annotation = build_keyframes(
         records, media_width, media_height, fallback_x, args.output_width, args.window_height,
         args.window_top, scene_zoom, args.sample_fps, contact_time, annotation_start, annotation_end, goal_mode,
-        str(moment.get("eventType") or "normal_play"),
+        str(moment.get("eventType") or "normal_play"), args.camera_strategy,
     )
     denominator = max(1, sampled_frames)
     camera_positions = [frame["cameraX"] for frame in keyframes]
@@ -1753,7 +1763,8 @@ def main():
         "imageSize": args.image_size, "ballImageSize": args.ball_image_size,
         "confidence": args.confidence, "ballConfidence": args.ball_confidence,
         "sampleFps": args.sample_fps, "coarseSampleFps": args.coarse_sample_fps, "device": args.device}
-    signature = {"detection": detection_signature, "version": 113, "associationVersion": 53, "tacticalSubjects": 4, "compositionVersion": 45, "tracker": args.tracker,
+    signature = {"detection": detection_signature, "version": 115, "associationVersion": 54, "tacticalSubjects": 4, "compositionVersion": 46, "tracker": args.tracker,
+        "cameraStrategy": args.camera_strategy,
         "cameraMotion": args.camera_motion, "zoom": args.zoom,
         "output": [args.output_width, args.output_height, args.window_top, args.window_height],
         "shots": json.loads(Path(args.shots).read_text(encoding="utf-8"))["shots"] if args.shots else None}

@@ -217,6 +217,22 @@ def _required_bounds(records, view_size, axis, prefer_center=True):
     return raw
 
 
+def ball_follow_repair_targets(records, contact_time):
+    """A rejected camera may hand off to measured flight after final contact.
+
+    Keep missing observations unknown and preserve the carrier through contact.
+    The ordinary constrained solver still owns containment and motion limits.
+    """
+    for record in records:
+        if (record['time'] > contact_time + .12
+                and record.get('direct_ball') is True
+                and isinstance(record.get('ball_x'), (int, float))
+                and math.isfinite(record['ball_x'])):
+            record['camera_owner'] = 'ball'
+            record['camera_target_x'] = record['ball_x']
+    return records
+
+
 def flight_target(ball, player, velocity, view_width, fallback):
     if ball is None:
         return fallback
