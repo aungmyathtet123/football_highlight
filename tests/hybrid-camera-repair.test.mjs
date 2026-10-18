@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {cameraPlanSignature,hybridRepairScene,repairHybridCamera} from '../local-processor/hybrid-camera-repair.mjs';
-import {assessHybridFraming,needsHybridOutcomeComparison,hybridPairedClockProblems} from '../local-processor/hybrid-framing.mjs';
+import {assessHybridFraming,needsHybridOutcomeComparison,hybridPairedClockProblems,hybridComparisonFrameTimes} from '../local-processor/hybrid-framing.mjs';
 import {HYBRID_TRACKING_VERSION} from '../local-processor/hybrid-tracking-policy.mjs';
 import {reviewedFramingEvent} from '../local-processor/gemini-framing.mjs';
 
@@ -48,6 +48,15 @@ test('a confident second reviewer cannot approve a different action clock',()=>{
   assert.deepEqual(problems,['independent_contact_clock_disagreement','independent_payoff_clock_disagreement']);
   const paired={...evidence,renderReview:conflicting,outcomeComparison:{clockProblems:problems}};
   assert.equal(assessHybridFraming(scene,paired).usable,false);
+});
+
+test('independent contact stills show both disputed touches on the decoded scene clock',()=>{
+  const times=hybridComparisonFrameTimes({...scene,trackingBrief:{contactTime:101.5}},review);
+  assert.ok(times.includes(1.5));
+  assert.ok(times.includes(3.25));
+  assert.ok(times.includes(3.75));
+  assert.ok(times.every(time=>time>=0&&time<7&&Math.abs(time*24-Math.round(time*24))<1e-8));
+  assert.ok(hybridComparisonFrameTimes({...scene,endTime:103.76},review).every(time=>time<3.76-1/24));
 });
 
 test('repair uses observed phase times while excluding every semantic coordinate rectangle',()=>{

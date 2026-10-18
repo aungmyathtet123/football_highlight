@@ -66,6 +66,19 @@ export function hybridPairedClockProblems(earlier,later) {
   }
   return problems;
 }
+export function hybridComparisonFrameTimes(scene,review) {
+  const duration=scene.endTime-scene.startTime;
+  const contacts=(review?.phaseChecks||[]).filter(check=>check.phase==='contact'&&finite(check.time))
+    .map(check=>check.time);
+  const hint=scene.trackingBrief?.contactTime-scene.startTime;
+  if(finite(hint))contacts.push(hint);
+  const times=contacts.slice(-3).flatMap(time=>[time-1/12,time,time+1/12]);
+  const payoff=review?.phaseChecks?.find(check=>check.phase==='payoff'&&finite(check.time))?.time;
+  if(finite(payoff))times.push(payoff);
+  return [...new Set(times.filter(time=>time>=0&&time<duration).map(time=>Math.round(time*24)/24)
+    .filter(time=>time<duration-1/24))]
+    .sort((a,b)=>a-b).slice(0,10);
+}
 export function needsHybridOutcomeComparison(scene,review) {
   if(!review) return false;
   if(review.passed===false || review.correctSubject===false
@@ -652,7 +665,7 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
     // One independent full-scene comparison resolves a disputed sporting
     // result. A short excerpt cannot repair earlier missing setup or establish
     // which player made the final touch. The source never supplies crop proof.
-    const pairedPath=join(folder,`paired-action-${createHash('sha256').update(outcomeModel).digest('hex').slice(0,12)}-v3.json`);
+    const pairedPath=join(folder,`paired-action-${createHash('sha256').update(outcomeModel).digest('hex').slice(0,12)}-v4.json`);
     let paired;
     try {paired=JSON.parse(await readFile(pairedPath,'utf8'));} catch { /* Independent observation required. */ }
     if(!paired) {
@@ -671,10 +684,27 @@ export async function reviewHybridCrop({ sourcePath, sourceFingerprint, scene, e
         const checked=cropMediaPreflight(scene,await probeVideo(video),24);
         if(!checked.usable) return {...result,reviewRepairError:`Independent outcome clip failed media check: ${checked.issue}`};
       }
+      // Video reviewers can confuse an earlier pass with the final shot even
+      // with a visible clock. Supply measured-clock pixels around BOTH the
+      // tentative contact and independently observed contact, without boxes or
+      // expected outcomes. These are evidence, never generated coordinates.
+      const contactFrames=[];
+      for(const time of hybridComparisonFrameTimes(scene,result.renderReview)) {
+        const cropFrame=join(folder,`contact-${time.toFixed(3)}-crop.jpg`);
+        const sourceFrame=join(folder,`contact-${time.toFixed(3)}-source.jpg`);
+        await run(ffmpeg,['-hide_banner','-loglevel','error','-y',
+          '-ss',String(time),'-i',cropVideo,'-ss',String(time),'-i',sourceVideo,
+          '-map','0:v:0','-frames:v','1','-q:v','2',cropFrame,
+          '-map','1:v:0','-frames:v','1','-q:v','2',sourceFrame]);
+        contactFrames.push({text:`Scene clock ${time.toFixed(3)}s: FIRST image is the actual portrait, SECOND the synchronized wide source. Compare touches using these pixels; do not substitute an earlier pass for the final shot.`},
+          {inlineData:{mimeType:'image/jpeg',data:(await readFile(cropFrame)).toString('base64')},mediaResolution:{level:'MEDIA_RESOLUTION_HIGH'}},
+          {inlineData:{mimeType:'image/jpeg',data:(await readFile(sourceFrame)).toString('base64')},mediaResolution:{level:'MEDIA_RESOLUTION_HIGH'}});
+      }
       try {paired=await generate({model:outcomeModel,contents:[
         {text:'Two synchronized complete clips with burned-in SCENE seconds clocks: FIRST is the actual portrait delivery, SECOND is its original wide reference. Read the SCENE clock for every timestamp, never the match scoreboard or a guessed video time. List ALL meaningful contacts chronologically, including passes, receiving touches, the LAST shot/header, rebounds and follow-up shots. Each final outcome belongs to its own final contact, never an earlier pass. Independently observe the moving match ball and the front goal plane in both; no expected result is supplied.'},
         footballVideoPart((await readFile(cropVideo)).toString('base64'),24),
         footballVideoPart((await readFile(sourceVideo)).toString('base64'),24),
+        ...contactFrames,
         {text:`Return sameActionVerified only for the same continuous action. Independently classify the actual SOURCE eventType and describe its directly observed action and resolution; no expected label is supplied. Distinguish a penalty AWARD (challenge plus visible referee decision), a TAKEN penalty, a real shot/save, a through ball gathered by a keeper, a pass, tackle, foul, official decision and a player reaction. A keeper gathering a loose pass is normal_play, not a shot/save or proof of a penalty. For a penalty award require the referee decision in the source; a fallen attacker or appeal alone is insufficient. Source phaseChecks must use scene-local times and truthful ball/player visibility; actionComplete and ballContinuouslyVisible must be false when evidence is missing. Judge the FIRST crop against this actually observed action family: do not reject an otherwise complete open-play crop merely because an earlier tentative label called it a penalty. Require visible setup, decisive contact, continuation and its resolution for gameplay; a reaction needs the involved subject, and an official decision needs the actual signal. Source outcome and cropReview must be independent pixel verdicts. A goal requires the ball crossing the FRONT plane between posts and below the bar; side netting from outside, a keeper dive, scoreboard and celebration do not prove it. A defensive backpass can produce an own goal. Only FIRST-clip visibility can approve crop flags; source-only proof must fail the crop. Explicitly identify whether a lost ball is outside the portrait edge or absent even in the source. Keep all uncertainty false. ${NEUTRAL_CROP_VERDICT}`}],
         config:{responseMimeType:'application/json',responseJsonSchema:{type:'object',
           required:['sameActionVerified','sourceOutcome','cropReview'],properties:{
