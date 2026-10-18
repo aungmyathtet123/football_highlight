@@ -46,12 +46,19 @@ matches for validation and final testing.
   source observation and an independently complete portrait crop.
 - Independent video reviewers sometimes supplied different decisive-touch
   clocks. A confident second answer must not silently replace the action.
+- The keeper's first parry and later secure collection can be different valid
+  resolution times for one save. This is distinguished from a changed shot
+  contact, goal crossing or intervening follow-up attempt.
 - Recovery lacked a bounded, genuinely changed native camera plan after a
   negative crop verdict. Repeated identical reviews cannot fix the pixels.
 
 The shared changes address these mechanisms while preserving the locked
 source intervals and full-screen 9:16 requirement. A newly rendered crop
 still needs its own passing review. Unknown outcomes remain unverified.
+
+Timestamped contact-frame pairs supplement the two complete videos when an
+independent comparison is necessary. They expose both the tentative contact
+and the crop-observed contact without generated ball coordinates.
 
 ## Reproduce and extend
 

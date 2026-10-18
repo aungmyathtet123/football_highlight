@@ -59,6 +59,16 @@ test('independent contact stills show both disputed touches on the decoded scene
   assert.ok(hybridComparisonFrameTimes({...scene,endTime:103.76},review).every(time=>time<3.76-1/24));
 });
 
+test('a save may resolve at the parry or later secure collection of the same shot',()=>{
+  const collection={...review,phaseChecks:checks.map(check=>({...check,
+    time:check.phase==='payoff'?5:check.time})),observedOutcome:{...review.observedOutcome,time:5}};
+  assert.deepEqual(hybridPairedClockProblems(review,collection),[]);
+  assert.deepEqual(hybridPairedClockProblems(review,{...collection,keeperContactVisible:false}),
+    ['independent_payoff_clock_disagreement']);
+  assert.deepEqual(hybridPairedClockProblems(review,{...collection,phaseChecks:[...collection.phaseChecks,
+    {...checks[1],time:4.5}]}),['independent_contact_clock_disagreement','independent_payoff_clock_disagreement']);
+});
+
 test('repair uses observed phase times while excluding every semantic coordinate rectangle',()=>{
   const prepared=hybridRepairScene({...scene,trackingBrief:{contactTime:106,flightStartTime:101,
     actionGuide:{anchors:[{ball:[0,0,100,100]}]},goalFocusX:.9}},evidence);

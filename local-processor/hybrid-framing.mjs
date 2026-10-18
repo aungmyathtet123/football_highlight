@@ -57,10 +57,22 @@ const reviewFlags = ['passed','correctSubject','stableCamera','outcomeVisible','
   'setupVisible','contactVisible','ballEnteredGoal'];
 export function hybridPairedClockProblems(earlier,later) {
   const problems=[];
+  const observed=(review,phase)=>(review?.phaseChecks||[]).filter(check=>check.phase===phase
+    && check.ballVisible===true && finite(check.time)).map(check=>check.time).sort((a,b)=>a-b);
+  const earlierContact=observed(earlier,'contact').at(-1),laterContact=observed(later,'contact').at(-1);
   for(const phase of ['contact','payoff']) {
-    const observed=review=>(review?.phaseChecks||[]).filter(check=>check.phase===phase
-      && check.ballVisible===true && finite(check.time)).map(check=>check.time).sort((a,b)=>a-b);
-    const a=observed(earlier),b=observed(later);
+    const a=observed(earlier,phase),b=observed(later,phase);
+    // A directly observed parry resolves a save before a later secure catch.
+    // Reviewers can validly cite those different milestones of the SAME shot.
+    // Preserve the strict final-contact check and never extend this exception
+    // to a goal crossing, missing keeper touch, or intervening follow-up shot.
+    const sameSave=phase==='payoff' && [earlier,later].every(review=>
+      review?.observedOutcome?.type==='keeper_save' && review.keeperContactVisible===true)
+      && finite(earlierContact)&&finite(laterContact)&&Math.abs(earlierContact-laterContact)<=.5
+      && a.length&&b.length&&Math.min(a[0],b[0])>Math.max(earlierContact,laterContact)+.08
+      && [earlier,later].every(review=>!observed(review,'contact')
+        .some(time=>time>Math.min(a[0],b[0])&&time<Math.max(a[0],b[0])));
+    if(sameSave)continue;
     if(a.length && b.length && Math.abs((phase==='contact'?a.at(-1):a[0])
       -(phase==='contact'?b.at(-1):b[0]))>.5)problems.push(`independent_${phase}_clock_disagreement`);
   }
