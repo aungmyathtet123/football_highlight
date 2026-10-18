@@ -15,6 +15,10 @@ run writes `tracking/evaluation-report.json` into its durable checkpoint.
 
 ## Repeatable collection
 
+The standard `npm test` command includes the shared football recovery and
+evaluation regressions. Run them directly with `npm run test:football`.
+The native detector regressions are included by `npm run test:tracking`.
+
     node tools/football-evaluation.mjs collect JOB_JSON TRACKING_JSON evaluation/football/reports
     node tools/football-evaluation.mjs summary evaluation/football/reports
 

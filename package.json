@@ -21,11 +21,12 @@
     "test:connections": "npm run test:gemini && npm run test:gemini-video && npm run test:video-intelligence && npm run test:tts",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/editorial-policy.test.mjs tests/payoff-evidence.test.mjs tests/tracked-position.test.mjs tests/hold-pan-camera.test.mjs tests/pipeline-state.test.mjs tests/action-boundaries.test.mjs tests/action-guidance.test.mjs tests/goalkeeper-framing.test.mjs tests/crop-review-contract.test.mjs tests/rendered-batch-clock.test.mjs tests/completed-video-narration.test.mjs tests/source-action-selection.test.mjs tests/source-selection-handoff.test.mjs tests/initial-section-analysis.test.mjs tests/viral-reel-policy.test.mjs tests/delivery-policy.test.mjs tests/passage-inventory.test.mjs tests/coverage-recovery.test.mjs tests/goal-count-evidence.test.mjs tests/native-frame-action.test.mjs tests/score-normalization.test.mjs tests/gemini-request-scheduler.test.mjs tests/serialized-json-store.test.mjs tests/bounded-concurrency.test.mjs tests/render-style.test.mjs tests/deployment.test.mjs tests/cloud-checkpoint.test.mjs tests/youtube-publisher.test.mjs tests/source-import.test.mjs",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/editorial-policy.test.mjs tests/payoff-evidence.test.mjs tests/tracked-position.test.mjs tests/hold-pan-camera.test.mjs tests/pipeline-state.test.mjs tests/action-boundaries.test.mjs tests/action-guidance.test.mjs tests/goalkeeper-framing.test.mjs tests/crop-review-contract.test.mjs tests/rendered-batch-clock.test.mjs tests/completed-video-narration.test.mjs tests/source-action-selection.test.mjs tests/source-selection-handoff.test.mjs tests/initial-section-analysis.test.mjs tests/viral-reel-policy.test.mjs tests/delivery-policy.test.mjs tests/passage-inventory.test.mjs tests/coverage-recovery.test.mjs tests/goal-count-evidence.test.mjs tests/native-frame-action.test.mjs tests/score-normalization.test.mjs tests/gemini-request-scheduler.test.mjs tests/serialized-json-store.test.mjs tests/bounded-concurrency.test.mjs tests/render-style.test.mjs tests/deployment.test.mjs tests/cloud-checkpoint.test.mjs tests/youtube-publisher.test.mjs tests/source-import.test.mjs && npm run test:football",
     "test:deployment": "node --test tests/deployment.test.mjs",
     "test:tracking": ".venv-tracking\\Scripts\\python.exe -m unittest discover -s tests -p *_test.py",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .venv-soccernet --ignore-pattern tools/external",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "test:football": "node --test tests/hybrid-camera-repair.test.mjs tests/hybrid-tracking-policy.test.mjs tests/football-evaluation.test.mjs"
   },
   "dependencies": {
     "@google-cloud/text-to-speech": "^7.0.0",
