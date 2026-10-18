@@ -60,6 +60,17 @@ Timestamped contact-frame pairs supplement the two complete videos when an
 independent comparison is necessary. They expose both the tentative contact
 and the crop-observed contact without generated ball coordinates.
 
+## Production verification
+
+On 18 October, worker generation 79 resumed the saved job and reused its 12
+approved scenes. All 16 scenes subsequently passed the production keyframe
+gate. All locked source intervals were unchanged, and the requested aspect
+ratio remained 9:16. The job advanced to fixture research for narration.
+This verifies the deployed recovery on this run; it is not a final-video
+approval or a guarantee for unseen footage. See `production-runs/2026-10-18/`
+for the immutable image digest and saved status evidence. Chrome was not
+connected, so this run was checked through server access rather than the UI.
+
 ## Reproduce and extend
 
 See `README.md` for collection and reference-label requirements. The benchmark
