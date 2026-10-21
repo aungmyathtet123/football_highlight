@@ -1,0 +1,48 @@
+steps:
+  - name: ${_IMAGE}
+    dir: /app
+    entrypoint: node
+    args:
+      - --input-type=module
+      - -e
+      - |
+        import assert from 'node:assert/strict';
+        import { readFile, writeFile } from 'node:fs/promises';
+        import { spawnSync } from 'node:child_process';
+        import { portraitBroadcastHeaderPlan, portraitMatchResultScore } from './local-processor/render-video-v2.mjs';
+        import { filterGraphFileArgs } from './local-processor/ffmpeg-compat.mjs';
+        process.env.CAPTION_FONT_PATH='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+        const context={status:'verified',homeTeam:'Netherlands',awayTeam:'Germany',finalScore:'1-1'};
+        const settings={editStyle:'complete_highlights',aspectRatio:'9:16',logoMasking:true};
+        const root='/workspace',textPath=root+'/header-score.txt',graphPath=root+'/header-filter.txt';
+        assert.equal(portraitMatchResultScore({...context,finalScore:'2-1'},'Germany'),'1–2');
+        const catalog=JSON.parse(await readFile('./assets/team-badges/fotmob-catalog.json','utf8'));
+        assert.ok(catalog.teams.length>=6000);
+        assert.ok(catalog.teams.some(team=>team.id===6708&&team.slug==='netherlands'));
+        assert.ok(catalog.teams.some(team=>team.id===8570&&team.slug==='germany'));
+        await writeFile(textPath,portraitMatchResultScore(context,'Germany'));
+        const graph=portraitBroadcastHeaderPlan(settings,1080,1920,context,textPath,
+          {firstTeam:'Germany',badgeInputs:{home:2,away:1},inputLabel:'0:v',outputLabel:'v'});
+        assert.ok(graph.some(value=>value.includes('overlay=x=(W-119)/2-11-w')));
+        assert.ok(graph.some(value=>value.includes('overlay=x=(W+119)/2+11')));
+        await writeFile(graphPath,graph.join(';\n'));
+        const run=(binary,args)=>{const result=spawnSync(binary,args,{encoding:'utf8'});
+          assert.equal(result.status,0,result.stderr);return result.stdout;};
+        const output=root+'/presentation-smoke.mp4';
+        run('ffmpeg',['-hide_banner','-loglevel','error','-y','-threads','2',
+          '-f','lavfi','-i','color=c=forestgreen:s=1080x1920:r=30:d=0.5',
+          '-loop','1','-i','./assets/team-badges/official-germany.png',
+          '-loop','1','-i','./assets/team-badges/official-netherlands.png',
+          '-filter_complex_threads','1',...await filterGraphFileArgs('ffmpeg',graphPath),
+          '-map','[v]','-t','0.5','-c:v','libx264','-threads','2','-preset','ultrafast','-pix_fmt','yuv420p',output]);
+        const probe=JSON.parse(run('ffprobe',['-v','error','-show_streams','-show_format','-of','json',output]));
+        assert.equal(probe.streams[0].width,1080);assert.equal(probe.streams[0].height,1920);
+        assert.equal(Number(probe.format.duration),0.5);
+        run('ffmpeg',['-v','error','-y','-i',output,'-frames:v','1',root+'/presentation-smoke.jpg']);
+        console.log('Verified deployed-image compact header, Linux font, team assets, reversed score ownership and 1080x1920 rendering.');
+artifacts:
+  objects:
+    location: gs://football-506506_cloudbuild/presentation-qa/compact-header-20261005/
+    paths: [presentation-smoke.jpg]
+options:
+  logging: CLOUD_LOGGING_ONLY

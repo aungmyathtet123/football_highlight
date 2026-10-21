@@ -83,4 +83,23 @@ if ((Get-FileHash -LiteralPath $pitchModelPath -Algorithm SHA256).Hash -ne $pitc
 & $venvPython -c "import cv2, torch, ultralytics, supervision, lap, scenedetect; print(f'Python tracking ready: torch={torch.__version__}, ultralytics={ultralytics.__version__}, opencv={cv2.__version__}, supervision={supervision.__version__}, scenedetect={scenedetect.__version__}')"
 if ($LASTEXITCODE -ne 0) { throw "Tracking dependency import verification failed." }
 
+
+# One broadcast-specific detector supplies explicit ball/player/referee/keeper
+# labels. Pin the release and hash; never silently download mutable weights.
+$roleModelPath = Join-Path $modelDirectory "football-role-detector.pt"
+$roleHash = "05EE5D6C1ED37D92B0425A4D98CBB656BD71869860615590DBFAAE913D75087F"
+if (Test-Path -LiteralPath $roleModelPath) {
+  if ((Get-FileHash -LiteralPath $roleModelPath -Algorithm SHA256).Hash -ne $roleHash) {
+    throw "Existing football-role model differs from the pinned release; it was not overwritten."
+  }
+} else {
+  $roleDownload = Join-Path $modelDirectory "football-role-detector.download"
+  Invoke-WebRequest -Uri "https://huggingface.co/mobadam/football-player-detection/resolve/a004ab8edffed6d80758e652fcae683881c7185d/player_detector.pt?download=true" -OutFile $roleDownload
+  if ((Get-FileHash -LiteralPath $roleDownload -Algorithm SHA256).Hash -ne $roleHash) {
+    throw "Football-role model checksum mismatch; downloaded file was not activated."
+  }
+  Move-Item -LiteralPath $roleDownload -Destination $roleModelPath
+}
+& $venvPython -c "from ultralytics import YOLO; m=YOLO(r'$roleModelPath'); assert m.names == {0:'ball',1:'player',2:'referee',3:'goalkeeper'}; print('Joint football-role detector ready.')"
+if ($LASTEXITCODE -ne 0) { throw "Football-role detector class verification failed." }
 Write-Output "Local football tracking is ready."

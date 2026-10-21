@@ -1,0 +1,12 @@
+[
+  {
+    "origin": [
+      "http://localhost:3001",
+      "http://127.0.0.1:3001",
+      "https://touchline-gateway-793575411744.asia-southeast1.run.app"
+    ],
+    "method": ["PUT"],
+    "responseHeader": ["Content-Type", "Content-Range", "ETag", "Range", "x-goog-resumable"],
+    "maxAgeSeconds": 3600
+  }
+]

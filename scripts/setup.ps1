@@ -139,7 +139,8 @@ try {
     Copy-Item -LiteralPath $envTemplatePath -Destination $envPath
     Write-Output "Created private .env from .env.example."
   }
-  Set-EnvValue "SITE_URL" "http://localhost:3000"
+  Set-EnvValue "SITE_URL" "http://127.0.0.1:3002"
+  if (-not (Get-EnvValue "LOCAL_WEB_PORT")) { Set-EnvValue "LOCAL_WEB_PORT" "3002" }
   Set-EnvValue "NEXT_PUBLIC_PROCESSOR_URL" "http://127.0.0.1:8787"
   Set-EnvValue "FFMPEG_PATH" "./tools/ffmpeg/bin/ffmpeg.exe"
   Set-EnvValue "FFPROBE_PATH" "./tools/ffmpeg/bin/ffprobe.exe"

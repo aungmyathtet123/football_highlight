@@ -1,0 +1,12 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+WORKDIR /app
+# Reuse unchanged Python/model assets, but always synchronize Node dependencies
+# with the current lockfile. A source-only overlay can omit required new modules.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+COPY local-processor ./local-processor
+COPY assets/team-badges ./assets/team-badges
+COPY deploy/cloud-run ./deploy/cloud-run
+RUN node deploy/cloud-run/processor-startup-smoke.mjs
+CMD ["node", "deploy/cloud-run/worker.mjs"]

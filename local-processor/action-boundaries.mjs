@@ -1,3 +1,17 @@
+// An exact pixel-reviewed interval already excludes neighbouring plays.
+// Discovery recovery must not replace it with older generic timing handles,
+// invalidate its approval and pay to observe the same action again.
+function hasReviewedSourceWindow(moment) {
+  const window = moment?.verifiedSourceActionWindow;
+  return moment?.semanticVerified === true && moment.actionComplete === true
+    && window && ['setupVisible','contactVisible','payoffVisible','cleanSourceBoundaries']
+      .every(key => window[key] === true)
+    && Number.isFinite(window.startTime) && Number.isFinite(window.endTime)
+    && window.endTime > window.startTime
+    && Math.abs(window.startTime - Number(moment.startTime)) < .001
+    && Math.abs(window.endTime - Number(moment.endTime)) < .001;
+}
+
 function actionShotRange(moment, shots) {
   const brief = moment.trackingBrief || {};
   const sourceOrigin = Number(brief.originTime), contact = Number(brief.contactTime), payoff = Number(brief.payoffEndTime);
@@ -19,6 +33,11 @@ function actionShotRange(moment, shots) {
 // This is especially important for set pieces where a broad candidate may
 // begin on an unrelated goalkeeper close-up many seconds before the delivery.
 export function trimToVerifiedActionOrigin(moment) {
+  // Origin refinement belongs to Step 1. Once selected, this exact interval
+  // owns the reviewed camera path; trimming again on retry discards valid
+  // source/crop approvals and removes already-selected action setup.
+  if (moment?.selectionLocked === true) return moment;
+  if (hasReviewedSourceWindow(moment)) return moment;
   if (moment?.storyPhase === "reaction" || moment?.eventType === "celebration") return moment;
   const origin = Number(moment?.trackingBrief?.originTime);
   const start = Number(moment?.startTime), end = Number(moment?.endTime);
@@ -42,6 +61,10 @@ export function trimToVerifiedActionOrigin(moment) {
 // Retain one semantic action across consecutive broadcast shots while removing
 // unrelated lead-in. Every changed interval is reviewed and tracked again.
 export function alignGoalToShot(moment, shots) {
+  // Shot alignment is a Step-1 proposal operation. Running it again against a
+  // locked checkpoint can move its boundaries and invalidate valid evidence.
+  if (moment.selectionLocked === true) return moment;
+  if (hasReviewedSourceWindow(moment)) return moment;
   if (moment.boundaryCorrection && moment.semanticVerified === true && moment.trackingDecision === "not_tracked") {
     moment = { ...moment, keepDecision: "keep", trackingDecision: undefined, rejectReason: undefined };
   }
@@ -54,7 +77,7 @@ export function alignGoalToShot(moment, shots) {
   const range = actionShotRange(moment, shots);
   if (!range) return moment;
   const preRoll = replay ? 0.1 : 1.2;
-  const correctedStart = Number((range.replayOriginCorrected
+  const correctedStart = Number(Math.max(Number(moment.startTime),range.replayOriginCorrected
     ? range.origin
     : Math.max(range.first.startTime, range.origin - preRoll)).toFixed(3));
   // The action candidate ends shortly after its verified result. Celebration
@@ -83,6 +106,8 @@ const PHASE_ACTION_EVENTS = new Set([
 ]);
 
 export function alignActionToShot(moment, shots) {
+  if (moment.selectionLocked === true) return moment;
+  if (hasReviewedSourceWindow(moment)) return moment;
   const goalAligned = alignGoalToShot(moment, shots);
   if (goalAligned.eventType === "goal" || !PHASE_ACTION_EVENTS.has(goalAligned.eventType)) return goalAligned;
   const range = actionShotRange(goalAligned, shots);
@@ -134,7 +159,17 @@ export function linkImmediateGoalReplays(moments, maximumGap = 8, maximumReplayG
     });
     const replayOnlyStory = explicitReplay
       && !verifiedLiveStoryIds.has(String(moment.storyId || moment.id));
-    if (previous && moment.storyId !== previous.storyId && (!explicitReplay || replayOnlyStory)) {
+    // Highlight uploads jump across match time. A new, complete LIVE goal can
+    // appear only a few source seconds after the previous one; proximity alone
+    // is not evidence that it is a replay. Only an already rejected live guess
+    // may be collapsed automatically. A replay immediately following a newly
+    // verified live goal belongs to that newer goal even if an earlier pass
+    // assigned the old storyId.
+    const rejectedLiveDuplicate = !explicitReplay && (moment.keepDecision === "reject"
+      || moment.semanticVerified === false || moment.trackingDecision === "incomplete_goal_action");
+    const recentReplayOfLatestGoal = explicitReplay && Number(moment.startTime) - Number(previous?.endTime) <= 12;
+    if (previous && moment.storyId !== previous.storyId
+        && (rejectedLiveDuplicate || (explicitReplay && (replayOnlyStory || recentReplayOfLatestGoal)))) {
       if (replayOnlyStory) {
         replayStoryLinks.set(String(moment.storyId || moment.id), String(previous.storyId || previous.id));
       }

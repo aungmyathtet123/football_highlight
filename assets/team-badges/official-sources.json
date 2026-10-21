@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "teams": [
+    {
+      "name": "Germany",
+      "file": "official-germany.png",
+      "pageUrl": "https://datencenter.dfb.de/en/teams/germany",
+      "imageUrl": "https://assets.dfb.de/uploads/000/299/734/original_de.svg?0",
+      "kind": "national-team-symbol",
+      "provider": "official-federation"
+    },
+    {
+      "name": "Netherlands",
+      "file": "official-netherlands.png",
+      "pageUrl": "https://datencenter.dfb.de/en/teams/germany",
+      "imageUrl": "https://assets.dfb.de/uploads/000/299/617/original_nl.svg?0",
+      "kind": "national-team-symbol",
+      "provider": "official-federation"
+    }
+  ]
+}

@@ -9,8 +9,22 @@ $runRoot = Join-Path $projectRoot "work\run"
 $node = (Get-Command node.exe -ErrorAction Stop).Source
 $processorScript = Join-Path $projectRoot "local-processor\server.mjs"
 $webCli = Join-Path $projectRoot "node_modules\vinext\dist\cli.js"
-$webPort = if ($env:LOCAL_WEB_PORT) { [int]$env:LOCAL_WEB_PORT } else { 3001 }
-$webUrl = "http://localhost:$webPort"
+$configuredWebPort = $env:LOCAL_WEB_PORT
+if (-not $configuredWebPort) {
+  $envPath = Join-Path $projectRoot ".env"
+  if (Test-Path -LiteralPath $envPath) {
+    $portLine = Get-Content -LiteralPath $envPath | Where-Object { $_ -match '^\s*LOCAL_WEB_PORT\s*=' } | Select-Object -First 1
+    if ($portLine) { $configuredWebPort = ($portLine -split '=', 2)[1].Trim().Trim('"').Trim("'") }
+  }
+}
+if (-not $configuredWebPort) { $configuredWebPort = "3002" }
+if ($configuredWebPort -notmatch '^\d+$' -or [double]$configuredWebPort -lt 1 -or [double]$configuredWebPort -gt 65535) {
+  throw "LOCAL_WEB_PORT must be an integer between 1 and 65535."
+}
+$webPort = [int]$configuredWebPort
+# Keep the processor's allowed origin consistent with this launcher's override.
+$env:LOCAL_WEB_PORT = "$webPort"
+$webUrl = "http://127.0.0.1:$webPort"
 $pidPath = Join-Path $runRoot "processes.json"
 $quote = [char]34
 $processorArgument = "$quote$processorScript$quote"
@@ -42,11 +56,15 @@ function Test-Web {
 
 $processorProcess = $null
 $webProcess = $null
+$webReady = Test-Web
+if (-not $webReady -and (Get-NetTCPConnection -State Listen -LocalPort $webPort -ErrorAction SilentlyContinue)) {
+  throw "Port $webPort is occupied by another application. No processes were stopped. Set LOCAL_WEB_PORT to a free port in .env."
+}
 if (-not (Test-Processor)) {
   $processorProcess = Start-Process -FilePath $node -ArgumentList @($processorArgument) -WorkingDirectory $projectRoot -RedirectStandardOutput (Join-Path $runRoot "processor.out.log") -RedirectStandardError (Join-Path $runRoot "processor.err.log") -WindowStyle Hidden -PassThru
 }
-if (-not (Test-Web)) {
-  $webProcess = Start-Process -FilePath $node -ArgumentList @($webArgument, "dev", "--port", "$webPort") -WorkingDirectory $projectRoot -RedirectStandardOutput (Join-Path $runRoot "web.out.log") -RedirectStandardError (Join-Path $runRoot "web.err.log") -WindowStyle Hidden -PassThru
+if (-not $webReady) {
+  $webProcess = Start-Process -FilePath $node -ArgumentList @($webArgument, "dev", "--port", "$webPort", "--hostname", "127.0.0.1") -WorkingDirectory $projectRoot -RedirectStandardOutput (Join-Path $runRoot "web.out.log") -RedirectStandardError (Join-Path $runRoot "web.err.log") -WindowStyle Hidden -PassThru
 }
 
 @{

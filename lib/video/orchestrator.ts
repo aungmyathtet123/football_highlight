@@ -29,12 +29,14 @@ export async function processVideoJob(jobId: string, dependencies: ProcessingDep
     await stage(dependencies, jobId, "detecting_moments", 34, moments);
     if (job.settings.durationMode !== "auto") moments = packTimeline(moments, job.settings.targetDuration);
     await stage(dependencies, jobId, "ranking", 46, moments);
+    const minimumDuration = job.settings.editStyle === "complete_highlights" ? 60 : job.settings.editStyle === "viral_reel" ? 30 : 0;
+    const plannedDuration = moments.filter((moment) => moment.selectedForFinalVideo).reduce((total, moment) => total + (moment.endTime - moment.startTime) / (moment.playbackRate || 1) - (moment.transitionDuration || 0), 0);
+    if (minimumDuration > 0 && plannedDuration < minimumDuration) throw new ProviderError("INSUFFICIENT_EVIDENCE", `Scene selection needs ${minimumDuration} seconds of complete action before tracking can start.`);
     await stage(dependencies, jobId, "tracking", 55, moments);
     moments = await dependencies.tracker.track({ sourceUrl, moments, signal });
-    const minimumDuration = job.settings.editStyle === "complete_highlights" ? 60 : 30;
     if (job.settings.durationMode === "auto") {
       const selectedDuration = moments.filter((moment) => moment.selectedForFinalVideo).reduce((total, moment) => total + (moment.endTime - moment.startTime) / (moment.playbackRate || 1) - (moment.transitionDuration || 0), 0);
-      if (selectedDuration < minimumDuration) throw new ProviderError("INSUFFICIENT_EVIDENCE", `The AI-selected complete story must provide at least ${minimumDuration} seconds of verified footage.`);
+      if (minimumDuration > 0 && selectedDuration < minimumDuration) throw new ProviderError("INSUFFICIENT_EVIDENCE", `The AI-selected story must provide at least ${minimumDuration} seconds of verified footage.`);
       job.settings = { ...job.settings, targetDuration: selectedDuration };
     }
     if (job.settings.commentary) {
@@ -45,7 +47,7 @@ export async function processVideoJob(jobId: string, dependencies: ProcessingDep
     await stage(dependencies, jobId, "rendering", 86, moments);
     const outputKey = `exports/${jobId}/touchline-final.mp4`;
     const result = await dependencies.renderer.render({ sourceUrl, moments, settings: job.settings, outputKey, signal });
-    if (job.settings.durationMode === "auto" && (!Number.isFinite(result.durationSeconds) || result.durationSeconds < (job.settings.editStyle === "complete_highlights" ? 60 : 30))) throw new ProviderError("SHORT_RENDER", `The rendered highlight must be at least ${job.settings.editStyle === "complete_highlights" ? 60 : 30} seconds.`);
+    if (job.settings.durationMode === "auto" && (!Number.isFinite(result.durationSeconds) || (minimumDuration > 0 && result.durationSeconds < minimumDuration))) throw new ProviderError("SHORT_RENDER", `The rendered highlight must be at least ${minimumDuration} seconds.`);
     await dependencies.jobs.update(jobId, { stage: "completed", progress: 100, moments, outputKey: result.outputKey, error: undefined, updatedAt: new Date().toISOString() });
     log.info("video_job_completed", { jobId, durationSeconds: result.durationSeconds });
   } catch (error) {
@@ -68,5 +70,9 @@ export function validateSettings(input: Partial<EditSettings>): EditSettings {
   if (!["natural", "dynamic", "high_energy"].includes(intensity)) throw new ProviderError("INVALID_INTENSITY", "Editing intensity is not supported.");
   if (!["complete_highlights", "viral_reel", "tactical_analysis"].includes(editStyle)) throw new ProviderError("INVALID_EDIT_STYLE", "Edit style is not supported.");
   const viral = editStyle === "viral_reel";
-  return { editStyle, durationMode: "auto", targetDuration: viral ? 36 : editStyle === "complete_highlights" ? 60 : 30, durationMin: editStyle === "complete_highlights" ? 60 : 30, aspectRatio: viral ? "4:5" : "9:16", commentary: input.commentary ?? true, playerHighlight: input.playerHighlight ?? true, captions: input.captions ?? true, logoMasking: input.logoMasking ?? true, originalAudio: viral && input.originalAudio === undefined ? "reduced" : originalAudio, intensity };
+  const requestedRatio = String(input.aspectRatio || "");
+  const aspectRatio = viral ? "4:5" : ["1:1", "4:3", "9:16", "16:9"].includes(requestedRatio)
+    ? requestedRatio as EditSettings["aspectRatio"]
+    : "9:16";
+  return { editStyle, durationMode: "auto", targetDuration: viral ? 36 : editStyle === "complete_highlights" ? 60 : 0, durationMin: editStyle === "complete_highlights" ? 60 : viral ? 30 : 0, aspectRatio, commentary: input.commentary ?? true, playerHighlight: input.playerHighlight ?? true, captions: input.captions ?? true, logoMasking: input.logoMasking ?? true, originalAudio: viral && input.originalAudio === undefined ? "reduced" : originalAudio, intensity };
 }

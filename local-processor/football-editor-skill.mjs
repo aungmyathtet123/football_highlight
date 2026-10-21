@@ -1,19 +1,23 @@
 import { normalizePayoffEvidence } from "./payoff-evidence.mjs";
-export const FOOTBALL_EDITOR_SKILL_VERSION = 12;
+import { NON_SHOT_COMPLETION_CONTRACT } from './action-completion-contract.mjs';
+export const FOOTBALL_EDITOR_SKILL_VERSION = 15;
 
 export function footballObservationContract() {
   return [
     "Inventory ALL distinct goals and offside/disallowed-goal/VAR incidents throughout the upload. Replays share their live incident's storyId and must not count as additional goals. A final score is a cross-check only, not proof missing goals appear in the footage. Mark disallowed_goal or offside only with visible referee/VAR decision evidence; never infer the verdict from an approximate line.",
     "Act as a football editor before acting as a clip selector. Identify the complete causal action: setup, initiating player, decisive contact, ball flight or continuation, receiving/defending subject, payoff, and resolved ending.",
+    NON_SHOT_COMPLETION_CONTRACT,
+    "originTime is the first useful setup where the initiating player and live match ball are visibly involved together, NOT automatically the beginning of a broadcast shot. For corners/free kicks exclude dead waiting time, defenders merely standing, and a stationary ball whose taker has not entered the action. Keep the taker's preparation, original kick/cross, receiving touch or header and resolved outcome. Do not mistake the final scorer's contactTime for the earlier assist/cross; both belong to the complete action chain.",
     "First inventory the entire supplied source. Group each live action, matching replay and immediate reaction under one incident storyId. Camera cuts are shot boundaries, not incident boundaries. Preserve complete actions before estimating duration. Do not label post-shot walking or ordinary build-up as a goal or celebration.",
     "When a goal or save is unclear, inspect the actual contact and outcome before making the claim. A missed local ball detection is not proof the source lacks a ball; conversely, a high-confidence object box is not proof it is the ball. Mark uncertainty explicitly. Never invent a player identity or coordinates to satisfy the requested runtime.",
     "For every non-reaction moment return trackingBrief. trackingBrief must contain primaryPlayerRole, attackDirection (left|right|unclear), cameraMode (stable|joint_follow|ball_flight|goal_hold|reaction), payoffTarget (receiver|defender|goalkeeper|goal_mouth|touchline|celebration|unclear), originTime, contactTime, flightStartTime, handoffTime, payoffStartTime, payoffEndTime, goalFocusX from 0 to 1 or null, annotationStartTime, annotationEndTime, and requiredSubjectsByPhase.",
     "All trackingBrief times are numeric seconds relative to the supplied excerpt. requiredSubjectsByPhase is an ordered array of objects with phase (setup|contact|flight|payoff|reaction) and subjects chosen from ball, initiating_player, receiver, defender, goalkeeper, goal_mouth, and celebration_player.",
     "Before contact, require the ball and initiating player together. During a pass or shot, begin from that player, then hand camera ownership toward the receiving player, defender, goalkeeper, or goalmouth as the ball travels. At a goal, keep the ball trajectory and goalmouth/goalkeeper through the visible result. Player-only framing is valid only after the outcome for reaction or celebration.",
-    "Do not guess exact per-frame coordinates. Supply semantic phase times and subjects; the local high-frame-rate tracker executes the camera path.",
+    "At inventory time do not guess per-frame coordinates. Supply semantic phase times and subjects. The configured tracking provider independently measures the required subjects and plans a stable portrait camera; hybrid mode uses native role detections while Gemini reviews the actual rendered crop. A semantic result rectangle is not measured per-frame ball evidence. Do not discard a goal or shot merely because a future portrait crop looks difficult; retain the distinct incident and all useful alternate angles for framing repair.",
     "For a visibly proven goal, save or shot outcome, include trackingBrief.payoffEvidence={verified:true,eventType,startTime,endTime,targetBox:[x1,y1,x2,y2]}. Times use the same excerpt clock as other trackingBrief times. targetBox is the normalized source-image region containing the actual ball/result and relevant goalkeeper, net or receiver, not an unrelated walking player. Choose a continuous interval of at least 0.5 seconds where this result is visible. This is coarse semantic evidence, not a per-frame tracking path. If you cannot verify the result, return payoffEvidence:null. Never infer a visible goal from celebration, a scoreboard, commentary, model knowledge or an estimated percentage of the clip.",
     "The result rectangle must remain valid throughout its stated interval. Use a short interval or return null if a camera cut or pan invalidates it. Do not include an entire oversized net merely to approximate the result location. Never move the rectangle away from actual evidence to make it fit 9:16.",
     "For a goal, primaryPlayerRole must be scorer; contactTime is the LAST attacking-player touch that directly sends the ball into the goal, not the cross, assist, through-ball, earlier pass, nearby defender, or goalkeeper. When the sequence contains a pass followed by a finish, watch through the finish and put contactTime on the finisher's touch. Put annotationStartTime about 0.8-1.4 seconds before that scoring touch and annotationEndTime no later than 0.6 seconds after it so the marker identifies only the scorer.",
+    "flightStartTime is when the FIRST visible pass, cross or shot releases the ball in the selected action chain. It MAY be earlier than contactTime when an assist/cross precedes the scorer's final touch. Keep originTime <= flightStartTime and payoffStartTime >= contactTime. Do not delay following the cross until the later header; contactTime still identifies the scoring touch and its annotation, not the initial pass.",
     "A goal candidate is not complete unless the footage contains the scorer with the ball at decisive contact, visible ball travel, the goalkeeper or goalmouth payoff, and only then any reaction. Return immediate celebration and replay as separate candidates with the exact same storyId as the live goal action. Never label celebration-only footage as goal evidence.",
   ].join(" ");
 }
@@ -22,9 +26,9 @@ export function footballAlignmentContract() {
   return [
     "Request tacticalDrawing=map only for a freeze explaining player spacing or shape. It uses a locally calibrated pitch and observed player feet, never invented positions; failed calibration omits the map. The map is approximate, not a measured offside line. Keep it away from the ball and involved players in the video. Prefer pass/run/ball drawings when a map is unnecessary.",
     "Request tacticalDrawing=pass only when explaining a visibly completed player-to-player pass in the scene's opening buildup. This freezes the verified origin phase. The renderer requires both players in that exact frame and consecutive observations of the receiver gaining possession. Otherwise use ball/run/none; never draw an imagined passing option as an actual pass.",
-    "Cover every supplied distinct verified goal and decision incident; thirty seconds is only a minimum. Never omit a goal to shorten the edit. Each narrated claim must describe its own candidate, not a different goal in the inventory.",
+    "Cover every supplied distinct verified goal and decision incident. Automatic recaps have no artificial minimum duration: preserve complete actions, not padding. Never omit a goal to shorten the edit. Each narrated claim must describe its own candidate, not a different goal in the inventory.",
     "For a useful freeze, request tacticalDrawing=ball to explain an observed pass/shot direction or tacticalDrawing=run to explain the involved player's movement; otherwise none. The local renderer draws a solid ball-direction path or a dashed player-run path only from consecutive observed positions with verified camera registration. It omits uncertain drawings. Never invent coordinates or request an official offside measurement. Keep the freeze tied to the exact narrated action.",
-    "Follow the active duration policy. For complete recaps, AI chooses the strongest complete story with a minimum of 60 seconds; the estimated length is not a deadline. Never pad to a midpoint or cut a completed action short to match an estimate. For legacy fixed-range jobs only, respect their explicit range after measured narration is included.",
+    "Follow the active duration policy. For complete recaps, AI chooses the strongest complete story from verified action; the target is a creative guide and there is no artificial minimum or maximum. Never pad to a midpoint or cut a completed action short to match an estimate. For legacy fixed-range jobs only, respect their explicit range after measured narration is included.",
     "The content writer supplies an exact number of approved beats derived from verified scene capacity. Map every beat exactly once to one primary verified scene; never omit the hook, decisive proof, or conclusion. Extra related scenes may be silent support only.",
     "Keep spoken analysis concise enough for a natural male analyst delivery. Do not rely on frozen padding, repeated footage, or unnaturally fast speech to satisfy duration.",
     "Use player roles only until identities are independently verified. A name in a model hypothesis, story ID or earlier commentary is not evidence. For complete narrated recaps, align visuals to one continuous master voice recording created before editing, from opening hook through conclusion. Show sparse complete headlines in white with one yellow emphasis word, and keep celebrations to 2-3 seconds without caption or effect stacking.",
@@ -44,7 +48,7 @@ export function footballAlignmentContract() {
 
 export function footballQualityContract() {
   return [
-    "Verify the active duration policy using the rendered MP4 and measured synthesized speech, not an estimate from source timestamps. Complete recap edits must be at least 60 seconds, may run beyond a 120-second guide when the story needs it, end naturally, and have no filler padding; legacy jobs retain their explicit range.",
+    "Verify the active duration policy using the rendered MP4 and measured synthesized speech, not an estimate from source timestamps. Complete recap edits may use any natural length supported by verified action, end naturally, and have no filler padding; legacy jobs retain their explicit range.",
     "Audit every action as setup -> contact -> ball travel -> payoff, not as unrelated sampled frames.",
     "The crop must begin with the initiating player and football together, pan smoothly in the attack direction, hand off only to a verified receiver/defender/goalkeeper or the goalmouth, and hold the visible result before any celebration cut.",
     "Reject a marker on a spectator, official, substitute, unrelated player, or empty grass; a marker must remain attached to one involved player identity and disappear when evidence is uncertain.",
@@ -57,13 +61,13 @@ export function footballQualityContract() {
   ].join(" ");
 }
 
-export function normalizeReviewedTrackingBrief(review, moment, eventType) {
+export function normalizeReviewedTrackingBrief(review, moment, eventType, reviewSourceStart=moment.startTime) {
   const hasReviewedBrief = Boolean(review?.trackingBrief && typeof review.trackingBrief === "object");
   const reviewedPayoff = review?.payoffEvidence ?? review?.trackingBrief?.payoffEvidence;
   if (!hasReviewedBrief) {
     const normalized = normalizeTrackingBrief(moment?.trackingBrief || {}, { eventType }, moment.startTime, moment.endTime, 0);
     if (reviewedPayoff === undefined) return normalized;
-    const payoffEvidence = normalizePayoffEvidence(reviewedPayoff, eventType, moment.startTime, moment.endTime, moment.startTime);
+    const payoffEvidence = normalizePayoffEvidence(reviewedPayoff, eventType, moment.startTime, moment.endTime, reviewSourceStart);
     return {
       ...normalized,
       payoffEvidence,
@@ -75,7 +79,7 @@ export function normalizeReviewedTrackingBrief(review, moment, eventType) {
   const normalized = normalizeTrackingBrief({
     ...review.trackingBrief,
     payoffEvidence: reviewedPayoff,
-  }, { eventType }, moment.startTime, moment.endTime, moment.startTime);
+  }, { eventType }, moment.startTime, moment.endTime, reviewSourceStart);
   if (reviewedPayoff !== undefined || !moment?.trackingBrief?.payoffEvidence) return normalized;
   const payoffEvidence = normalizePayoffEvidence(moment.trackingBrief.payoffEvidence, eventType, moment.startTime, moment.endTime, 0);
   return {
@@ -88,6 +92,7 @@ export function normalizeReviewedTrackingBrief(review, moment, eventType) {
 }
 
 export function expandMomentToReviewedAction(moment, review, eventType, reviewWindowEnd) {
+  if (moment.sourceViewSplit === true) return moment;
   if (!["goal", "disallowed_goal", "save", "shot_on_target", "shot_off_target", "big_chance"].includes(eventType)) return moment;
   const brief = review?.trackingBrief && typeof review.trackingBrief === "object" ? review.trackingBrief : {};
   const payoff = review?.payoffEvidence ?? brief.payoffEvidence;
@@ -131,9 +136,9 @@ export function normalizeTrackingBrief(raw, item, startTime, endTime, offset = 0
   };
   const originTime = relative(source.originTime, 0.06);
   const contactTime = relative(source.contactTime, reaction ? 0.18 : 0.34);
-  const flightStartTime = Math.max(contactTime, relative(source.flightStartTime, 0.38));
+  const flightStartTime = Math.max(originTime, relative(source.flightStartTime, 0.38));
   const handoffTime = Math.max(flightStartTime, relative(source.handoffTime, 0.50));
-  const payoffStartTime = Math.max(handoffTime, relative(source.payoffStartTime, 0.68));
+  const payoffStartTime = Math.max(contactTime, handoffTime, relative(source.payoffStartTime, 0.68));
   const payoffEndTime = Math.max(payoffStartTime, relative(source.payoffEndTime, 0.94));
   const suppliedAnnotationStart = Number(source.annotationStartTime);
   const suppliedAnnotationEnd = Number(source.annotationEndTime);

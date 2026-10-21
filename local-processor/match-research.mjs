@@ -26,7 +26,7 @@ export function matchResearchPrompt({ sourceName, recapBrief = "", verifiedGoalC
 }
 
 const trustedFootballHosts = [
-  "apnews.com", "bbc.co.uk", "bbc.com", "chelseafc.com", "efl.com", "espn.com", "fifa.com",
+  "apnews.com", "bbc.co.uk", "bbc.com", "bundesliga.com", "chelseafc.com", "dfb.de", "efl.com", "espn.com", "fifa.com",
   "goal.com", "hullcityafc.net", "independent.co.uk", "premierleague.com", "reuters.com",
   "skysports.com", "soccerway.com", "sportingnews.com", "thefa.com", "theguardian.com", "uefa.com",
   "worldfootball.net",
@@ -217,7 +217,7 @@ function uniqueLiveGoalIncidents(candidates) {
   const seen = new Set();
   return (Array.isArray(candidates) ? candidates : [])
     .filter((moment) => moment?.eventType === "goal"
-      && !moment.isReplay && moment.storyPhase !== "replay"
+      && ((!moment.isReplay && moment.storyPhase !== "replay") || verifiedPrimaryReplayGoal(moment))
       && moment.semanticVerified !== false && moment.actionComplete !== false)
     .sort((a, b) => Number(a.startTime) - Number(b.startTime))
     .filter((moment) => {
@@ -267,7 +267,7 @@ export function identityBindingProblems(beats, candidates, context) {
     for (const name of usedPlayers) {
       if (!allowedPlayers.has(normalized(name))) problems.push(`player_identity_bound_to_wrong_incident:${beat.beatId || candidate.id}:${name}`);
     }
-    if (candidate.eventType === "goal" && !candidate.isReplay && binding?.scorer && !containsIdentity(authored, binding.scorer)) {
+    if (candidate.eventType === "goal" && (!candidate.isReplay || verifiedPrimaryReplayGoal(candidate)) && binding?.scorer && !containsIdentity(authored, binding.scorer)) {
       problems.push(`verified_scorer_missing_from_goal_beat:${beat.beatId || candidate.id}:${binding.scorer}`);
     }
   }
@@ -284,3 +284,4 @@ export function scoreClaimIsVerified(claim, context) {
   const normalized = clean(claim, 40).replace(/[–—:]/g, "-").replace(/\s+/g, "");
   return verifiedScoreClaims(context).some((score) => score.replace(/[–—:]/g, "-").replace(/\s+/g, "") === normalized);
 }
+import {verifiedPrimaryReplayGoal} from './goal-count-evidence.mjs';

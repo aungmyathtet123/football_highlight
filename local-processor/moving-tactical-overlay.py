@@ -17,7 +17,9 @@ overlay = importlib.util.module_from_spec(overlay_spec)
 overlay_spec.loader.exec_module(overlay)
 
 
-WHITE = (255, 255, 255, 242)
+# Keep the live connector consistent with the freeze drawing: red means the
+# observed ball-carrier-to-receiver relationship, not an invented player.
+WHITE = (45, 55, 245, 242)
 SHADOW = (0, 0, 0, 125)
 
 
@@ -63,42 +65,50 @@ def render_motion(evidence, requested_source_time, output_dir, width=1920, heigh
     if not records or not keyframes:
         return {"approved": False, "reason": "missing_tracking"}
     requested = requested_source_time - evidence["sourceStartTime"]
-    eligible = [(record, overlay.drawing_points(records, record, "pass")) for record in records
-                if requested - .12 <= record["time"] <= requested + 7.0]
-    eligible = [(record, candidate_points) for record, candidate_points in eligible if candidate_points]
-    anchor, points = max(eligible, key=lambda item: item[0]["time"]) if eligible else (None, [])
-    if anchor is None or not points:
+    # Evaluate nearby verified handoffs and retain only one with a sustained
+    # pre-pass identity run. The nearest detection alone might be too early;
+    # the latest plausible pass might belong to a different pair of players.
+    candidates = [(record, overlay.drawing_points(records, record, "pass")) for record in records
+                  if abs(record["time"] - requested) <= 2.0]
+    candidates = [(record, points) for record, points in candidates if points]
+    candidates.sort(key=lambda item: (abs(item[0]["time"] - requested), item[0]["time"]))
+    if not candidates:
         return {"approved": False, "reason": "no_verified_pass_handoff"}
-    carrier, receiver, _ = overlay.verified_pass_players(records, anchor)
-    if carrier is None or receiver is None:
-        return {"approved": False, "reason": "pass_identities_unstable"}
-    carrier_id, receiver_id = carrier.get("trackId"), receiver.get("trackId")
-    usable = []
-    for record in records:
-        if not anchor["time"] - 1.35 <= record["time"] <= anchor["time"]:
+    chosen = None
+    for candidate, _ in candidates:
+        carrier, receiver, _ = overlay.verified_pass_players(records, candidate)
+        if carrier is None or receiver is None:
             continue
-        if record.get("scene_cut"):
-            usable = []
+        carrier_id, receiver_id = carrier.get("trackId"), receiver.get("trackId")
+        usable = []
+        for record in records:
+            if not candidate["time"] - 1.35 <= record["time"] <= candidate["time"]:
+                continue
+            if record.get("scene_cut"):
+                usable = []
+                continue
+            first, second = player_by_id(record, carrier_id), player_by_id(record, receiver_id)
+            if first is None or second is None:
+                continue
+            crop = crop_at(keyframes, record["time"], native_landscape)
+            a = project([first["cx"], first["y2"]], crop, width, height)
+            b = project([second["cx"], second["y2"]], crop, width, height)
+            if a is None or b is None or np.linalg.norm(a-b) < width*.045:
+                continue
+            usable.append((record["time"], a, b))
+        if len(usable) < 6 or usable[-1][0] - usable[0][0] < .36:
             continue
-        first, second = player_by_id(record, carrier_id), player_by_id(record, receiver_id)
-        if first is None or second is None:
-            continue
-        crop = crop_at(keyframes, record["time"], native_landscape)
-        a = project([first["cx"], first["y2"]], crop, width, height)
-        b = project([second["cx"], second["y2"]], crop, width, height)
-        if a is None or b is None or np.linalg.norm(a-b) < width*.045:
-            continue
-        usable.append((record["time"], a, b))
-    if len(usable) < 6 or usable[-1][0] - usable[0][0] < .36:
-        return {"approved": False, "reason": "insufficient_live_identity_span"}
-    # Keep only the final contiguous observation run approaching the handoff.
-    run = [usable[-1]]
-    for item in reversed(usable[:-1]):
-        if run[0][0] - item[0] > .24:
+        run = [usable[-1]]
+        for item in reversed(usable[:-1]):
+            if run[0][0] - item[0] > .24:
+                break
+            run.insert(0, item)
+        if len(run) >= 6 and run[-1][0] - run[0][0] >= .36:
+            chosen = (candidate, carrier_id, receiver_id, run)
             break
-        run.insert(0, item)
-    if len(run) < 6 or run[-1][0] - run[0][0] < .36:
+    if chosen is None:
         return {"approved": False, "reason": "live_identity_run_not_contiguous"}
+    anchor, carrier_id, receiver_id, run = chosen
     start, end = run[0][0], run[-1][0]
     frame_count = max(2, int(round((end-start)*30))+1)
     times = np.linspace(start, end, frame_count)
@@ -127,6 +137,7 @@ def render_motion(evidence, requested_source_time, output_dir, width=1920, heigh
         "frameCount": frame_count,
         "carrierTrackId": carrier_id,
         "receiverTrackId": receiver_id,
+        "anchorSourceTime": evidence["sourceStartTime"] + anchor["time"],
         "pattern": str((directory / "%05d.png").resolve()),
     }
 

@@ -11,6 +11,8 @@ export type JobStage =
   | "rendering"
   | "validating"
   | "completed"
+  | "waiting_retry"
+  | "attention_required"
   | "failed";
 
 export type EventType =
@@ -21,6 +23,7 @@ export type EventType =
   | "assist"
   | "big_chance"
   | "shot_on_target"
+  | "shot_off_target"
   | "save"
   | "foul"
   | "yellow_card"
@@ -101,7 +104,7 @@ export type EditSettings = {
   targetDuration: 60 | 65 | 70 | 80 | number;
   durationMin?: number;
   durationMax?: number;
-  aspectRatio: "4:5" | "9:16" | "16:9";
+  aspectRatio: "1:1" | "4:3" | "4:5" | "9:16" | "16:9";
   commentary: boolean;
   playerHighlight: boolean;
   captions: boolean;

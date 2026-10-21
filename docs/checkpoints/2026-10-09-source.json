@@ -1,0 +1,958 @@
+{
+  "checkpoint": "2026-10-09",
+  "restoredAt": "2026-10-21",
+  "gateway": {
+    "build": "e6dcab26-aa44-4915-9d39-f26b15928bad",
+    "image": "sha256:f2426bac9e181bf4b1691a33d6450ace6afd51d105f0bc11730da59e6eaf4c7c",
+    "source": "gs://football-506506_cloudbuild/source/1791543231.964701-89589084358849d18855b58923280a26.tgz#1791543234759746"
+  },
+  "worker": {
+    "build": "809df101-0aa9-4aa8-a05c-900423a8d175",
+    "image": "sha256:a73502cdb3a4e1d0989b0a4b0e62293fb67e88e43fb608e55af0bfc31dea7743",
+    "source": "gs://football-506506_cloudbuild/source/1791543225.586169-c8082d5585704a6392eff216ccfd10fa.tgz#1791543228131162"
+  },
+  "originalPackage": {
+    "name": "touchline-ai",
+    "version": "0.1.0",
+    "private": true,
+    "engines": {
+      "node": ">=22.13.0"
+    },
+    "scripts": {
+      "dev": "vinext dev",
+      "processor": "node local-processor/server.mjs",
+      "setup": "powershell -ExecutionPolicy Bypass -File scripts/setup.ps1",
+      "setup:tracking": "powershell -ExecutionPolicy Bypass -File scripts/setup-tracking.ps1",
+      "setup:soccernet": "powershell -ExecutionPolicy Bypass -File scripts/setup-soccernet.ps1",
+      "setup:verify": "powershell -ExecutionPolicy Bypass -File scripts/verify-setup.ps1",
+      "local:start": "powershell -ExecutionPolicy Bypass -File scripts/start-local.ps1",
+      "local:stop": "powershell -ExecutionPolicy Bypass -File scripts/stop-local.ps1",
+      "test:gemini": "node scripts/test-gemini.mjs",
+      "test:gemini-video": "node scripts/test-gemini-video.mjs",
+      "test:video-intelligence": "node scripts/test-video-intelligence.mjs",
+      "test:tts": "node scripts/test-google-cloud-tts.mjs",
+      "test:connections": "npm run test:gemini && npm run test:gemini-video && npm run test:video-intelligence && npm run test:tts",
+      "build": "vinext build",
+      "start": "vinext start",
+      "test": "npm run build && node --test tests/rendered-html.test.mjs tests/editorial-policy.test.mjs tests/payoff-evidence.test.mjs tests/tracked-position.test.mjs tests/hold-pan-camera.test.mjs tests/pipeline-state.test.mjs tests/action-boundaries.test.mjs tests/action-guidance.test.mjs tests/goalkeeper-framing.test.mjs tests/crop-review-contract.test.mjs tests/rendered-batch-clock.test.mjs tests/completed-video-narration.test.mjs tests/source-action-selection.test.mjs tests/source-selection-handoff.test.mjs tests/initial-section-analysis.test.mjs tests/viral-reel-policy.test.mjs tests/delivery-policy.test.mjs tests/passage-inventory.test.mjs tests/coverage-recovery.test.mjs tests/goal-count-evidence.test.mjs tests/native-frame-action.test.mjs tests/score-normalization.test.mjs tests/gemini-request-scheduler.test.mjs tests/serialized-json-store.test.mjs tests/bounded-concurrency.test.mjs tests/render-style.test.mjs tests/deployment.test.mjs tests/cloud-checkpoint.test.mjs tests/youtube-publisher.test.mjs tests/source-import.test.mjs",
+      "test:deployment": "node --test tests/deployment.test.mjs",
+      "test:tracking": ".venv-tracking\\Scripts\\python.exe -m unittest discover -s tests -p *_test.py",
+      "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .venv-soccernet --ignore-pattern tools/external",
+      "db:generate": "drizzle-kit generate"
+    },
+    "dependencies": {
+      "@google-cloud/text-to-speech": "^7.0.0",
+      "@google-cloud/video-intelligence": "^7.0.0",
+      "@google/genai": "^2.18.0",
+      "drizzle-orm": "0.45.2",
+      "google-auth-library": "^10.3.0",
+      "react": "19.2.6",
+      "react-dom": "19.2.6",
+      "undici": "^7.30.0"
+    },
+    "devDependencies": {
+      "@cloudflare/vite-plugin": "1.37.1",
+      "@eslint/js": "9.39.4",
+      "@next/eslint-plugin-next": "16.2.6",
+      "@openai/sites-vite-plugin": "0.1.0",
+      "@tailwindcss/postcss": "4.2.1",
+      "@types/node": "22.19.19",
+      "@types/react": "19.2.14",
+      "@types/react-dom": "19.2.3",
+      "@vitejs/plugin-react": "6.0.2",
+      "@vitejs/plugin-rsc": "0.5.26",
+      "drizzle-kit": "0.31.10",
+      "eslint": "9.39.4",
+      "eslint-plugin-jsx-a11y": "6.10.2",
+      "eslint-plugin-react": "7.37.5",
+      "eslint-plugin-react-hooks": "7.1.1",
+      "globals": "16.4.0",
+      "react-server-dom-webpack": "19.2.6",
+      "tailwindcss": "4.2.1",
+      "typescript": "5.9.3",
+      "typescript-eslint": "8.59.3",
+      "vinext": "1.0.0-beta.2",
+      "vite": "8.0.13",
+      "wrangler": "4.92.0"
+    },
+    "type": "module"
+  },
+  "files": [
+    {
+      "path": ".agents/skills/football-video-editor/references/edit-contract.md",
+      "sha256": "02319d09d4ed06a7248a7cd40052e4bbf88e649d89514336a379127e32e2d09d"
+    },
+    {
+      "path": ".agents/skills/football-video-editor/SKILL.md",
+      "sha256": "956a6374f9a80029bebb10c6c3a169e111edcaf31ee902fff83a9b91dccb3c99"
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "e9329144c09fffc9c666f7a617cfc5237b93bf76d350be6057e0de8440ae1bdf"
+    },
+    {
+      "path": ".openai/hosting.json",
+      "sha256": "7d06c2f8133aa2b91cab30d7a3de006a0638bfe73e6ea8305ec0c2f8a3528046"
+    },
+    {
+      "path": "app/chatgpt-auth.ts",
+      "sha256": "e19651c2d1db12696883ae3eb79d4f09dce249f7afa1144a62d544e2e18299ca"
+    },
+    {
+      "path": "app/globals.css",
+      "sha256": "912d122022d6667a6c4621f2ab401e231409514923ed6dd05071430aa0b5a862"
+    },
+    {
+      "path": "app/layout.tsx",
+      "sha256": "2ad49615cbcbd93e44a7688e936c717d72dc957c40999263ec598962072ebd14"
+    },
+    {
+      "path": "app/page.tsx",
+      "sha256": "bd2ee55bd40eb225f3abeb005d55b6ef4295fce6d68cc0c62500e1875a689ff1"
+    },
+    {
+      "path": "app/video-studio.tsx",
+      "sha256": "05991d48bcf352da1dbe31bdc11ef7b6bcff4d3558287b22b55d3ad6bebf7987"
+    },
+    {
+      "path": "assets/channels4_profile.jpg",
+      "sha256": "86cd6d1c9b7bb6a9ba75131f01d7d6fbb5873d9da504efa1aa1cb2c20f7c5932"
+    },
+    {
+      "path": "assets/team-badges/fotmob-catalog.json",
+      "sha256": "37ba01bbddf95a0d3d348d26fb4ef209984b88bd772095beab27051bd22b842a"
+    },
+    {
+      "path": "assets/team-badges/official-germany.png",
+      "sha256": "7644f007b7a88136491567be6161881752d0b93232b9fc17f4507e83b985264d"
+    },
+    {
+      "path": "assets/team-badges/official-netherlands.png",
+      "sha256": "ac30dd3410d29d2fcec41e0016dedacdc6dd5e87ce9bb222a598aab32f5825e9"
+    },
+    {
+      "path": "assets/team-badges/official-sources.json",
+      "sha256": "f245a535ee38153aa82b7e68c7a60b48135ae2bdd33c5a1337e7b6b8136973be"
+    },
+    {
+      "path": "cloudflare-env.d.ts",
+      "sha256": "47f0adc75d617c6aba3dcb95c335fac92397d928dcc554fb55eddcfc89d75a53"
+    },
+    {
+      "path": "deploy/cloud-run/checkpoint-store.mjs",
+      "sha256": "dbc56cacefb0e90f46413653f592d203f037b8da67ce8edace6b251690315f61"
+    },
+    {
+      "path": "deploy/cloud-run/cloudbuild.gateway.yaml",
+      "sha256": "cda248af36e0918d76770c633826b332bd58811eb14dfc4bef178fee0a9796cd"
+    },
+    {
+      "path": "deploy/cloud-run/cloudbuild.presentation-smoke.yaml",
+      "sha256": "71497f85c730e29e78805ff52e269dec5eaad9fab6a6ca9ff9fc519781d350e1"
+    },
+    {
+      "path": "deploy/cloud-run/cloudbuild.tracker-smoke.yaml",
+      "sha256": "f5f191e133f970d8a9c81aab14d7560a215ceb35a28d310747c395ece952c1eb"
+    },
+    {
+      "path": "deploy/cloud-run/cloudbuild.worker-code-overlay.yaml",
+      "sha256": "1be5fd3c9f34548fa5e08bb4a35372290f07dc3bd4c8805ff9357f0cc217a71c"
+    },
+    {
+      "path": "deploy/cloud-run/cloudbuild.worker-gpu.yaml",
+      "sha256": "873c7f9da492f1f78ccca8fdb9e2da973151ff7f709a261c37697166c169fa84"
+    },
+    {
+      "path": "deploy/cloud-run/cloudbuild.worker.yaml",
+      "sha256": "609f90d3458090c086048e2bf31650ada9d91e3be0b9f7cfe89a686f5a1ae916"
+    },
+    {
+      "path": "deploy/cloud-run/Dockerfile.gateway",
+      "sha256": "91b3dacd0eee96c96cc66c5a95956399813104a6c9f204fcf71a58af981cc01b"
+    },
+    {
+      "path": "deploy/cloud-run/Dockerfile.worker",
+      "sha256": "7dafacd6c0d8636cdebf6c19111894dcd0c0b344a61383354908ea76e1db089b"
+    },
+    {
+      "path": "deploy/cloud-run/Dockerfile.worker-code-overlay",
+      "sha256": "3f636e4820f3fcf5048794c4c4cdc8a9251c86bf57fbb9577513acba0cc86e8c"
+    },
+    {
+      "path": "deploy/cloud-run/Dockerfile.worker-gpu",
+      "sha256": "fb574974705861e48dc3d417d2b4f28cf64c2bf40007812561d5a8b2c93786b2"
+    },
+    {
+      "path": "deploy/cloud-run/FAST-TRACKING.md",
+      "sha256": "9a311aeeceb65fa4ff4493b9cc3c52a5d7421ad975e0aa76513ee6a4b88d94d7"
+    },
+    {
+      "path": "deploy/cloud-run/gateway.mjs",
+      "sha256": "02106dcbdbaffaaaabb8b98fed3044fac56af90ab93166fef6e73647b12e0df2"
+    },
+    {
+      "path": "deploy/cloud-run/gcloudignore.gateway",
+      "sha256": "da4d640555c304850eb8f9bd51dd641d9adb6492829d9850bde572d99c74f499"
+    },
+    {
+      "path": "deploy/cloud-run/gcloudignore.worker",
+      "sha256": "4f50cc761f7ed47ea2cba4c0312f9262cdee4282fd75a63b88fbc1276335b64f"
+    },
+    {
+      "path": "deploy/cloud-run/gcloudignore.worker-overlay",
+      "sha256": "aba627d9354403ba42554074f546c1dd15ada0dc7ed67cbb7ed6152429b8a855"
+    },
+    {
+      "path": "deploy/cloud-run/job-status-policy.mjs",
+      "sha256": "999a5448094f5b8057705f459b3f13da85345821305081f064d3e3b8ada0bf84"
+    },
+    {
+      "path": "deploy/cloud-run/processor-startup-smoke.mjs",
+      "sha256": "a83b2b43ec04dd6b98efab5c60240c179cd4cf0ce90bcc23fdb6106821a50a7f"
+    },
+    {
+      "path": "deploy/cloud-run/proxy-response-headers.mjs",
+      "sha256": "c58aea8832155585842f678e11ec9005853b258e80169f84f2f110746f0860af"
+    },
+    {
+      "path": "deploy/cloud-run/README.md",
+      "sha256": "a4124b04127690288a1b1af1c6119ac546c604f7344d8880c8f42dcccafb986d"
+    },
+    {
+      "path": "deploy/cloud-run/source-import-policy.mjs",
+      "sha256": "1a47a62aa7fea6556abc736849a0b2db2a3b1890ce207ec359cc7995b2f841e2"
+    },
+    {
+      "path": "deploy/cloud-run/storage-cors.json",
+      "sha256": "6a337bb6604a1b1b6f0e47377f1a011b070198b13a3696a5834fefe89e611a5d"
+    },
+    {
+      "path": "deploy/cloud-run/storage-lifecycle.json",
+      "sha256": "933a9959e774fe8bdb218e6d8d5c37f6db35f9a2858df5b576b8856c053ab2e2"
+    },
+    {
+      "path": "deploy/cloud-run/worker.env.yaml",
+      "sha256": "80f69481b0871ff6f7c9528eb9596cef6d12c3a6a26cf5134c14c206b33a0e7c"
+    },
+    {
+      "path": "deploy/cloud-run/worker.mjs",
+      "sha256": "a79fb9923d251e2fd94b14f720cf56eb09ce9ba1ca2a5e92cc964b7e67e3b246"
+    },
+    {
+      "path": "deploy/cloud-run/youtube-publisher.mjs",
+      "sha256": "9217ad8a42c83ac7a881953bf5d89a5badf148e7de5a0f85ad2d4dc3dba5e4fb"
+    },
+    {
+      "path": "docs/automatic-processing-recovery.md",
+      "sha256": "fd9bab056271662f2e8ab179be88925df49fb90d4b2542123e451e3cd85c8b92"
+    },
+    {
+      "path": "docs/framing-detail-test-20261009.md",
+      "sha256": "82a85eb8793b72f005357dc46dcb0daffb6e96b70e052919a523f1a22aa8f2a4"
+    },
+    {
+      "path": "docs/gemini-capacity-audit-20261008.md",
+      "sha256": "5e822795c5115ce33b0bf29ea9309d5fe742a0249d00a71b9efab2aacbd2d6b0"
+    },
+    {
+      "path": "docs/gemini-capacity-plan.md",
+      "sha256": "c4b0ae6664955a595a59563e7f75c04111a05520240696b3a2106c9d2df4a758"
+    },
+    {
+      "path": "docs/gemini-keyframing.md",
+      "sha256": "89e307305b07fe7f4ec1fb4c8c6c5e388bff48ed15401cb13054838ee3d94d12"
+    },
+    {
+      "path": "docs/gemini-model-failover-20261008.md",
+      "sha256": "3e1b7c3bfa89d9b8931cb683caf62968f0aa114e0c3d0f18bfce0f69be68cf03"
+    },
+    {
+      "path": "docs/gemini-token-reduction-20261008.md",
+      "sha256": "3c15f582b51bf05e15f2e939e8bfc540f43d01943869e34df596fb04dd3d3c09"
+    },
+    {
+      "path": "docs/hybrid-football-tracking.md",
+      "sha256": "3d4c405bad92d833fd5585f73f872ac7f4e80dd8ade4cac563988ba19469b692"
+    },
+    {
+      "path": "docs/local-portrait-test-20261001.md",
+      "sha256": "e5f8fea1f6c8f11ee1f9b690560da63a6bdb0efeb22dcaf8c34dd3ad1a928a8c"
+    },
+    {
+      "path": "docs/local-ui-selection-regression-20261008.md",
+      "sha256": "34a620a4a28bc1ab30f48f3a984dbccb061d36c5f02c3a362d2f9f517870919b"
+    },
+    {
+      "path": "docs/source-first-football-workflow.md",
+      "sha256": "178ec36933bbbd640eb2af99175a1e4d29538479f213656cdc56b5fefb7f0a1c"
+    },
+    {
+      "path": "docs/workflow-speed-audit-20261008.md",
+      "sha256": "45b4b6da3dcea15958d1a94c14d4745ec7045ec04fd8e7afb71587275ba756b8"
+    },
+    {
+      "path": "drizzle.config.ts",
+      "sha256": "73d0807c58e541dc3eaf175909fb5acc966faed61f74ff659d9d55027bf3e25b"
+    },
+    {
+      "path": "eslint.config.mjs",
+      "sha256": "d028c519d8faee9395dcc0308384796825b2138b10744d2d5c8de99b1c4c207a"
+    },
+    {
+      "path": "lib/video/orchestrator.ts",
+      "sha256": "d337df51f0fa27ea894624a06ba0e36b549e458f7616ef0cee56833e0033c0e1"
+    },
+    {
+      "path": "lib/video/providers.ts",
+      "sha256": "e41813128489fe3dc76efd633b91baba8dc2a9e80bdb6d4333ab6e3516e9aea8"
+    },
+    {
+      "path": "lib/video/ranking.ts",
+      "sha256": "2fa91d9458686f1d76455f1dbc98ea940dded1f14e4895ae9c4ffc7185dfdeb6"
+    },
+    {
+      "path": "lib/video/render-plan.ts",
+      "sha256": "73bdcfaf2be6ddddd6a4ebc3d9ba630451d2b0485b61ba3b5281d4e0be3fd258"
+    },
+    {
+      "path": "lib/video/types.ts",
+      "sha256": "58b8b3971455ea4e138134be4f7101552b948e005f7c01a2dc8997fd2e00f7f0"
+    },
+    {
+      "path": "local-processor/source-duration-policy.d.mts",
+      "sha256": "dc6251243b0ce1225edfcef4473e1b7a25bb40e8109b5f5814d93d6f503ecd1f"
+    },
+    {
+      "path": "local-processor/source-duration-policy.mjs",
+      "sha256": "e9e5dd6df3d9163066fc91ab716f06147722503fb64012973de5b7568ecfc0bf"
+    },
+    {
+      "path": "local-processor/workflow-progress.d.mts",
+      "sha256": "b87cd0a7101949b243d3c55c5902fa35804d72f7d8d50b87cc67f7eaa1a54d7a"
+    },
+    {
+      "path": "local-processor/workflow-progress.mjs",
+      "sha256": "3553f6d9bfad5ad8e22afdc3fbb5268885f41784fd604a13a8d8f8a6a49cb9b6"
+    },
+    {
+      "path": "next-env.d.ts",
+      "sha256": "74ecf1a3bc702f296a7363c9ec6fe560278e32bd7f44c1bbac987f81ef7aa6df"
+    },
+    {
+      "path": "next.config.ts",
+      "sha256": "a972c4f0ffa6dd714e7909b02d1ac19d2f2fe3d01f191efd2c5054bd6f142ec1"
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "e537ea2f8bd1af071da2eb0a3f456ecae102bd299542e2503f4793fbd943956e"
+    },
+    {
+      "path": "package.json",
+      "sha256": "94beeedb2cfec3ebc978e31843fb1882e454b4895750c59364b1df5197f50924"
+    },
+    {
+      "path": "postcss.config.mjs",
+      "sha256": "7b299d3d3b16699ddda397c0b2373b3af4f25f8fc9ccc9b3d9e64ef083bc1c21"
+    },
+    {
+      "path": "public/favicon.svg",
+      "sha256": "3e8863288c2d43dd33d2a71de317dcf9198f09932ea8d61e0def1b846a865435"
+    },
+    {
+      "path": "public/file.svg",
+      "sha256": "81a9ce5ca9bc60870c1d72c0fd5b98b2bc5c8c02b0e04fefeab9efcc11277228"
+    },
+    {
+      "path": "public/globe.svg",
+      "sha256": "13187c071b4d369df3a7a179f69a927165bf624e1a524ee6c93b7d3be75d6fc8"
+    },
+    {
+      "path": "public/og.png",
+      "sha256": "d5f101e7a9873f571139aa075edff6126eacbdb9117eb2aa52555e7f7e743026"
+    },
+    {
+      "path": "public/window.svg",
+      "sha256": "d3cd4bf0c1123258fcc266409856e28c93d4fc1cf8476702225e17842900ca63"
+    },
+    {
+      "path": "README.md",
+      "sha256": "fce047bc54defd4573f3a11ad57aa464c73b109f4cc3200064192df1b56d5ead"
+    },
+    {
+      "path": "requirements-soccernet.txt",
+      "sha256": "59e2624d7cda2fb3ca2834b9a61cc09bd6069237d83807280196234989a37b68"
+    },
+    {
+      "path": "requirements-tracking.txt",
+      "sha256": "d08f07ddd28a4a1dad98fbf9e7474d05a36f29cf1bb41a991d2820cc8f162c4a"
+    },
+    {
+      "path": "REQUIREMENTS.md",
+      "sha256": "1cbf6a26c5c5a82c025cd1ec802c8e0bf72689b173c1b036361cac0c2fa275bb"
+    },
+    {
+      "path": "scripts/benchmark-detector-threads.py",
+      "sha256": "10d004fc0e12c6d1c989e6d8d2cfabd3ae45255d04709356ff70e6b18546ed17"
+    },
+    {
+      "path": "scripts/benchmark-tracking.mjs",
+      "sha256": "1d71aa8e3bf5d43ce8944a848640727bc365c1ab23b096d7a260ab0b724d7f0d"
+    },
+    {
+      "path": "scripts/compare-ball-model.py",
+      "sha256": "a4ca684e2846c3b042eba06f695a2e2a901d84e21b028347f4a93f26255020d5"
+    },
+    {
+      "path": "scripts/inspect-ball-candidates.py",
+      "sha256": "2f78fab8970dc2a68a2f118ef5ccad39e317a2c299af4e001d92a9d7e07b1273"
+    },
+    {
+      "path": "scripts/inspect-tracking.py",
+      "sha256": "b14c08294148a47696e3a4fa2c98915827148138009d2f06fbd60785073e92be"
+    },
+    {
+      "path": "scripts/install-fast-ffmpeg.ps1",
+      "sha256": "8bdbc76958e1762f1ce1fdc9779ed85de71f1382a7af405bc9984f6c2b001d0b"
+    },
+    {
+      "path": "scripts/measure-camera-motion.mjs",
+      "sha256": "86145cb63fccf7791e1c7e65dc2e2d933d8ee62661eda97e84ec2e8d629c50db"
+    },
+    {
+      "path": "scripts/restore-regression-candidates.mjs",
+      "sha256": "75edaad11878928f041c8e50f0b52673cab3c878d4445bfd57008907b2ec5520"
+    },
+    {
+      "path": "scripts/run-pipeline-regression.mjs",
+      "sha256": "0926ab6032b41a59a9dca7ffc254cca566750498304d8d34bdaa5519f61a519c"
+    },
+    {
+      "path": "scripts/setup-linux.sh",
+      "sha256": "fa555df2dfc98ee5f6b6bca90e3ced73ac059a6bccf28197a78ded638e80c9ce"
+    },
+    {
+      "path": "scripts/setup-soccernet.ps1",
+      "sha256": "17a845a8931bb8be8baf49cb0d8d562a0c7aa85203fa5435b30e825fceb99a0f"
+    },
+    {
+      "path": "scripts/setup-tracking.ps1",
+      "sha256": "cc45be7ccaec09f3c0f01c1f0700f61f4ec7f636957e66bb626dac7a3aedf8e4"
+    },
+    {
+      "path": "scripts/setup.ps1",
+      "sha256": "39f9d81922bbf16e544a37c0dc97c9a4ac4fd2b0cbcbf809452e6ee1605ebd7d"
+    },
+    {
+      "path": "scripts/start-local.ps1",
+      "sha256": "abde950d257532b5a58b50caa7c4197ac1216631e36a3bf3ef8ce7b5c17da332"
+    },
+    {
+      "path": "scripts/stop-local.ps1",
+      "sha256": "2d89b9cd01bb1fd8e1aa504ecf8446afb82f0715033f6dc02259f8e848753bac"
+    },
+    {
+      "path": "scripts/sync-fotmob-team-catalog.mjs",
+      "sha256": "90c971c43e7c3db13c084841d403d2a04ba322a935cb5c48d1f5ee27c5a84b52"
+    },
+    {
+      "path": "scripts/sync-official-team-symbols.mjs",
+      "sha256": "0fcc0122e7cf2139f05d7d4276c53244e92b33d9fa456ff2d99e97ad1fa9a11f"
+    },
+    {
+      "path": "scripts/test-framing-output.mjs",
+      "sha256": "2e7ec86c845ba3742b86c7da715cfffd46c76dc132476f4ac11d2814e4684f75"
+    },
+    {
+      "path": "scripts/test-gemini-video.mjs",
+      "sha256": "98c2400e7ce9c4aa3665b39bb7260ae839c0082e7c692b1529544b0729a95c39"
+    },
+    {
+      "path": "scripts/test-gemini.mjs",
+      "sha256": "5400a0ba6b169a3b43ce683d7918edfc58da3cfcd035e711e05032391b19dba1"
+    },
+    {
+      "path": "scripts/test-google-cloud-tts.mjs",
+      "sha256": "15f7776a5328366ad063cbfbf43d9272d0db22a942b7c436622f59dee60d2764"
+    },
+    {
+      "path": "scripts/test-short-form-render.mjs",
+      "sha256": "1fbc7e09ffa020cb384fda1ea37abcb63749184de5d4b90603dbefc39485205c"
+    },
+    {
+      "path": "scripts/test-tactical-render.mjs",
+      "sha256": "741dc092430edfe70b2c69a4de8b2a6432939379c0ebb7b9dca1ba082f0580db"
+    },
+    {
+      "path": "scripts/test-video-intelligence.mjs",
+      "sha256": "380d183685e6203fc1ac66dc2cb768285e7d2fe3dfda17d21cec91ec46380028"
+    },
+    {
+      "path": "scripts/verify-benchmark-payoffs.mjs",
+      "sha256": "bbe3817f8711ca31360367215bf211cfa74ed077148818b403a474650f8c658d"
+    },
+    {
+      "path": "scripts/verify-linux.sh",
+      "sha256": "f1a85776c7fc15cd6a1f848f07ae172f22b6622c73632e7310fc3ffcc98d4a50"
+    },
+    {
+      "path": "scripts/verify-setup.ps1",
+      "sha256": "62a646357e4b504d9467960b9b9af72aa2fec17873a9ce22625687455f64d442"
+    },
+    {
+      "path": "SETUP-WINDOWS.cmd",
+      "sha256": "f5b16de6618a793a34d1cdd6b1ae958f1f0b449d305bfb2ae502abed5b37dd84"
+    },
+    {
+      "path": "tsconfig.json",
+      "sha256": "f9fdabe75eb7a192ea4c515e92ae00b84c6cb655e838e6dcc7ab17004376336d"
+    },
+    {
+      "path": "vite.config.ts",
+      "sha256": "7c4f1041ed547ddbba4fae978789bd631912431180300019a530a36381fa6a25"
+    },
+    {
+      "path": "worker/index.ts",
+      "sha256": "6f8983ab616309202039ad672b1a46a835bede1bb77636dc751613c664f969e5"
+    },
+    {
+      "path": "deploy/oracle/Caddyfile.in",
+      "sha256": "b7e874e46265c58f027f127963f9ffb8021a18d665d522a4f19a3ac1acb5e3da"
+    },
+    {
+      "path": "deploy/oracle/env.production.example",
+      "sha256": "56365e22efb5e63a10fa5b308f6c63bde8305847e04599a8bbc367e8d798e002"
+    },
+    {
+      "path": "deploy/oracle/install.sh",
+      "sha256": "05212a01c6d0b448e9aa9d2d2f36d401b275e42d89063fef8c384fb7f3664b23"
+    },
+    {
+      "path": "deploy/oracle/README.md",
+      "sha256": "df8b5086cecf041f31ceb88abbf43a2e722bc22461716070630440bd4a038dba"
+    },
+    {
+      "path": "deploy/oracle/touchline-processor.service.in",
+      "sha256": "617cb16d0a1c7a096a1b46582589f75e9da0b3ff4cc76a2a8b884a4bb789d2ff"
+    },
+    {
+      "path": "deploy/oracle/touchline-web.service.in",
+      "sha256": "03055e685c4e8cfa87bafd75a6054712de8c18714bd57a5f1111a3a5ec5c1445"
+    },
+    {
+      "path": "deploy/oracle/update.sh",
+      "sha256": "90197cdbfcd2926ff0039d8cf18935144212dbcaf417582b3e5b31f80688aa24"
+    },
+    {
+      "path": "local-processor/action-boundaries.mjs",
+      "sha256": "54bb516f94664ffe35e7328d4a096d1dc3585300b23137f6d4ad816cd683bb2c"
+    },
+    {
+      "path": "local-processor/action-completion-contract.mjs",
+      "sha256": "39bc40cb9c8c29cbe0420501118ac943dc2f311db1b348808c9d684fd856c24d"
+    },
+    {
+      "path": "local-processor/action-guidance.mjs",
+      "sha256": "3db034719c3f4c7593b1e55ef8479f1bf1f7230d9192d5967f681f8e13d760cc"
+    },
+    {
+      "path": "local-processor/automatic-duration.mjs",
+      "sha256": "df7cf217dc87a44d8b72ec68eeea2f4c0317853223bf37526033ecdc696aafee"
+    },
+    {
+      "path": "local-processor/ball_trajectory.py",
+      "sha256": "2af965009001bcdd746a0eda19aacf45bcaa71b10c0ed7c732a3c47a55c76724"
+    },
+    {
+      "path": "local-processor/blocked-source-selection.mjs",
+      "sha256": "d1b8b7cb6f6a557928510b777d3d9f26bb5b822d695506604d8952362c17af83"
+    },
+    {
+      "path": "local-processor/bounded-concurrency.mjs",
+      "sha256": "2a179b6f77065e777080ec83cdf6e9f1a033243394d5a9bfe8eda63af2a308ba"
+    },
+    {
+      "path": "local-processor/clear-incident-angle.mjs",
+      "sha256": "1998f5c0bde71893cd9ba771055da868562a231f26aa023996fe9e6fabefbc86"
+    },
+    {
+      "path": "local-processor/completed-video-narration.mjs",
+      "sha256": "0f93ba852e6ebbe256cda627868e4d1c1d598a2a28dcd8ebab476dcfa490338e"
+    },
+    {
+      "path": "local-processor/coverage-recovery.mjs",
+      "sha256": "fe85d034a08e1feecd88dbc9751a4b7acb43c53102279f4bb0c7a28fb98c5485"
+    },
+    {
+      "path": "local-processor/crop-media-preflight.mjs",
+      "sha256": "5d6aba134a15d753773ea71a1f5417de94c4eb95dbb2f78ae2ab9fe9e07aae37"
+    },
+    {
+      "path": "local-processor/decision-framing.mjs",
+      "sha256": "d3f273c68c45f9c14cc9aeeb320baf3bf266ac6b1599eaa4ed25333e1cf50736"
+    },
+    {
+      "path": "local-processor/delivery-policy.mjs",
+      "sha256": "0418129ac8710a06b7d30620b13a8cea38dd9a6b2496636a5e50c8d96cd7c81e"
+    },
+    {
+      "path": "local-processor/detector_roles.py",
+      "sha256": "b85758ccd20148d15f03246dc4eff4ddb4ee4afdfbbf41b1006468442f97df20"
+    },
+    {
+      "path": "local-processor/disciplinary-action.mjs",
+      "sha256": "4c974608b6cc19746b1c09ac2258e6be5f6882ee5b3267ee06185b96d779a195"
+    },
+    {
+      "path": "local-processor/editorial-policy.mjs",
+      "sha256": "5e4314b38a52c23d939d750d34e3166554bb6a35eba6ff09a6b72dbbfc9cf2c3"
+    },
+    {
+      "path": "local-processor/env.mjs",
+      "sha256": "4c73c13daef25f64fb0b4d1a10f775c9b13fd38d029aefe4328119fee21e7c12"
+    },
+    {
+      "path": "local-processor/fast-tracking-policy.mjs",
+      "sha256": "3b5a9fb1a427b4cc82a1c65450fa22bf3ced75a994028942f6a42f3f8309be83"
+    },
+    {
+      "path": "local-processor/ffmpeg-compat.mjs",
+      "sha256": "3c92b6cfe694a4e6a0e5a29b33af273c694854b46e296e7a7a66bd285e14db59"
+    },
+    {
+      "path": "local-processor/ffmpeg-thread-budget.mjs",
+      "sha256": "2e3c1523529b49496fc02a4f5da45d4c68290dce5bff4dd8e67ad209f0467f94"
+    },
+    {
+      "path": "local-processor/fixed-scene-queue.mjs",
+      "sha256": "bf89e962d1aa242becdb86d0716bc82124bb1b6dfe7fc2343e8e1f5e6be8bd4f"
+    },
+    {
+      "path": "local-processor/football-editor-skill.mjs",
+      "sha256": "f407091e708c3040842c6a4fd7725602a989332fed7af4b312b880d9a7a835c7"
+    },
+    {
+      "path": "local-processor/football_action_phase.py",
+      "sha256": "467f23bb0dc6f7860a672c1f14d0a8fc44f663d19a92843aba2e7aa602209682"
+    },
+    {
+      "path": "local-processor/football_detection.py",
+      "sha256": "94cbfa08da790a2c842074980b20004abd6b38c1896f644ebb88f365e05116d5"
+    },
+    {
+      "path": "local-processor/framing-preflight.mjs",
+      "sha256": "83a8c8e110762073296ed8fa07a40b86711aa1b88696f8a2767791378f56f68b"
+    },
+    {
+      "path": "local-processor/gemini-framing.mjs",
+      "sha256": "b5e9e6420ae24178365e3c4d72d0c5ac40340d4aba435745ee1a11efab95def5"
+    },
+    {
+      "path": "local-processor/gemini-generation-config.mjs",
+      "sha256": "ae2129523f94d30c2336b6e114a0c11c1817a6cb932939d3c5672dc1c03ff888"
+    },
+    {
+      "path": "local-processor/gemini-http-transport.mjs",
+      "sha256": "cce15f0ab0d7bd51bc93b9dcb0bd9e373147a38784c5706999e71f2f4000b4dc"
+    },
+    {
+      "path": "local-processor/gemini-json-policy.mjs",
+      "sha256": "1230b6d09154225477bbacc5ac92b844e90a4b7d912511582b6373bcbc81b69a"
+    },
+    {
+      "path": "local-processor/gemini-limit-evidence.mjs",
+      "sha256": "86f9f98602e555446f6a66a6e7e1c525dbfeff4bbd3300616ac0462e6bf4b10f"
+    },
+    {
+      "path": "local-processor/gemini-media-policy.mjs",
+      "sha256": "cc605afe0c43934f8b4840a7367950c447d28200b24c302ad2733a69aad3adf2"
+    },
+    {
+      "path": "local-processor/gemini-model-failover.mjs",
+      "sha256": "dd4a824d723bddcfdc572446579c566bb6c28e8510eca2c5b51af8346fd148e3"
+    },
+    {
+      "path": "local-processor/gemini-model-gate.mjs",
+      "sha256": "55dd062ca9de2883a23182e0e32718775232977bc760890831f9b16c863026ff"
+    },
+    {
+      "path": "local-processor/gemini-model-lifecycle.mjs",
+      "sha256": "d163d69c55ece70946466678e5267f5f761a09b54b4000af69a54571804a0fee"
+    },
+    {
+      "path": "local-processor/gemini-request-scheduler.mjs",
+      "sha256": "e3e20169693ec90b172f320e379a483db4cd974b58541257c5c656626d957d5a"
+    },
+    {
+      "path": "local-processor/gemini-traffic-policy.mjs",
+      "sha256": "3a3b54aa722d0fadaaedc049b4f99f7be4fa6d22b557b74fc20db594f23e924e"
+    },
+    {
+      "path": "local-processor/gemini-video-framing.mjs",
+      "sha256": "a66b84bdbb0b370c7f3982f97e5a742ba69690bf611e4cf9a8ab209dd5a5ea1f"
+    },
+    {
+      "path": "local-processor/gemini-workload-policy.mjs",
+      "sha256": "91c8366922686b1ab555c3a4284c428da97f746a1486b8a8219d3ced2aee14f7"
+    },
+    {
+      "path": "local-processor/goal-count-evidence.mjs",
+      "sha256": "361ec621243eb02e9556248f70f6dc17dbfa9e583b92ce3aa0be2527c1fb2ed5"
+    },
+    {
+      "path": "local-processor/goal-outcome-detail.mjs",
+      "sha256": "1cbcba7056d8ccf946efff50bdb9e4ebcec2d8a84cd1d55601cfe1b182b920bb"
+    },
+    {
+      "path": "local-processor/google-cloud-tts.mjs",
+      "sha256": "ba97afa2443d915f58cf35a0c5f819770016eed40e253b37f68a35a14a455237"
+    },
+    {
+      "path": "local-processor/google-video-intelligence.mjs",
+      "sha256": "8d7904e3485fb7401f4fe772c9974c941df628a726d1e103a55688217c404784"
+    },
+    {
+      "path": "local-processor/hold-pan-camera.mjs",
+      "sha256": "7b3e0420d3c03574c3c7ec3029b9f11a08f5404d7ff358318eda3bb51a99287e"
+    },
+    {
+      "path": "local-processor/hybrid-framing.mjs",
+      "sha256": "f0006e5329e5436458920812a3b4b64f9f1627cda9be56b42f299625fce9258b"
+    },
+    {
+      "path": "local-processor/hybrid-tracking-policy.mjs",
+      "sha256": "29823c9ab031f2ed487917cd20e147552bef7094278d37983619d610f6e9833a"
+    },
+    {
+      "path": "local-processor/incident-coverage.mjs",
+      "sha256": "501df0e61994b50ceb42b3f9fb6eb59788398b47c0073a4d7f36d178cd4b5831"
+    },
+    {
+      "path": "local-processor/initial-section-analysis.mjs",
+      "sha256": "55ac3e33eabee729b92dce82ba994972813fcb97a2649573599c261ccb554129"
+    },
+    {
+      "path": "local-processor/job-queue.mjs",
+      "sha256": "11935a94798c9f050d47e282b17d6d32ca47a3785718682e2fb2138f17100590"
+    },
+    {
+      "path": "local-processor/local-studio-origin.mjs",
+      "sha256": "828c7ddd449f7fbaa8b2a4acb8651f3576f70a0172e2ea5c5631d36abe1c20d5"
+    },
+    {
+      "path": "local-processor/locked-narration.mjs",
+      "sha256": "e8bb656a1d2b5ab8bec2a4908771065944ecc9536ab8a4a4ca1260f55b30d951"
+    },
+    {
+      "path": "local-processor/match-research.mjs",
+      "sha256": "74c5c909d2c8ef2ef0cbb0d0676056aa117033260ebe0fe83e82dffc8a0ec786"
+    },
+    {
+      "path": "local-processor/moving-tactical-overlay.py",
+      "sha256": "35180d7764fe190d0574c896d3710e153437bf78700f68c578c2a4cddc1600fc"
+    },
+    {
+      "path": "local-processor/narration-outcome-policy.mjs",
+      "sha256": "61a533b981b4ddbd70d3edd4addcb222d9e8f9f8042dbf6624031e3919753872"
+    },
+    {
+      "path": "local-processor/narration-request-policy.mjs",
+      "sha256": "2617da50dd8560e2ed77841c71e25fd8e9907df8b6bd365c55239138c9fa8fd4"
+    },
+    {
+      "path": "local-processor/native-frame-action.mjs",
+      "sha256": "8e15c12cf0ae446f14f5d8bf311af81fc0b191475bcda9d4981b23240b5cd62a"
+    },
+    {
+      "path": "local-processor/observe-source-score.mjs",
+      "sha256": "90394a3b5ba9c420d2e4344590665d07c59718ec9ae6be0e06f1b554ae83700e"
+    },
+    {
+      "path": "local-processor/passage-inventory.mjs",
+      "sha256": "2dc41f029e87ab5a606c35790a21696a36e48867f916aaf851984663eae4ede1"
+    },
+    {
+      "path": "local-processor/payoff-evidence.mjs",
+      "sha256": "f22672eb178970ef8e9f4567380d8479b3c9ed5e6dd247dd9172a31b3bf3b872"
+    },
+    {
+      "path": "local-processor/phase_quality.py",
+      "sha256": "12b29c9ac368fffc6a60c78a83eae2f7d7528ba8f2e99219f491bb631e04042b"
+    },
+    {
+      "path": "local-processor/pipeline-state.mjs",
+      "sha256": "b406ba09a06aac0cda8edd47e7da77170531292cc58e862ef21ac608022fbc5e"
+    },
+    {
+      "path": "local-processor/pitch-map.py",
+      "sha256": "28d0fb6b4d7a8bb39b3c7e291e9630508d3680cf491eaf3343d58b30b3da7b7c"
+    },
+    {
+      "path": "local-processor/processing-recovery.mjs",
+      "sha256": "1bbe45a3d111151c1359f4065f4a1b6fce572429d19ca95347c3c8bd9d51a47c"
+    },
+    {
+      "path": "local-processor/recap-action-inventory.mjs",
+      "sha256": "ff93d1a9577b1cd0150075b12e95e6ad8e9292af864c730b7d196eb9fc7f7c41"
+    },
+    {
+      "path": "local-processor/render-video-v2.mjs",
+      "sha256": "a8ba999f6fdc59b3d6504aa513c5671f4be08afb98b30878c082ae674329a979"
+    },
+    {
+      "path": "local-processor/render-video-v2.mjs.orig",
+      "sha256": "6214f4fb67fa021385b6a79a37d5d7a832fc92f84dab011857b008d08646d5e5"
+    },
+    {
+      "path": "local-processor/rendered-batch-clock.mjs",
+      "sha256": "4e43638ff327522b1ca11810eedff7427242b206c9d77d14b324d8a598976ac3"
+    },
+    {
+      "path": "local-processor/scene-selection-evidence.mjs",
+      "sha256": "d0001a0812424098ef4a5dbfe65afa1fd7018edce82ffeb9f145c0a6d9c0797a"
+    },
+    {
+      "path": "local-processor/score-action-schema.mjs",
+      "sha256": "16108db3112d5fd5cc3b3489a42a543313a17dc977db2847a6fdd6038d94338b"
+    },
+    {
+      "path": "local-processor/score-normalization.mjs",
+      "sha256": "9be0cc35db6cfd96f9d76a153a3fdc1fe0280195a63981036b49c5aa4617f3ea"
+    },
+    {
+      "path": "local-processor/scorer_tracking.py",
+      "sha256": "f688f58ae2abcfe093958345993c0705fbe7fb20f42d39913f008f8601f437ac"
+    },
+    {
+      "path": "local-processor/semantic-observation-policy.mjs",
+      "sha256": "5a37c37781ff6303de6def34096e50adbfd633e9d88b339be7d56951c8d5beeb"
+    },
+    {
+      "path": "local-processor/semantic_ball_search.py",
+      "sha256": "224ed8acb34366800fb19926896e202fad5ee7fd56f71ffc9630b2e4ebfbac10"
+    },
+    {
+      "path": "local-processor/serialized-json-store.mjs",
+      "sha256": "65dee708bc11cf2253417e0cb6e0ce97b1b5fe3e1f9e2934380f772e875fe341"
+    },
+    {
+      "path": "local-processor/server.mjs",
+      "sha256": "9014f008834cf086920faef8725dce2351da16f7a54c79b2c63db024af213034"
+    },
+    {
+      "path": "local-processor/server.mjs.orig",
+      "sha256": "1d1deb8cbf9b0e9e82c8e01c224c8494b78aff0ac71a4396947bf3e4be5a0914"
+    },
+    {
+      "path": "local-processor/short-form-policy.mjs",
+      "sha256": "bf8ad01d4d473b2e29d8bc550f7007787d35b4292ba860b4d3f53e94e70d651d"
+    },
+    {
+      "path": "local-processor/shot-boundaries.py",
+      "sha256": "a46f8fe1df16473ebcd0eb7e24b0102556e40fd55f202211e6403a7a733ad4db"
+    },
+    {
+      "path": "local-processor/shot-checkpoint.mjs",
+      "sha256": "08b9e57ee68d9e2bdb322459c7bc97f318db7a34683942d3b1aae15767b63da3"
+    },
+    {
+      "path": "local-processor/shot_proxy.py",
+      "sha256": "d4959f4da77cb2bce0aa635fd7bb6c6bf3cbf3d25f4150b1c76877231366844e"
+    },
+    {
+      "path": "local-processor/soccernet-calf.py",
+      "sha256": "6eea9a0b31e89847a8b0187d157c04354b961a25d85e363b707e66d5819570f2"
+    },
+    {
+      "path": "local-processor/source-action-selection.mjs",
+      "sha256": "80673a7f3d853b57bbcf920239410e9d4119ed72c920fbcaace5f43624285e5a"
+    },
+    {
+      "path": "local-processor/source-action-timeline.mjs",
+      "sha256": "2c490176ed83d4922cf1acbc948d0c58355e98e2aefb0a07710d02db0af9b415"
+    },
+    {
+      "path": "local-processor/source-content-fingerprint.mjs",
+      "sha256": "cc153a122f7f2de3e8c72721394afce96d7f0c3700bffeec688808ee49aece97"
+    },
+    {
+      "path": "local-processor/source-import.mjs",
+      "sha256": "68499c6f05f611f94e0a8a47fa86fda8fec394a9ab745bfae1a471ca3c61f28d"
+    },
+    {
+      "path": "local-processor/source-score-ledger.mjs",
+      "sha256": "a35eca921e1d5c0aab23dbd92b9ea5f289560f7fe6d95ffc5131a0739543e090"
+    },
+    {
+      "path": "local-processor/split-scene-assets.mjs",
+      "sha256": "3edffe520e1de08f9dcbdb31454bccca292f5d1e7aea95e9e150a0075c39df89"
+    },
+    {
+      "path": "local-processor/step1-discovery-plan.mjs",
+      "sha256": "8a0f8064b7fada78973e864895a9f13dcf61645a731b499dec8c807fff1a9aa1"
+    },
+    {
+      "path": "local-processor/tactical-overlay.py",
+      "sha256": "36856f6790114bc4fbba51e5ba39b0ab2ecb4bc6f6cb4d6b3d82762fb034a309"
+    },
+    {
+      "path": "local-processor/tactical-plan.mjs",
+      "sha256": "d575707927167f39db0ff79195f7ab60803ca197ef7716cb109b030c9f177833"
+    },
+    {
+      "path": "local-processor/team-badges.mjs",
+      "sha256": "e0b70f36a68f3f4a6b411dc46d808d9727a8bae3b94e33f04fec43b25a4c2416"
+    },
+    {
+      "path": "local-processor/track-football-v2.py",
+      "sha256": "e64997c457f761679d946dc5e4d8494b7fd387d7c97c63ff8a979580bcce41a0"
+    },
+    {
+      "path": "local-processor/track-football-v2.py.orig",
+      "sha256": "a8ec180a0e7185cd1f4caffadd8d1ae134397694d8fa5b3a19f3f209e0f907d7"
+    },
+    {
+      "path": "local-processor/track-football.py",
+      "sha256": "175b026af32f5dc5eceefd5661eb518a7070c4dc68a206a827ee5d72b61c04c0"
+    },
+    {
+      "path": "local-processor/tracked-position.mjs",
+      "sha256": "f768cf445c76ef5d7cb443947128f0c59229a885420663122ffdaa34ba9a9777"
+    },
+    {
+      "path": "local-processor/tracking_cache.py",
+      "sha256": "19ec030a09fd1592076ab8626ecca370d3d3c846ef5b6de5ac5da4ecdf25e4d5"
+    },
+    {
+      "path": "local-processor/tracking_cpu.py",
+      "sha256": "f42f39e0bb817e59fb6489b2cbbaa60fc5920a0f92f5fbfb63d7450b9616e4ad"
+    },
+    {
+      "path": "local-processor/tracking_decode.py",
+      "sha256": "eef41d495006ee6adec71270117a800c06226e715f313bde86f44d4f476999f3"
+    },
+    {
+      "path": "local-processor/tracking_motion.py",
+      "sha256": "3325a667a3cc5bb366a96249351fd142d3d3b20e1c3c13cbb1be347cd48f0ab7"
+    },
+    {
+      "path": "local-processor/tts-policy.mjs",
+      "sha256": "22193a3a90d98594ddbe2eb7a4c915055e17462d3aeae5ace64754a050aecaaa"
+    },
+    {
+      "path": "local-processor/viral-reel-policy.mjs",
+      "sha256": "465e6599ded780eddee190cafb74ae977e5ed5d7d03b6ca0d7a5f86c270401cf"
+    },
+    {
+      "path": "local-processor/visual-review-manifest.mjs",
+      "sha256": "2f5a45e35592ad2415196bd3b00b7f7475ef2c130103fac79d71c58c7aabb67f"
+    },
+    {
+      "path": "local-processor/workflow-performance.mjs",
+      "sha256": "83239357f4d59bb40323700bd4fb703484a1621b37caaac389657614c606377c"
+    },
+    {
+      "path": "local-processor/youtube-publisher.mjs",
+      "sha256": "f47e07040c96a68489176e6aebb7a918241a702eec9f508deb16cb72bf6c9790"
+    }
+  ]
+}

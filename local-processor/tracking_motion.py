@@ -19,9 +19,8 @@ def camera_ownership_phase(record):
     """Return the subject that owns the virtual camera for this sample.
 
     Setup and contact belong to the ball carrier.  Flight, continuation and
-    payoff belong to the ball/destination.  A solver may smooth inside either
-    interval, but must not anticipate a later owner before the current action
-    has completed.
+    payoff belong to the ball/destination. Ownership controls containment, not
+    a camera cut: one continuous source shot needs one continuous camera path.
     """
     explicit = record.get("camera_owner")
     if explicit in {"carrier", "ball", "hold", "payoff"}:
@@ -44,7 +43,7 @@ def _box_center_bounds(start, end, view_size, edge):
     return (low, high) if low <= high else _global_bounds(view_size)
 
 
-def framing_bounds(record, view_width):
+def framing_bounds(record, view_width, prefer_center=True):
     half = view_width / 2
     phase = "setup" if camera_ownership_phase(record) == "carrier" else record.get("action_phase")
     # Gameplay composition needs more than mathematical containment. Preserve
@@ -52,9 +51,18 @@ def framing_bounds(record, view_width):
     # and ball so neither subject sits half-clipped against an output edge.
     edge = min(0.05, view_width * 0.15) if phase in {"setup", "contact"} \
         else min(0.032, view_width * 0.09)
+    if not prefer_center:
+        # The fallback protects the entire subject and the review's measured
+        # .008 ball clearance, not the larger editorial composition margin.
+        # Relaxing that preference before speed avoids otherwise needless pans.
+        edge=min(edge,.008)
     global_bounds = _global_bounds(view_width)
+    closeup=record.get('observed_closeup_box')
+    if (closeup is not None and record.get('direct_ball') is not True
+            and phase in {'setup','contact'} and closeup[2]-closeup[0]<=view_width):
+        return _box_center_bounds(closeup[0],closeup[2],view_width,edge)
     payoff = record.get("payoff_box")
-    if payoff is not None and payoff[2] - payoff[0] <= view_width:
+    if payoff is not None and record.get('semantic_outcome_region') is not True and payoff[2] - payoff[0] <= view_width:
         # A goal is not readable when the crop contains only an empty patch of
         # net. Keep a locally observed goal-side player and the independently
         # verified goalmouth anchor together whenever portrait geometry allows.
@@ -78,6 +86,7 @@ def framing_bounds(record, view_width):
         if low <= high:
             return low, high
     if (phase in {"setup", "contact"} and record.get("camera_owner") == "hold"
+            and record.get('direct_ball') is not True
             and record.get("player_x1") is None and record.get("player_x2") is None):
         return global_bounds
     ball = record.get("ball_x")
@@ -105,8 +114,10 @@ def framing_bounds(record, view_width):
         phase_requires_pair = phase in {None, "setup", "contact"}
         if (phase_requires_pair or owner_near_ball) and pair_right - pair_left + 2 * edge <= view_width:
             left, right = pair_left, pair_right
-    low = max(half, right + edge - half)
-    high = min(1 - half, left - edge + half)
+    # Keep every available source-edge margin instead of dropping ALL margin
+    # when a ball reaches the physical edge of the uploaded picture.
+    low = max(half, right + min(edge, max(0.0, 1-right)) - half)
+    high = min(1 - half, left - min(edge, max(0.0, left)) + half)
     # A subject at the physical source edge cannot have an extra safe margin.
     if low > high:
         low = max(half, right - half)
@@ -116,7 +127,15 @@ def framing_bounds(record, view_width):
     # football in the middle 50% of the output whenever that is compatible
     # with retaining the complete active player. At a physical source edge,
     # visibility wins because centering is geometrically impossible.
-    if phase in {"setup", "contact", "flight", "payoff"}:
+    # Centering is a preference during fast flight, not a second hard crop.
+    # Forcing the ball into the middle 50% can require an unnecessarily fast
+    # pan even when it safely fits inside the portrait frame. The objective
+    # follows the ball; hard edge bounds above still protect its visibility.
+    # A semantic payoff timestamp is only an estimate: the shot can still be
+    # travelling. Do not impose a second, narrower center constraint on a
+    # released ball merely because the estimated phase changed to payoff.
+    # The target objective still follows it; hard crop-edge containment stays.
+    if prefer_center and (phase in {"setup", "contact"} or phase == "payoff" and record.get("possession") is True):
         central_low = max(half, ball - view_width * .25)
         central_high = min(1 - half, ball + view_width * .25)
         centered_low = max(low, central_low)
@@ -134,7 +153,7 @@ def vertical_framing_bounds(record, view_height):
     phase = "setup" if camera_ownership_phase(record) == "carrier" else record.get("action_phase")
     edge = min(.035, view_height * .055) if phase in {"setup", "contact"} else min(.025, view_height * .04)
     payoff = record.get("payoff_box")
-    if payoff is not None and payoff[3] - payoff[1] <= view_height:
+    if payoff is not None and record.get('semantic_outcome_region') is not True and payoff[3] - payoff[1] <= view_height:
         return _box_center_bounds(payoff[1], payoff[3], view_height, edge)
     values = []
     if record.get("ball_y") is not None and (record.get("direct_ball") is not False or record.get("ball_guidance") is True):
@@ -146,10 +165,30 @@ def vertical_framing_bounds(record, view_height):
     return _box_center_bounds(min(values), max(values), view_height, edge)
 
 
-def _required_bounds(records, view_size, axis):
-    raw = [framing_bounds(record, view_size) if axis == "x" else vertical_framing_bounds(record, view_size)
+def _required_bounds(records, view_size, axis, prefer_center=True):
+    raw = [framing_bounds(record, view_size, prefer_center) if axis == "x" else vertical_framing_bounds(record, view_size)
            for record in records]
     global_bounds = _global_bounds(view_size)
+    measured_handoff = set()
+    previous = None
+    for index, record in enumerate(records):
+        if record['scene_cut']:
+            previous = None
+        coordinate = record.get('ball_x' if axis == 'x' else 'ball_y')
+        if record.get('direct_ball') is not True or coordinate is None:
+            continue
+        if previous is not None and index > previous + 1:
+            gap = record['time'] - records[previous]['time']
+            old = records[previous].get('ball_x' if axis == 'x' else 'ball_y')
+            if 0 < gap <= 1.25 and abs(coordinate-old) > view_size*.4:
+                # Both endpoints are native observations in the SAME shot.
+                # Estimated interior ball/player positions cannot force a hold
+                # followed by a snap. Release only those unknown constraints;
+                # the target objective supplies smooth offline look-ahead.
+                measured_handoff.update(range(previous+1,index))
+        previous=index
+    for index in measured_handoff:
+        raw[index]=global_bounds
     constrained = [bounds != global_bounds for bounds in raw]
     # Keep the most recent verified subject envelope during brief detector gaps.
     # Never bridge a broadcast cut, and never manufacture a new coordinate.
@@ -157,8 +196,18 @@ def _required_bounds(records, view_size, axis):
     for index in range(len(raw)):
         if records[index]["scene_cut"]:
             last_required = None
+        if index in measured_handoff:
+            last_required = None
+            continue
         if constrained[index]:
             last_required = index
+            continue
+        if (records[index].get('allow_outcome_lookahead') is True
+                and camera_ownership_phase(records[index]) != 'carrier'):
+            # A separately observed goal region permits anticipation during
+            # an unknown ball interval. Holding an obsolete subject envelope
+            # here forced a last-frame snap even with offline look-ahead.
+            last_required = None
             continue
         if last_required is not None and records[index]["time"] - records[last_required]["time"] <= .65:
             raw[index] = raw[last_required]
@@ -350,10 +399,10 @@ def constrained_camera(targets, records, view_width, max_speed=0.32, axis="x"):
     if not records:
         return []
     bounds = _required_bounds(records, view_width, axis)
+    containment_bounds = _required_bounds(records, view_width, axis, prefer_center=False)
     reachable = bounds[:]
     for i in range(len(records) - 2, -1, -1):
-        if (records[i + 1]["scene_cut"]
-                or camera_ownership_phase(records[i + 1]) != camera_ownership_phase(records[i])):
+        if records[i + 1]["scene_cut"]:
             continue
         dt = max(0.001, records[i + 1]["time"] - records[i]["time"])
         low = max(bounds[i][0], reachable[i + 1][0] - max_speed * dt)
@@ -378,9 +427,7 @@ def constrained_camera(targets, records, view_width, max_speed=0.32, axis="x"):
     for _ in range(12):
         smoothed = out[:]
         for i in range(1, len(out) - 1):
-            if (records[i]["scene_cut"] or records[i + 1]["scene_cut"]
-                    or camera_ownership_phase(records[i - 1]) != camera_ownership_phase(records[i])
-                    or camera_ownership_phase(records[i + 1]) != camera_ownership_phase(records[i])):
+            if records[i]["scene_cut"] or records[i + 1]["scene_cut"]:
                 continue
             target = (out[i - 1] + out[i] * 2 + out[i + 1]) / 4
             low, high = reachable[i]
@@ -390,8 +437,7 @@ def constrained_camera(targets, records, view_width, max_speed=0.32, axis="x"):
     # acceleration are relaxed only when a source pan makes them infeasible.
     start = 0
     for end in range(1, len(records) + 1):
-        boundary = (end == len(records) or records[end]["scene_cut"]
-                    or camera_ownership_phase(records[end]) != camera_ownership_phase(records[end - 1]))
+        boundary = end == len(records) or records[end]["scene_cut"]
         if not boundary:
             continue
         if end - start >= 3:
@@ -402,21 +448,46 @@ def constrained_camera(targets, records, view_width, max_speed=0.32, axis="x"):
             shot_targets = targets[start:end]
             shot_times = [record["time"] for record in records[start:end]]
             shot_bounds = bounds[start:end]
-            # A phase handoff is a pan beginning after contact, not a jump or
-            # an anticipatory move during setup. Pin the first post-contact
-            # sample to the completed carrier crop whenever containment allows.
-            if start > 0 and not records[start]["scene_cut"]:
-                inherited = out[start - 1]
-                low, high = shot_bounds[0]
-                inherited = max(low, min(high, inherited))
-                shot_bounds = [(inherited, inherited), *shot_bounds[1:]]
-                shot_targets = [inherited, *shot_targets[1:]]
+            # Keep the opening composition, but solve across every ownership
+            # handoff in this same shot. Independent phase solves previously
+            # produced a visible jump from the cross to its receiving player.
+            # Phase-specific subject bounds still keep setup/contact complete.
+            # The opening is constrained by visible subjects, not a particular
+            # detector centre. Pinning it to the first noisy sample prevents
+            # offline look-ahead from beginning a necessary pan early, and can
+            # create a jump immediately after frame zero. Keep its full valid
+            # composition interval just like every other frame in this shot.
+            if records[start].get("direct_ball") is True and camera_ownership_phase(records[start]) == "carrier":
+                # A verified opening carrier should not be pre-emptively
+                # composed at the far edge. Allow a small look-ahead offset,
+                # while an unacquired first frame retains its full interval.
+                opening=out[start]
+                low,high=shot_bounds[0]
+                shot_bounds=[(max(low,opening-.025),min(high,opening+.025)),*shot_bounds[1:]]
             solved = None
-            for speed, acceleration_limit in ((max_speed, .75), (max_speed * 1.5, 1.25),
-                                               (max_speed * 2.5, 2.25), (None, None)):
-                solved = _solve_shot_path(shot_targets, shot_times, shot_bounds, speed, acceleration_limit)
+            # Centering is editorial preference; complete safe containment is
+            # the hard requirement. Before allowing a faster pan, try the full
+            # safe subject interval at the original speed. Do not sacrifice
+            # visibility or remove a scene simply to keep the ball centred.
+            for candidate_bounds in (shot_bounds,containment_bounds[start:end]):
+                for speed, acceleration_limit in ((min(.35,max_speed),.75),(min(.35,max_speed*1.5),1.25)):
+                    solved = _solve_shot_path(shot_targets,shot_times,candidate_bounds,speed,acceleration_limit)
+                    if solved is not None:
+                        break
                 if solved is not None:
                     break
+            if solved is None:
+                # Keep the same safe speed ceiling before relaxing it. A short
+                # real touch can make the acceleration constraint infeasible;
+                # abandoning both constraints then caused avoidable fast pans.
+                # Acceleration remains penalized in the objective even here.
+                solved = _solve_shot_path(shot_targets,shot_times,
+                    containment_bounds[start:end],min(.35,max_speed*1.6),None)
+            if solved is None:
+                for speed,acceleration_limit in ((max_speed*2.5,2.25),(None,None)):
+                    solved=_solve_shot_path(shot_targets,shot_times,containment_bounds[start:end],speed,acceleration_limit)
+                    if solved is not None:
+                        break
             if solved is not None:
                 out[start:end] = solved
         start = end

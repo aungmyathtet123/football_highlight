@@ -1,0 +1,15 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+WORKDIR /app
+# The CPU image remains available. This image is used only on an L4 worker.
+RUN /opt/venv/bin/pip install --no-cache-dir --upgrade --index-url https://download.pytorch.org/whl/cu128 \
+      torch==2.11.0 torchvision==0.26.0 \
+    && /opt/venv/bin/python -c "import torch; assert torch.version.cuda, 'CUDA PyTorch is required'"
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+COPY local-processor ./local-processor
+COPY assets/team-badges ./assets/team-badges
+COPY deploy/cloud-run ./deploy/cloud-run
+COPY tools/benchmark-football.mjs ./tools/benchmark-football.mjs
+RUN node deploy/cloud-run/processor-startup-smoke.mjs
+CMD ["node", "deploy/cloud-run/worker.mjs"]

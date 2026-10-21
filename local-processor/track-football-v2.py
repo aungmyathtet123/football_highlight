@@ -8,15 +8,18 @@ from pathlib import Path
 import cv2
 import numpy as np
 from ultralytics import YOLO
-from football_detection import PersonTracker as MotionPersonTracker, SlicedBallDetector
+from football_detection import PersonTracker as MotionPersonTracker, SlicedBallDetector, closeup_people
+from detector_roles import football_classes, reacquisition_hint, touch_distance, broadcast_scale_transition
+from football_action_phase import action_phase
 from tracking_motion import active_joint_fit_in_crop, camera_ownership_phase, constrained_camera, framing_bounds, vertical_framing_bounds, flight_target, visible_in_crop, observed_payoff_box, possession_handoff, goal_outcome_subject, goal_outcome_target, reconcile_goal_destination
-from tracking_cache import ObservationStore, fingerprint, content_fingerprint, scene_key, atomic_json
-from ball_trajectory import choose_trajectory, trajectory_camera_guidance
+from tracking_cache import ObservationStore, fingerprint, content_fingerprint, scene_key, atomic_json, digest
+from tracking_decode import usable_tracking_checkpoint, normalize_tracking_source
+from tracking_cpu import detector_cpu_threads, bind_detector_cpu_threads
+from ball_trajectory import choose_trajectory, trajectory_camera_guidance, candidate_diameter, maximum_candidate_diameter
 from phase_quality import phase_quality
+from semantic_ball_search import observed_search_region, needs_detail_search
 from scorer_tracking import player_ball_distance, select_scorer_track_id, select_stable_action_track_id
 
-PERSON_CLASS = 0
-FOOTBALL_BALL_CLASS = 0
 MAX_BALL_GAP_SECONDS = 0.45
 GOAL_BALL_GAP_SECONDS = 0.45
 MAX_TRACK_GAP_SECONDS = 0.75
@@ -58,6 +61,8 @@ def parse_args():
     parser.add_argument("--sample-fps", type=float, default=8.0)
     parser.add_argument("--coarse-sample-fps", type=float, default=5.0)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--cpu-workers", type=int, default=2)
+    parser.add_argument("--cpu-threads", type=int, default=int(os.environ.get('TRACKING_CPU_THREADS', '0')))
     parser.add_argument("--image-size", type=int, default=960)
     parser.add_argument("--ball-image-size", type=int, default=1280)
     parser.add_argument("--confidence", type=float, default=0.08)
@@ -114,16 +119,6 @@ def brief_local_time(moment, field, fallback):
     if not isinstance(value, (int, float)) or not math.isfinite(value):
         return fallback
     return clamp(float(value) - float(moment["startTime"]), 0.0, float(moment["endTime"]) - float(moment["startTime"]))
-
-
-def action_phase(elapsed, contact_time, flight_time, payoff_time):
-    if elapsed < contact_time:
-        return "setup"
-    if elapsed < flight_time:
-        return "contact"
-    if elapsed < payoff_time:
-        return "flight"
-    return "payoff"
 
 
 def adaptive_sample_rate(elapsed, duration, contact_time, payoff_time, dense_fps, coarse_fps):
@@ -215,30 +210,96 @@ def detection_bbox(detection):
 
 
 def frame_detections(person_model, ball_model, frame, image_size, ball_image_size, confidence, ball_confidence, predicted=None, device="cpu"):
+    roles, person_classes, joint_ball_classes = football_classes(person_model.names)
+    if not person_classes:
+        raise ValueError('The configured player model has no person/player/goalkeeper/referee class')
+    joint = person_model is ball_model.model and bool(joint_ball_classes)
     person_result = person_model.predict(
-        source=frame, classes=[PERSON_CLASS], conf=confidence, iou=0.5,
-        imgsz=image_size, max_det=90, device=device, verbose=False,
+        source=frame, classes=person_classes + joint_ball_classes,
+        conf=min(confidence, ball_confidence) if joint_ball_classes else confidence, iou=0.5,
+        imgsz=max(image_size, ball_image_size) if joint else image_size, max_det=100, device=device, verbose=False,
     )[0]
-    ball_boxes = ball_model.detect(frame, predicted)
+    result_boxes = [] if person_result.boxes is None else list(zip(
+        person_result.boxes.xyxy.cpu().numpy(), person_result.boxes.conf.cpu().numpy(),
+        person_result.boxes.cls.cpu().numpy()))
+    if joint and ball_model.frames % 6 == 0:
+        seeds = [(box, score) for box, score, label in result_boxes
+                 if int(label) in joint_ball_classes and score >= .20]
+        if seeds:
+            seed, _ = max(seeds, key=lambda item: item[1])
+            bx, by = (seed[0] + seed[2]) / 2, (seed[1] + seed[3]) / 2
+            height, width = frame.shape[:2]
+            nearest = min((math.hypot((box[0] + box[2]) / 2 / width - bx / width,
+                (box[3] / height - by / height) * .85)
+                for box, score, label in result_boxes if int(label) in person_classes
+                and roles[int(label)] != 'referee' and score >= confidence), default=1)
+            if nearest > .055:
+                # A real football seed exists but its small initiating player
+                # was not resolved in the wide shot. Magnify that neighbourhood
+                # for detection, not for display. Never substitute a larger
+                # unrelated defender or manufacture a person box.
+                size = min(384, width, height)
+                left = max(0, min(width - size, int(bx - size / 2)))
+                top = max(0, min(height - size, int(by - size / 2)))
+                detail = person_model.predict(frame[top:top+size, left:left+size],
+                    classes=person_classes + joint_ball_classes, conf=min(confidence, ball_confidence),
+                    imgsz=960, iou=.5, max_det=40, device=device, verbose=False)[0]
+                if detail.boxes is not None:
+                    for box, score, label in zip(detail.boxes.xyxy.cpu().numpy(),
+                            detail.boxes.conf.cpu().numpy(), detail.boxes.cls.cpu().numpy()):
+                        full_box = box + np.asarray([left, top, left, top])
+                        result_boxes.append((full_box, score, label))
+                # Keep one detected box per role/object, not two competing
+                # identities from overlapping full-frame and magnified views.
+                unique = []
+                for box, score, label in sorted(result_boxes, key=lambda item: -item[1]):
+                    duplicate = False
+                    for kept, _, kept_label in unique:
+                        if int(label) != int(kept_label):
+                            continue
+                        overlap = max(0, min(box[2], kept[2]) - max(box[0], kept[0])) * max(0, min(box[3], kept[3]) - max(box[1], kept[1]))
+                        union = (box[2]-box[0])*(box[3]-box[1]) + (kept[2]-kept[0])*(kept[3]-kept[1]) - overlap
+                        if union > 0 and overlap / union > .5:
+                            duplicate = True
+                            break
+                    if not duplicate:
+                        unique.append((box, score, label))
+                result_boxes = unique
+    # The role detector already sees the entire native picture. Preserve its
+    # measured football proposals even when a separate specialist is configured.
+    # Otherwise a high-confidence boot inside the specialist's previous ROI can
+    # suppress its global search while the real ball leaves that neighbourhood.
+    ball_boxes = [(box, score) for box, score, label in result_boxes
+                  if int(label) in joint_ball_classes and score >= ball_confidence]
+    role_ball_boxes=ball_boxes[:]
+    # Weak full-frame proposals must not suppress magnified reacquisition.
+    # Previously even a .03 boot/ball response bypassed the detail detector,
+    # so an actual airborne ball stayed below the association threshold.
+    if not joint or not any(float(score) >= .35 for _, score in ball_boxes):
+        ball_boxes = [*ball_boxes, *ball_model.detect(frame, predicted, whole_result=person_result if joint else None)]
     people, balls = [], []
     height, width = frame.shape[:2]
     hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    person_boxes = [] if person_result.boxes is None else zip(
-        person_result.boxes.xyxy.cpu().numpy(), person_result.boxes.conf.cpu().numpy(),
-    )
-    for box, score in person_boxes:
+    person_boxes = [(box, score, int(label)) for box, score, label in result_boxes
+                    if int(label) in person_classes and score >= confidence]
+    for box, score, label in person_boxes:
         x1, y1, x2, y2 = [float(value) for value in box]
         x1, x2 = clamp(x1 / width, 0.0, 1.0), clamp(x2 / width, 0.0, 1.0)
         y1, y2 = clamp(y1 / height, 0.0, 1.0), clamp(y2 / height, 0.0, 1.0)
         detection = {
             "x1": x1, "y1": y1, "x2": x2, "y2": y2, "cx": (x1 + x2) / 2,
-            "cy": (y1 + y2) / 2, "confidence": float(score),
+            "cy": (y1 + y2) / 2, "confidence": float(score), "role": roles[label],
         }
         detection["pitchSupport"] = pitch_support(
             hsv_frame, detection["cx"], min(0.995, detection["y2"] + 0.008),
             max(0.018, (x2 - x1) * 0.62), max(0.012, (y2 - y1) * 0.08),
         )
-        if y2 - y1 >= 0.032:
+        # A wide broadcast's corner taker can be only 15-30 pixels tall.
+        # The former 3.2%-height cutoff discarded that initiating player while
+        # retaining larger, unrelated defenders. Role-labelled football models
+        # may keep those small humans; pitch/possession checks still apply.
+        minimum_height = 0.012 if roles[label] in {"player", "goalkeeper", "referee"} else 0.032
+        if y2 - y1 >= minimum_height:
             people.append(detection)
     for box, score in ball_boxes:
         x1, y1, x2, y2 = [float(value) for value in box]
@@ -248,6 +309,8 @@ def frame_detections(person_model, ball_model, frame, image_size, ball_image_siz
             "x1": x1, "y1": y1, "x2": x2, "y2": y2, "cx": (x1 + x2) / 2,
             "cy": (y1 + y2) / 2, "confidence": float(score),
         }
+        detection['roleDetector']=any(np.allclose(box,role_box,atol=.001)
+            and abs(float(score)-float(role_score))<.00001 for role_box,role_score in role_ball_boxes)
         detection["pitchSupport"] = pitch_support(
             hsv_frame, detection["cx"], detection["cy"],
             max(0.018, (x2 - x1) * 3.5), max(0.022, (y2 - y1) * 3.5),
@@ -290,7 +353,7 @@ def player_score(person, ball, incumbent_id):
     # The ball must be beside the player's boots in both axes. A weak vertical
     # weight allowed a large foreground defender whose boots were far below the
     # real ball to beat the true carrier in behind-goal replays.
-    proximity = point_distance(foot, ball, 0.85) if ball is not None else abs(person["cx"] - 0.5) + abs(person["cy"] - 0.57) * 0.25
+    proximity = touch_distance(person, ball, 0.85) if ball is not None else abs(person["cx"] - 0.5) + abs(person["cy"] - 0.57) * 0.25
     continuity = 0.20 if person.get("trackId") == incumbent_id else 0.0
     maturity = min(0.035, max(0, person.get("trackAge", 1) - 1) * 0.006)
     off_pitch_penalty = max(0.0, 0.16 - person.get("pitchSupport", 0.0)) * 0.32
@@ -300,7 +363,8 @@ def player_score(person, ball, incumbent_id):
 def choose_locked_player(people, ball, incumbent_id, pending_id, pending_count, view_width, allow_handoff=True):
     if not people:
         return None, incumbent_id, None, 0
-    pitch_people = [person for person in people if person.get("pitchSupport", 0.0) >= 0.08]
+    pitch_people = [person for person in people if person.get("pitchSupport", 0.0) >= 0.08
+                    and person.get("role") != "referee"]
     # Crowd, bench and advertising-area people are never valid ball carriers.
     # Keeping an identity id is useful across a brief detector miss, but an
     # off-pitch box must not steer the crop or become the visible subject.
@@ -310,7 +374,7 @@ def choose_locked_player(people, ball, incumbent_id, pending_id, pending_count, 
     challenger = min(eligible_people, key=lambda person: player_score(person, ball, incumbent_id))
     nearest_to_ball = min(
         eligible_people,
-        key=lambda person: point_distance((person["cx"], person["y2"]), ball, 0.85),
+        key=lambda person: touch_distance(person, ball, 0.85),
     ) if ball is not None else challenger
     joint_margin = min(0.056, view_width * 0.15)
     frameable_people = [
@@ -323,7 +387,7 @@ def choose_locked_player(people, ball, incumbent_id, pending_id, pending_count, 
         # Possession is established at the player's feet, not the center of a
         # large body box. Center-distance favored a defender standing between
         # the camera and the real ball carrier in behind-goal replays.
-        key=lambda person: point_distance((person["cx"], person["y2"]), ball, 0.85),
+        key=lambda person: touch_distance(person, ball, 0.85),
     ) if frameable_people else None
     incumbent = next((person for person in eligible_people if person.get("trackId") == incumbent_id), None)
     if incumbent is None:
@@ -341,8 +405,8 @@ def choose_locked_player(people, ball, incumbent_id, pending_id, pending_count, 
         # player's feet materially closer to the observed ball. This repairs
         # the crop in place without returning to scene discovery.
         if ball is not None and nearest_to_ball["trackId"] != incumbent_id:
-            incumbent_gap = point_distance((incumbent["cx"], incumbent["y2"]), ball, 0.85)
-            nearest_gap = point_distance((nearest_to_ball["cx"], nearest_to_ball["y2"]), ball, 0.85)
+            incumbent_gap = touch_distance(incumbent, ball, 0.85)
+            nearest_gap = touch_distance(nearest_to_ball, ball, 0.85)
             if nearest_gap <= 0.105 and nearest_gap + 0.025 < incumbent_gap:
                 count = pending_count + 1 if nearest_to_ball["trackId"] == pending_id else 1
                 if count >= 2:
@@ -357,15 +421,15 @@ def choose_locked_player(people, ball, incumbent_id, pending_id, pending_count, 
         return incumbent, incumbent_id, receiver["trackId"], count
     incumbent_frameable = incumbent in frameable_people
     if ball is not None and framing_player is not None and not incumbent_frameable:
-        gap = point_distance((framing_player["cx"], framing_player["y2"]), ball, 0.52)
+        gap = touch_distance(framing_player, ball, 0.52)
         count = pending_count + 1 if framing_player["trackId"] == pending_id else 1
         if gap <= 0.12 and count >= 3:
             return framing_player, framing_player["trackId"], None, 0
         return incumbent, incumbent_id, framing_player["trackId"], count
     if challenger["trackId"] == incumbent_id:
         return incumbent, incumbent_id, None, 0
-    incumbent_gap = point_distance((incumbent["cx"], incumbent["y2"]), ball, 0.52) if ball is not None else 0.0
-    nearest_gap = point_distance((nearest_to_ball["cx"], nearest_to_ball["y2"]), ball, 0.52) if ball is not None else 1.0
+    incumbent_gap = touch_distance(incumbent, ball, 0.52) if ball is not None else 0.0
+    nearest_gap = touch_distance(nearest_to_ball, ball, 0.52) if ball is not None else 1.0
     if ball is not None and incumbent_gap > 0.13 and nearest_gap + 0.035 < incumbent_gap:
         return nearest_to_ball, nearest_to_ball["trackId"], None, 0
     if player_score(challenger, ball, incumbent_id) + 0.11 < player_score(incumbent, ball, incumbent_id):
@@ -651,6 +715,12 @@ def build_keyframes(
                 if person.get("trackId") == scorer_track_id), None)
             if scorer is None:
                 continue
+            # The eventual scorer is not necessarily the opening passer.
+            # Back-propagation may correct an ambiguous touch only while the
+            # observed ball is actually close to this player. Never bind a
+            # distant off-ball scorer to a teammate's earlier possession.
+            if record.get("ball_x") is None or player_ball_distance(scorer, record) > .13:
+                continue
             record.update({
                 "player_x": scorer["cx"], "player_y": scorer["cy"],
                 "player_top": scorer["y1"], "player_bottom": scorer["y2"],
@@ -878,7 +948,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
     start, end = float(moment["startTime"]), float(moment["endTime"])
     duration = end - start
     contact_time = brief_local_time(moment, "contactTime", duration * 0.34)
-    flight_time = max(contact_time, brief_local_time(moment, "flightStartTime", duration * 0.38))
+    flight_time = brief_local_time(moment, "flightStartTime", duration * 0.38)
     handoff_time = max(flight_time, brief_local_time(moment, "handoffTime", duration * 0.50))
     payoff_time = max(handoff_time, brief_local_time(moment, "payoffStartTime", duration * 0.68))
     recommended_x = next((item.get("x") for item in moment.get("recommendedCrop", [])
@@ -895,10 +965,17 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
     # Build reusable observations first, then associate the football with future
     # context. No semantic hypothesis can turn a predicted point into a detection.
     observed_frames = []
+    trusted_detection_seed = trusted_detection_time = None
+    previous_detection_histogram = None
     capture.set(cv2.CAP_PROP_POS_FRAMES, max(0, math.ceil(start * source_fps)))
     previous_sample_key, previous_frame = None, max(0, math.ceil(start * source_fps)) - 1
     detector = SlicedBallDetector(ball_model, args.ball_image_size, args.ball_confidence, args.device)
+    guide_anchors=(moment.get('trackingBrief',{}).get('actionGuide') or {}).get('anchors',[])
+    # Supplemental detail belongs to this guide/interval, not the broad raw
+    # cache. A different observation must not reuse another guide's search.
+    args.detail_observations.signature=digest([args.detection_signature,args.observations.signature,1,start,end,guide_anchors])
     detection_hint = None
+    opening_closeup = False
     while True:
         ok, frame = capture.read()
         if not ok:
@@ -908,26 +985,93 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         if timestamp >= end:
             break
         elapsed = timestamp - start
-        sample_rate = adaptive_sample_rate(elapsed, duration, contact_time, payoff_time, args.sample_fps, args.coarse_sample_fps)
+        sample_rate = adaptive_sample_rate(elapsed, duration, min(contact_time, flight_time), payoff_time, args.sample_fps, args.coarse_sample_fps)
         sample_key = (sample_rate, math.floor(timestamp * sample_rate + .000001))
         if sample_key == previous_sample_key:
             continue
         previous_sample_key = sample_key
+        thumb = cv2.cvtColor(cv2.resize(frame, (96, 54), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2HSV)
+        detection_histogram = cv2.calcHist([thumb], [0, 1], None, [24, 16], [0, 180, 0, 256])
+        cv2.normalize(detection_histogram, detection_histogram)
+        cut = (previous_detection_histogram is not None and cv2.compareHist(
+            previous_detection_histogram, detection_histogram, cv2.HISTCMP_BHATTACHARYYA) >= .46)
+        cut = cut or any(previous_frame < boundary <= number for boundary in (args.shot_frames or []))
+        previous_detection_histogram = detection_histogram
+        if cut:
+            detection_hint = None
+            trusted_detection_seed = trusted_detection_time = None
         observations = args.observations.get(number)
         if observations is None:
-            detector.frames = math.floor(timestamp * args.sample_fps + .000001)
+            # Reacquisition starts at the first sampled frame of EACH scene;
+            # absolute match time must not disable the initial detail search.
+            detector.frames = len(observed_frames)
             observations = frame_detections(person_model, detector, frame, args.image_size,
                 args.ball_image_size, args.confidence, args.ball_confidence, detection_hint, args.device)
             args.observations.put(number, observations)
-        cut = any(previous_frame < boundary <= number for boundary in (args.shot_frames or []))
+        # A short foreground insert can precede the live action. The football
+        # role model is trained on wide shots and can miss that entire body.
+        # Inspect only the opening sample and an actually confirmed close-up,
+        # caching even absence. Never scan every wide-shot frame again.
+        if (not observed_frames or opening_closeup) and max(
+                (p['y2']-p['y1'] for p in observations[0]),default=0)<.18:
+            extra=args.opening_observations.get(number)
+            if extra is None:
+                model_path=Path(args.model).parent/'yolo11n.pt'
+                if args.closeup_model is None and model_path.exists():
+                    args.closeup_model=bind_detector_cpu_threads(YOLO(str(model_path)), args.cpu_threads)
+                extra=closeup_people(args.closeup_model,frame,args.device) if args.closeup_model is not None else []
+                hsv=cv2.cvtColor(frame,cv2.COLOR_BGR2HSV)
+                for p in extra:
+                    # A foreground body can extend below the native picture;
+                    # its feet are then not a valid grass sampling location.
+                    # Measure the visible field beside the body instead.
+                    p['pitchSupport']=max(
+                        pitch_support(hsv,p['cx'],min(.995,p['y2']+.008),.025,.02),
+                        pitch_support(hsv,max(.02,p['x1']-.04),p['cy'],.025,.04),
+                        pitch_support(hsv,min(.98,p['x2']+.04),p['cy'],.025,.04))
+                args.opening_observations.put(number,extra)
+            opening_closeup=bool(extra)
+            observations=[[*observations[0],*extra],observations[1]]
+        else:
+            opening_closeup=False
+        region=observed_search_region(guide_anchors, elapsed)
+        if needs_detail_search(observations[1],region):
+            detail=args.detail_observations.get(number)
+            if detail is None:
+                detail=[]
+                hsv=cv2.cvtColor(frame,cv2.COLOR_BGR2HSV)
+                for box,score in detector.search_region(frame,region):
+                    x1,y1,x2,y2=[float(v) for v in box]
+                    x1,x2=x1/media_width,x2/media_width
+                    y1,y2=y1/media_height,y2/media_height
+                    if not (0<=x1<x2<=1 and 0<=y1<y2<=1 and x2-x1<=.13 and y2-y1<=.16):
+                        continue
+                    candidate={'x1':x1,'x2':x2,'y1':y1,'y2':y2,
+                        'cx':(x1+x2)/2,'cy':(y1+y2)/2,'confidence':float(score),
+                        'detailSearch':True}
+                    candidate['pitchSupport']=pitch_support(hsv,candidate['cx'],candidate['cy'],
+                        max(.018,(x2-x1)*3.5),max(.022,(y2-y1)*3.5))
+                    detail.append(candidate)
+                args.detail_observations.put(number,detail) # Cache absence too.
+            observations=[observations[0],[*observations[1],*detail]]
+        if observed_frames and broadcast_scale_transition(observed_frames,observations[0],timestamp):
+            cut=True
         observed_frames.append({"frame": number, "time": timestamp, "people": observations[0], "balls": observations[1], "cut": cut})
         if cut:
             detection_hint = None
+            trusted_detection_seed = trusted_detection_time = None
         trusted_hints = [ball for ball in observations[1]
             if ball.get("confidence", 0) >= .12 and ball.get("pitchSupport", 0) >= .08]
         if trusted_hints:
             hint = max(trusted_hints, key=lambda ball: ball["confidence"] + ball.get("pitchSupport", 0) * .35)
             detection_hint = np.asarray([hint["cx"], hint["cy"]], dtype=float)
+            trusted_detection_seed, trusted_detection_time = detection_hint, timestamp
+        else:
+            search_hint = reacquisition_hint(observations[1], trusted_detection_seed, trusted_detection_time, timestamp)
+            if search_hint is not None:
+                # Search-only ROI: weak proposals never become directBall,
+                # camera targets, player markers or verified geometry here.
+                detection_hint = np.asarray(search_hint, dtype=float)
         previous_frame = number
         if len(observed_frames) % 10 == 1:
             print("TRACK_PROGRESS " + json.dumps({"completed": args.scene_index, "total": args.scene_total,
@@ -935,26 +1079,61 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
                 "cacheHits": args.observations.hits, "newFrames": args.observations.misses}), flush=True)
 
     tracking_brief = moment.get("trackingBrief") or {}
+    guide_focus=tracking_brief.get("initialBallFocusX")
+    if isinstance(guide_focus,(int,float)) and math.isfinite(guide_focus) and 0<=guide_focus<=1:
+        # Directly observed semantic opening region is only an association
+        # prior. The local detector still owns every direct ball coordinate.
+        fallback_x=float(guide_focus)
     goal_focus_value = tracking_brief.get("goalFocusX")
     goal_focus_x = clamp(float(goal_focus_value), 0.0, 1.0) if isinstance(goal_focus_value, (int, float)) else None
-    payoff_target = (tracking_brief.get("payoffEvidence") or {}).get("targetBox")
+    payoff_target = (tracking_brief.get("payoffEvidence") or tracking_brief.get("shotDestination") or {}).get("targetBox")
     goal_focus_y = ((float(payoff_target[1]) + float(payoff_target[3])) / 2
         if isinstance(payoff_target, list) and len(payoff_target) == 4
         and all(isinstance(value, (int, float)) for value in payoff_target) else None)
     # Constrain candidates before association so alternatives remain available.
     for observation in observed_frames:
+        anchors=(tracking_brief.get("actionGuide") or {}).get("anchors",[])
+        ball_anchors=[a for a in anchors if isinstance(a.get("ball"),list)
+            and len(a["ball"])==4 and isinstance(a.get("time"),(int,float))]
+        visible=[a for a in ball_anchors if abs(observation["time"]-start-a["time"])<=.2]
+        if visible:
+            anchor=min(visible,key=lambda a:abs(observation["time"]-start-a["time"]))
+            box=anchor["ball"];dt=abs(observation["time"]-start-anchor["time"])
+            observation["semantic_ball_region"]=[box[1]/1000,box[0]/1000,box[3]/1000,box[2]/1000,.025+dt*.35]
+            observation['semantic_anchor_observed']=True
+        else:
+            # Interpolated semantic context is a SEARCH prior, never an
+            # observation or camera position. Dense native detections remain
+            # mandatory, and source cuts prohibit joining two guide regions.
+            elapsed=observation["time"]-start
+            before=[a for a in ball_anchors if a["time"]<elapsed]
+            after=[a for a in ball_anchors if a["time"]>elapsed]
+            if before and after:
+                a,b=before[-1],after[0]
+                cut_between=any(o["cut"] and start+a["time"]<o["time"]<=start+b["time"]
+                    for o in observed_frames)
+                if not cut_between and b["time"]-a["time"]<=4.0:
+                    alpha=(elapsed-a["time"])/(b["time"]-a["time"])
+                    box=[x*(1-alpha)+y*alpha for x,y in zip(a["ball"],b["ball"])]
+                    radius=min(.10,.025+min(elapsed-a["time"],b["time"]-elapsed)*.12)
+                    observation["semantic_ball_region"]=[box[1]/1000,box[0]/1000,box[3]/1000,box[2]/1000,radius]
+                    observation['semantic_anchor_observed']=False
         observation["payoff_box"] = observed_payoff_box(moment, observation["time"])
-        observation["airborne"] = (moment.get("eventType") in {"goal", "save", "shot_on_target", "big_chance"}
-            and flight_time <= observation["time"] - start <= payoff_time)
+        observation["airborne"] = (moment.get("eventType") in {"goal", "save", "shot_on_target", "shot_off_target", "big_chance"}
+            and flight_time <= observation["time"] - start <= payoff_time+.5)
         observation["goal_focus_x"] = goal_focus_x
         observation["goal_payoff"] = bool(moment.get("eventType") == "goal" and observation["time"] - start >= payoff_time)
     sampled_frame_numbers = {observation["frame"] for observation in observed_frames}
+    observed_by_frame = {observation['frame']:observation for observation in observed_frames}
+    observed_cut_frames = {observation["frame"] for observation in observed_frames if observation["cut"]}
     ball_path = choose_trajectory(
         observed_frames, view_width, args.output_width, initial_focus_x=fallback_x,
         attack_direction=attack_direction,
         contact_time=start + contact_time,
         goal_focus_x=goal_focus_x,
         goal_focus_y=goal_focus_y,
+        route_end_time=start+payoff_time+.25 if moment.get('eventType') not in {'goal','disallowed_goal'} else None,
+        source_aspect=media_width/media_height,
     )
     if moment.get("eventType") in {"goal", "disallowed_goal"} and payoff_target is not None:
         corrected_x, corrected_box, correction_reason = reconcile_goal_destination(
@@ -1011,8 +1190,11 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         histogram = cv2.calcHist([thumbnail], [0, 1], None, [24, 16], [0, 180, 0, 256])
         cv2.normalize(histogram, histogram)
         scene_cut = previous_histogram is not None and cv2.compareHist(previous_histogram, histogram, cv2.HISTCMP_BHATTACHARYYA) >= 0.46
+        scene_cut = scene_cut or frame_number in observed_cut_frames
         if getattr(args, "shot_frames", None) is not None:
-            scene_cut = bool(records) and any(last_sample_frame < cut <= frame_number for cut in args.shot_frames)
+            # A global shot index may miss a local cut. It supplements the
+            # pixel evidence; it must not overwrite an observed discontinuity.
+            scene_cut = scene_cut or (bool(records) and any(last_sample_frame < cut <= frame_number for cut in args.shot_frames))
         last_sample_frame = frame_number
         previous_histogram = histogram
         if scene_cut:
@@ -1024,7 +1206,8 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
             origin_id = origin_candidate_id = None
             origin_candidate_hits = 0
             tracker.reset()
-        observations = args.observations.get(frame_number)
+        observed=observed_by_frame.get(frame_number)
+        observations = [observed['people'],observed['balls']] if observed is not None else args.observations.get(frame_number)
         if observations is None:
             # Detection is independent of the edit plan and previous guessed ball.
             # A source-global cadence makes overlapping scene requests reusable.
@@ -1052,7 +1235,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         # a missed airborne ball toward the edge of the pitch.
         predicted = gap_guidance.get(frame_number)
         for candidate in balls:
-            candidate["output_diameter"] = max(candidate["x2"] - candidate["x1"], candidate["y2"] - candidate["y1"]) / view_width * args.output_width
+            candidate["output_diameter"] = candidate_diameter(candidate,view_width,args.output_width,media_width/media_height)
             candidate["nearest_player_distance"] = min(
                 (point_distance((person["cx"], person["y2"]), (candidate["cx"], candidate["cy"]), 0.52) for person in people),
                 default=1.0,
@@ -1062,13 +1245,15 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
                 (point_distance((person["cx"], person["y2"]), (candidate["cx"], candidate["cy"]), 0.52) for person in on_pitch_people),
                 default=1.0,
             )
-        plausible_balls = [candidate for candidate in balls if MIN_VISIBLE_BALL_DIAMETER <= candidate["output_diameter"] <= MAX_VISIBLE_BALL_DIAMETER]
+        plausible_balls = [candidate for candidate in balls if MIN_VISIBLE_BALL_DIAMETER <= candidate["output_diameter"]
+            <= maximum_candidate_diameter(candidate,people,view_width,args.output_width,media_width/media_height)]
         payoff_evidence = moment.get("trackingBrief", {}).get("payoffEvidence") or {}
+        semantic_outcome_region = payoff_evidence.get('provider') == 'semantic_region_guide_not_crop_approval'
         planned_payoff = observed_payoff_box(moment, payoff_evidence.get("startTime", -1))
         verified_flight = bool(goal_mode and planned_payoff is not None and timestamp - start >= flight_time
                                and timestamp < payoff_evidence["startTime"])
         payoff_box = observed_payoff_box(moment, timestamp)
-        if payoff_box is not None:
+        if payoff_box is not None and not semantic_outcome_region:
             def in_payoff(x, y):
                 return payoff_box[0] <= x <= payoff_box[2] and payoff_box[1] <= y <= payoff_box[3]
             plausible_balls = [candidate for candidate in plausible_balls if in_payoff(candidate["cx"], candidate["cy"])]
@@ -1119,7 +1304,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         incumbent = next((person for person in people
             if person.get("trackId") == subject_id and person.get("pitchSupport", 0.0) >= 0.08), None)
         departed = bool(direct_ball and incumbent is not None and last_ball is not None
-                        and point_distance((incumbent["cx"], incumbent["y2"]), last_ball, 0.52) > 0.13)
+                        and touch_distance(incumbent, last_ball, 0.52) > 0.13)
         departed_samples = departed_samples + 1 if departed else 0
         # Local observed flight overrides a late semantic timestamp. Two samples
         # prevent one noisy detection from transferring player ownership.
@@ -1145,7 +1330,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
                 origin_candidate_id = subject_id
                 origin_candidate_hits = 0
         if direct_ball and active is not None and elapsed <= contact_time + 0.75:
-            origin_gap = point_distance((active["cx"], active["y2"]), last_ball, 0.52)
+            origin_gap = touch_distance(active, last_ball, 0.52)
             if origin_gap <= MAX_POSSESSION_DISTANCE:
                 if active["trackId"] == origin_candidate_id:
                     origin_candidate_hits += 1
@@ -1163,7 +1348,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         if subject_id is not None:
             previous_subject_id = subject_id
         if active is not None:
-            proximity = point_distance((active["cx"], active["y2"]), last_ball) if last_ball is not None else 0.5
+            proximity = touch_distance(active, last_ball) if last_ball is not None else 0.5
             proximity_score = clamp(1.0 - proximity / 0.20, 0.0, 1.0)
             maturity = clamp(active.get("trackAge", 1) / 5.0, 0.0, 1.0)
             ball_quality = clamp(ball_confidence / 0.45, 0.0, 1.0) if direct_ball else clamp(ball_confidence / 0.20, 0.0, 0.55)
@@ -1194,12 +1379,24 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         outcome_subject = goal_outcome_subject(
             detected_people, outcome_box, goal_focus_x, last_ball
         ) if goal_mode and phase in {"flight", "payoff"} else None
+        observed_keeper_x = None
+        if goal_mode and phase in {"flight", "payoff"} and last_ball is not None and outcome_subject is None:
+            # A role detector supplies real keeper evidence even when no LLM
+            # goal rectangle is trusted. This is context, NOT a guessed net or
+            # permission to move away from the observed ball trajectory.
+            keepers = [person for person in detected_people
+                if person.get("role") == "goalkeeper" and person.get("confidence", 0) >= .35
+                and point_distance((person["cx"], person["y2"]), last_ball, .52) <= .18]
+            if keepers:
+                outcome_subject = min(keepers, key=lambda person:
+                    point_distance((person["cx"], person["y2"]), last_ball, .52))
+                observed_keeper_x = outcome_subject["cx"]
         continuity_x = records[-1]["camera_target_x"] if records and not scene_cut else fallback_x
         # A provisional nearest-player detection is useful for association but
         # must not steer the virtual camera.  Only a sustained track identity
         # may widen the crop away from the verified ball path; otherwise one
         # foreground defender can pull alternating samples left and right.
-        camera_ball_distance = (point_distance((active["cx"], active["y2"]), last_ball, 0.85)
+        camera_ball_distance = (touch_distance(active, last_ball, 0.85)
                                 if active is not None and last_ball is not None else 1.0)
         camera_active = active if (
             active is not None and subject_id is not None and last_ball is not None
@@ -1271,7 +1468,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
             target_x = (planned_payoff[0] + planned_payoff[2]) / 2
         possessing = bool(direct_ball and active is not None and proximity <= MAX_POSSESSION_DISTANCE)
         tracked_ball = last_ball is not None and ball_confidence >= 0.04
-        active_ball_distance = (point_distance((active["cx"], active["y2"]), last_ball, 0.85)
+        active_ball_distance = (touch_distance(active, last_ball, 0.85)
                                 if active is not None and last_ball is not None else 1.0)
         active_ball_linked = bool(active is not None and active.get("pitchSupport", 0.0) >= 0.08
                                   and active_ball_distance <= .16)
@@ -1286,10 +1483,13 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
         # contact timestamp. This handles multi-pass buildups: linked carrier,
         # ball in flight, then the verified receiver, without chasing a stale
         # player identity or leading into the next action early.
-        camera_owner = "carrier" if joint_visible else (
+        camera_owner = "carrier" if joint_visible and (phase in {"setup", "contact"} or possessing) else (
             "hold" if phase in {"setup", "contact"}
             else ("ball" if tracked_ball else ("payoff" if phase == "payoff" else "hold"))
         )
+        closeup_subject=max((p for p in detected_people if p.get('confidence',0)>=.6
+            and p.get('pitchSupport',0)>=.08 and p['y2']-p['y1']>=.55),
+            key=lambda p:(p['x2']-p['x1'])*(p['y2']-p['y1']),default=None)
         records.append({
             "players": people,
             "time": timestamp - start, "camera_target_x": target_x, "camera_target_y": target_y, "action_spread": spread,
@@ -1301,6 +1501,13 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
             "direct_ball": direct_ball, "ball_guidance": ball_guidance, "joint_visible": joint_visible, "joint_fit": joint_fit, "joint_span": joint_span,
             "possession": possessing, "ball_pixel_diameter": ball_pixel_diameter,
             "subject_confidence": subject_confidence, "scene_cut": scene_cut, "ball_confidence": ball_confidence,
+            # Framing an actually observed foreground body does not assert
+            # possession, identity, a hidden ball or a player highlight.
+            "observed_closeup_box":[closeup_subject[k] for k in ('x1','y1','x2','y2')]
+                if closeup_subject is not None and not direct_ball and phase in {'setup','contact'} else None,
+            "allow_outcome_lookahead":bool((verified_flight or semantic_outcome_region and payoff_box is not None) and tracking_brief.get('actionGuide')
+                and last_ball is None),
+            "semantic_outcome_region":semantic_outcome_region,
             "subject_recently_ball_linked": bool(
                 active_ball_linked and last_direct_ball_time is not None
                 and timestamp - last_direct_ball_time <= .65
@@ -1308,7 +1515,7 @@ def track_moment(person_model, ball_model, capture, moment, media_width, media_h
             "pitch_ball": bool(direct_ball and detected.get("pitchSupport", 0.0) >= 0.08) if detected is not None else False,
             "origin_track_id": origin_id, "action_phase": phase, "camera_owner": camera_owner,
             "payoff_box": payoff_box,
-            "goal_focus_x": goal_focus_x,
+            "goal_focus_x": goal_focus_x if goal_focus_x is not None else observed_keeper_x,
             "outcome_subject": outcome_subject,
         })
     scene_zoom = adaptive_scene_zoom(
@@ -1467,22 +1674,27 @@ def main():
         raise RuntimeError("Could not determine source dimensions.")
     import torch
     args.device = ("0" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
-    # Two scene workers run concurrently on CPU. Giving each detector every
-    # logical core oversubscribes this machine and makes both workers slower.
-    torch.set_num_threads(max(1, min(3, (os.cpu_count() or 4) // 4)))
+    args.cpu_threads = detector_cpu_threads(workers=args.cpu_workers, override=args.cpu_threads)
+    torch.set_num_threads(args.cpu_threads)
     cv2.setNumThreads(1)
     output_path = Path(args.output)
     cache_dir = Path(args.cache_dir) if args.cache_dir else output_path.parent / "cache"
-    detection_signature = {"version": 5, "source": content_fingerprint(args.source),
+    detection_signature = {"version": 12, "source": content_fingerprint(args.source),
         "personModel": fingerprint(args.model), "ballModel": fingerprint(args.ball_model),
         "imageSize": args.image_size, "ballImageSize": args.ball_image_size,
         "confidence": args.confidence, "ballConfidence": args.ball_confidence,
         "sampleFps": args.sample_fps, "coarseSampleFps": args.coarse_sample_fps, "device": args.device}
-    signature = {"detection": detection_signature, "version": 80, "associationVersion": 27, "tacticalSubjects": 4, "compositionVersion": 29, "tracker": args.tracker,
+    signature = {"detection": detection_signature, "version": 109, "associationVersion": 50, "tacticalSubjects": 4, "compositionVersion": 42, "tracker": args.tracker,
         "cameraMotion": args.camera_motion, "zoom": args.zoom,
         "output": [args.output_width, args.output_height, args.window_top, args.window_height],
         "shots": json.loads(Path(args.shots).read_text(encoding="utf-8"))["shots"] if args.shots else None}
     args.observations = ObservationStore(cache_dir / "observations.sqlite", detection_signature)
+    args.detection_signature=detection_signature
+    args.detail_observations=ObservationStore(cache_dir / 'guided-observations.sqlite', {})
+    closeup_path=Path(args.model).parent/'yolo11n.pt'
+    args.opening_observations=ObservationStore(cache_dir/'opening-observations.sqlite',
+        [detection_signature,2,fingerprint(closeup_path) if closeup_path.exists() else None])
+    args.closeup_model=None
     args.shot_frames = None
     if args.shots:
         args.shot_frames = [shot["startFrame"] for shot in json.loads(Path(args.shots).read_text(encoding="utf-8"))["shots"]]
@@ -1498,16 +1710,39 @@ def main():
                 result = json.loads(checkpoint.read_text(encoding="utf-8"))
             except (ValueError, OSError):
                 pass
+        if result is not None and not usable_tracking_checkpoint(result):
+            result = None
         reused = result is not None
         if result is None:
             if person_model is None:
-                person_model, ball_model = YOLO(args.model), YOLO(args.ball_model)
+                person_model = bind_detector_cpu_threads(YOLO(args.model), args.cpu_threads)
+                ball_model = person_model if Path(args.model).resolve() == Path(args.ball_model).resolve() else bind_detector_cpu_threads(YOLO(args.ball_model), args.cpu_threads)
             result = track_moment(person_model, ball_model, capture, moment, media_width, media_height, source_fps, args)
+            if not usable_tracking_checkpoint(result):
+                print("TRACK_PROGRESS " + json.dumps({"completed": index, "total": len(moments),
+                    "sceneId": moment["id"], "pass": "decode_repair", "newFrames": 0}), flush=True)
+                # Failed OpenCV seeking must not become a permanent empty cache.
+                # Decode with FFmpeg to a disposable CFR source, retaining the
+                # original source-second timeline and dimensions.
+                proxy = normalize_tracking_source(args.source, source_fps, output_path.parent)
+                repaired_capture = cv2.VideoCapture(str(proxy))
+                try:
+                    if not repaired_capture.isOpened():
+                        raise RuntimeError("Tracking decode repair could not open the FFmpeg proxy")
+                    args.observations.signature += "-decode-repair"
+                    result = track_moment(person_model, ball_model, repaired_capture, moment,
+                        media_width, media_height, source_fps, args)
+                finally:
+                    repaired_capture.release()
+                    proxy.unlink(missing_ok=True)
+                if not usable_tracking_checkpoint(result):
+                    raise RuntimeError(f"No source frames decoded for scene {moment['id']} after FFmpeg repair; no empty checkpoint saved")
             atomic_json(checkpoint, result)
         tracked[moment["id"]] = result
         print("TRACK_PROGRESS " + json.dumps({"completed": index + 1, "total": len(moments),
               "sceneId": moment["id"], "reused": reused, "cacheHits": args.observations.hits,
-              "newFrames": args.observations.misses}), flush=True)
+              "newFrames": args.observations.misses,
+              "checkpointPath": str(checkpoint.resolve())}), flush=True)
         samples = result["sampledFrames"]
         totals["samples"] += samples
         totals["ball"] += result["ballDetectionCoverage"] * samples
@@ -1519,6 +1754,8 @@ def main():
         print(f"tracked {index + 1}/{len(moments)} moments", flush=True)
     capture.release()
     args.observations.close()
+    args.detail_observations.close()
+    args.opening_observations.close()
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     marker_paths = {

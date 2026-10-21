@@ -42,7 +42,8 @@ export function normalizeCaptionHeadline(value, role = "analysis") {
   return fallback[String(role || "analysis")] || "THE KEY MOMENT";
 }
 export function shortReactionCandidates(candidates, maximumSeconds = 3) {
-  return candidates.map((moment) => moment.eventType === "celebration" || moment.storyPhase === "reaction"
+  return candidates.map((moment) => moment.selectionLocked === true && moment.fixedSceneQueueVersion === 1
+    ? moment : moment.eventType === "celebration" || moment.storyPhase === "reaction"
     ? { ...moment, endTime: Math.min(moment.endTime, moment.startTime + maximumSeconds), playbackRate: 1 }
     : moment);
 }
